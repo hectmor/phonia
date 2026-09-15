@@ -1,0 +1,336 @@
+//! TIDAL playback info + DASH/JSON manifest download.
+//!
+//! `tidlers`'s own `TidalClient::get_track_postpaywall_playback_info` is convenient, but its
+//! `TrackPlaybackInfoResponse` doesn't deserialize `bitDepth`/`sampleRate` (TIDAL's real response
+//! includes them, `tidlers` just doesn't have fields for them) and doesn't expose the decoded
+//! raw manifest XML/JSON text (only a partially-parsed `DashManifest` that has no segment count
+//! and doesn't resolve `<BaseURL>`; see `dash.rs`'s module doc). All of the request-building
+//! blocks we'd need to reuse (`TidalClient::request`, `ApiRequestBuilder`, `TidalRequest`) are
+//! `pub(crate)` inside `tidlers`, so rather than fork its internals we make the same HTTP call
+//! ourselves here, using only the public parts of an authenticated `TidalClient` (its access
+//! token, country code, audio quality and playback mode).
+
+use crate::dash::{self, DashSegments};
+use anyhow::{Context, Result, anyhow, bail};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use serde::Deserialize;
+use tidlers::TidalClient;
+use tidlers::client::models::playback::AudioQuality;
+
+/// The exact User-Agent `tidlers` itself sends (an Android WebView UA string TIDAL's backend
+/// expects); see `tidlers-0.5.0/src/requests.rs:118` (`RequestClient::new`). We make our own raw
+/// HTTP calls here (see the module doc for why), so we have to set this ourselves too.
+const USER_AGENT: &str = "Mozilla/5.0 (Linux; Android 12; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/91.0.4472.114 Safari/537.36";
+
+/// Builds the single `reqwest::Client` that should be reused for the playbackinfo request and
+/// all segment downloads (connection pooling, and a consistent User-Agent).
+pub fn build_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .build()
+        .context("construyendo el cliente HTTP")
+}
+
+/// Maps our `AudioQuality` to the exact string TIDAL's API expects for the `audioquality` query
+/// parameter.
+///
+/// Deliberately does **not** use `AudioQuality`'s `Display` impl: on `tidlers` 0.5.0 that prints
+/// `"HI_RES"` for `AudioQuality::HiRes`, which is TIDAL's legacy MQA tier, not true HiRes FLAC.
+/// The value the API actually wants for lossless HiRes streaming is `"HI_RES_LOSSLESS"`.
+fn api_quality(q: &AudioQuality) -> &'static str {
+    match q {
+        AudioQuality::Low => "LOW",
+        AudioQuality::High => "HIGH",
+        AudioQuality::Lossless => "LOSSLESS",
+        AudioQuality::HiRes => "HI_RES_LOSSLESS",
+    }
+}
+
+/// Where the encoded audio actually lives, after decoding TIDAL's `manifest` field.
+#[derive(Debug, Clone)]
+pub enum ManifestKind {
+    /// A single, directly downloadable URL (used for LOW/HIGH/LOSSLESS).
+    Json { url: String, codecs: String },
+    /// A DASH (fragmented MP4) manifest (used for HiRes).
+    Dash(DashSegments),
+}
+
+/// Everything phase 0 needs to decode and play one track.
+#[derive(Debug, Clone)]
+pub struct PlaybackInfo {
+    pub track_id: u64,
+    pub audio_mode: String,
+    pub audio_quality: String,
+    pub manifest_mime_type: String,
+    pub bit_depth: Option<u32>,
+    pub sample_rate: Option<u32>,
+    pub manifest: ManifestKind,
+}
+
+impl PlaybackInfo {
+    pub fn codecs(&self) -> Option<&str> {
+        match &self.manifest {
+            ManifestKind::Json { codecs, .. } => Some(codecs.as_str()),
+            ManifestKind::Dash(dash) => dash.codecs.as_deref(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct RawPlaybackInfo {
+    #[serde(rename = "trackId")]
+    track_id: u64,
+    #[serde(rename = "audioMode")]
+    audio_mode: String,
+    #[serde(rename = "audioQuality")]
+    audio_quality: String,
+    #[serde(rename = "manifestMimeType")]
+    manifest_mime_type: String,
+    #[serde(rename = "bitDepth", default)]
+    bit_depth: Option<u32>,
+    #[serde(rename = "sampleRate", default)]
+    sample_rate: Option<u32>,
+    manifest: String,
+}
+
+#[derive(Deserialize)]
+struct RawJsonManifest {
+    #[serde(rename = "mimeType")]
+    #[allow(dead_code)]
+    mime_type: String,
+    codecs: String,
+    urls: Vec<String>,
+}
+
+/// Fetches and decodes the `playbackinfopostpaywall` response for `track_id` at `quality`.
+///
+/// `http` should be a client built with [`build_http_client`] and reused across this call and
+/// the subsequent segment downloads.
+pub async fn fetch_playback_info(
+    http: &reqwest::Client,
+    client: &TidalClient,
+    track_id: &str,
+    quality: AudioQuality,
+) -> Result<PlaybackInfo> {
+    let access_token = client
+        .session
+        .auth
+        .access_token
+        .clone()
+        .ok_or_else(|| anyhow!("no hay token de acceso; ejecuta `phonia login` primero"))?;
+    let country_code = client
+        .user_info
+        .as_ref()
+        .map(|u| u.country_code.clone())
+        .ok_or_else(|| anyhow!("no hay información de usuario cargada; ejecuta `phonia login` primero"))?;
+
+    let url = format!(
+        "{}/tracks/{}/playbackinfopostpaywall",
+        tidlers::urls::API_V1_LOCATION,
+        track_id
+    );
+
+    let response = http
+        .get(&url)
+        .bearer_auth(access_token)
+        .query(&[
+            ("countryCode", country_code.as_str()),
+            ("audioquality", api_quality(&quality)),
+            ("playbackmode", "STREAM"),
+            ("assetpresentation", "FULL"),
+        ])
+        .send()
+        .await
+        .context("solicitando playbackinfopostpaywall a TIDAL")?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .context("leyendo la respuesta de playbackinfopostpaywall")?;
+    if !status.is_success() {
+        bail!("TIDAL respondió {status} a playbackinfopostpaywall:\n{body}");
+    }
+
+    let raw: RawPlaybackInfo = serde_json::from_str(&body)
+        .with_context(|| format!("parseando la respuesta JSON de playbackinfopostpaywall:\n{body}"))?;
+
+    if matches!(quality, AudioQuality::HiRes) && raw.audio_quality != "HI_RES_LOSSLESS" {
+        eprintln!(
+            "Aviso: TIDAL degradó la calidad a {}: la pista no existe en HiRes o el token no tiene \
+             ese permiso. Si usaste un login viejo, repite `phonia login`.",
+            raw.audio_quality
+        );
+    }
+
+    let manifest_bytes = BASE64
+        .decode(&raw.manifest)
+        .context("decodificando el campo manifest (base64)")?;
+    let manifest_text =
+        String::from_utf8(manifest_bytes).context("el manifiesto decodificado no es UTF-8")?;
+
+    let manifest = if let Ok(json_manifest) = serde_json::from_str::<RawJsonManifest>(&manifest_text) {
+        let url = json_manifest
+            .urls
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("el manifiesto JSON no contiene ninguna URL"))?;
+        ManifestKind::Json { url, codecs: json_manifest.codecs }
+    } else {
+        let dash = dash::parse_mpd(&manifest_text).context("parseando el manifiesto DASH (MPD)")?;
+        ManifestKind::Dash(dash)
+    };
+
+    Ok(PlaybackInfo {
+        track_id: raw.track_id,
+        audio_mode: raw.audio_mode,
+        audio_quality: raw.audio_quality,
+        manifest_mime_type: raw.manifest_mime_type,
+        bit_depth: raw.bit_depth,
+        sample_rate: raw.sample_rate,
+        manifest,
+    })
+}
+
+pub fn print_playback_info(info: &PlaybackInfo) {
+    println!("Track ID:        {}", info.track_id);
+    println!("Modo de audio:   {}", info.audio_mode);
+    println!("Calidad:         {}", info.audio_quality);
+    println!(
+        "Bit depth:       {}",
+        info.bit_depth.map(|b| b.to_string()).unwrap_or_else(|| "?".to_string())
+    );
+    println!(
+        "Sample rate:     {}",
+        info.sample_rate.map(|r| format!("{r} Hz")).unwrap_or_else(|| "?".to_string())
+    );
+    println!("Manifest MIME:   {}", info.manifest_mime_type);
+    println!("Codecs:          {}", info.codecs().unwrap_or("?"));
+}
+
+/// Downloads a single non-DASH URL fully (LOW/HIGH/LOSSLESS path) into memory.
+pub async fn download_json_manifest(http: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
+    let response = http
+        .get(url)
+        .send()
+        .await
+        .context("descargando el audio (manifiesto JSON)")?;
+    let status = response.status();
+    if !status.is_success() {
+        bail!("HTTP {status} descargando {url}");
+    }
+    let bytes = response.bytes().await.context("leyendo el cuerpo de la respuesta")?;
+    Ok(bytes.to_vec())
+}
+
+const MAX_SEGMENT_RETRIES: u32 = 3;
+
+async fn download_segment(http: &reqwest::Client, url: &str) -> Result<Option<Vec<u8>>> {
+    let mut last_err: Option<anyhow::Error> = None;
+
+    for attempt in 1..=MAX_SEGMENT_RETRIES {
+        match http.get(url).send().await {
+            Ok(response) => {
+                let status = response.status();
+                if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::FORBIDDEN {
+                    // Treated by the caller as "no more segments", not a retryable failure.
+                    return Ok(None);
+                }
+                if !status.is_success() {
+                    last_err = Some(anyhow!("HTTP {status} descargando segmento"));
+                    continue;
+                }
+                match response.bytes().await {
+                    Ok(bytes) => return Ok(Some(bytes.to_vec())),
+                    Err(e) => last_err = Some(anyhow::Error::new(e).context("leyendo bytes del segmento")),
+                }
+            }
+            Err(e) => last_err = Some(anyhow::Error::new(e).context(format!("intento {attempt}/{MAX_SEGMENT_RETRIES}"))),
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| anyhow!("fallo desconocido descargando segmento")))
+}
+
+/// Downloads the init segment followed by all media segments of `dash`, concatenated into one
+/// buffer (phase 1 will stream this instead of buffering the whole track). Prints compact
+/// one-line progress. If the manifest didn't give us a segment count, downloads sequentially
+/// until the first 404/403 (requiring at least one successful media segment first).
+pub async fn download_dash(http: &reqwest::Client, dash: &DashSegments) -> Result<Vec<u8>> {
+    let mut combined = Vec::new();
+
+    print!("Descargando segmento de inicialización...");
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+    let init = download_segment(http, &dash.init_url)
+        .await?
+        .ok_or_else(|| anyhow!("el segmento de inicialización no existe (HTTP 404/403): {}", dash.init_url))?;
+    combined.extend_from_slice(&init);
+    println!(" ok ({} bytes)", init.len());
+
+    // When the manifest gave us a segment count, iterate exactly that range; otherwise fall
+    // back to counting up from `start_number` until a segment 404s/403s (see below).
+    let known_range = dash.segment_range();
+    let mut segment_number = known_range.as_ref().map_or(dash.start_number, |r| *r.start());
+    let mut downloaded = 0u32;
+
+    loop {
+        if let Some(range) = &known_range
+            && segment_number > *range.end()
+        {
+            break;
+        }
+
+        let url = dash.segment_url(segment_number);
+        match download_segment(http, &url).await? {
+            Some(bytes) => {
+                combined.extend_from_slice(&bytes);
+                downloaded += 1;
+                print!(
+                    "\rDescargando segmentos: {}{}",
+                    downloaded,
+                    dash.segment_count.map(|c| format!("/{c}")).unwrap_or_default()
+                );
+                std::io::Write::flush(&mut std::io::stdout()).ok();
+            }
+            None => {
+                if let Some(count) = dash.segment_count {
+                    bail!(
+                        "el segmento {segment_number} no existe (HTTP 404/403) pero el manifiesto esperaba {count} segmentos"
+                    );
+                }
+                if downloaded == 0 {
+                    bail!("no se pudo descargar ningún segmento de medios (el primero ya dio 404/403): {url}");
+                }
+                // Fallback path (segment count unknown): a 404/403 after at least one
+                // successful segment means we've reached the end of the track.
+                break;
+            }
+        }
+
+        segment_number += 1;
+    }
+
+    println!();
+    Ok(combined)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_quality_maps_hires_to_hi_res_lossless_not_display() {
+        // Regression test: `AudioQuality::HiRes`'s `Display` impl on tidlers 0.5.0 prints
+        // "HI_RES" (the legacy MQA tier), which is NOT what the API wants for true HiRes FLAC.
+        assert_eq!(api_quality(&AudioQuality::HiRes), "HI_RES_LOSSLESS");
+        assert_ne!(api_quality(&AudioQuality::HiRes), AudioQuality::HiRes.to_string());
+    }
+
+    #[test]
+    fn api_quality_maps_the_other_tiers_directly() {
+        assert_eq!(api_quality(&AudioQuality::Low), "LOW");
+        assert_eq!(api_quality(&AudioQuality::High), "HIGH");
+        assert_eq!(api_quality(&AudioQuality::Lossless), "LOSSLESS");
+    }
+}
