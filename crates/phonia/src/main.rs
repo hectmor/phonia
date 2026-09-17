@@ -1,12 +1,7 @@
-mod auth;
-mod dash;
-mod decode;
-mod output;
-mod tidal;
-
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use output::alsa::AlsaSink;
+use phonia_core::output::alsa::{self, AlsaSink};
+use phonia_core::{auth, decode, tidal};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -75,7 +70,7 @@ async fn main() -> Result<()> {
             run_play(&track_id, &device, quality.into(), save_mp4.as_deref()).await
         }
         Command::PlayFile { path, device } => run_play_file(&path, &device).await,
-        Command::ProbeDevice { device } => probe_device(&device),
+        Command::ProbeDevice { device } => alsa::probe_device(&device),
     };
 
     if let Err(e) = &result {
@@ -158,33 +153,6 @@ async fn play_source(
     })
     .await
     .context("la tarea de decodificación/reproducción entró en pánico")??;
-
-    Ok(())
-}
-
-/// Lists which sample formats and rates `device` accepts, using `HwParams::test_format` /
-/// `test_rate`. This opens the device in playback mode (without ever writing to it) purely to
-/// query its capabilities -- meant to be run by the user on their own hardware.
-fn probe_device(device: &str) -> Result<()> {
-    use alsa::Direction;
-    use alsa::pcm::{Format, HwParams, PCM};
-
-    let c_device = std::ffi::CString::new(device).context("nombre de dispositivo ALSA inválido")?;
-    let pcm = PCM::open(&c_device, Direction::Playback, false)
-        .with_context(|| format!("abriendo el dispositivo {device}"))?;
-    let hwp = HwParams::any(&pcm).context("no se pudieron obtener los hw_params por defecto")?;
-
-    println!("Formatos soportados en {device}:");
-    for format in [Format::S16LE, Format::S243LE, Format::S24LE, Format::S32LE] {
-        let ok = hwp.test_format(format).is_ok();
-        println!("  {:<10} {}", format.to_string(), if ok { "sí" } else { "no" });
-    }
-
-    println!("\nFrecuencias soportadas en {device}:");
-    for rate in [44_100u32, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000] {
-        let ok = hwp.test_rate(rate).is_ok();
-        println!("  {:>7} Hz  {}", rate, if ok { "sí" } else { "no" });
-    }
 
     Ok(())
 }

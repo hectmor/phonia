@@ -277,6 +277,30 @@ impl AlsaSink {
     }
 }
 
+/// Lists which sample formats and rates `device` accepts, using `HwParams::test_format` /
+/// `test_rate`. This opens the device in playback mode (without ever writing to it) purely to
+/// query its capabilities -- meant to be run by the user on their own hardware.
+pub fn probe_device(device: &str) -> Result<()> {
+    let c_device = CString::new(device).context("invalid ALSA device name")?;
+    let pcm = PCM::open(&c_device, Direction::Playback, false)
+        .with_context(|| format!("opening device {device}"))?;
+    let hwp = HwParams::any(&pcm).context("could not get the default hw_params")?;
+
+    println!("Formats supported on {device}:");
+    for format in [Format::S16LE, Format::S243LE, Format::S24LE, Format::S32LE] {
+        let ok = hwp.test_format(format).is_ok();
+        println!("  {:<10} {}", format.to_string(), if ok { "yes" } else { "no" });
+    }
+
+    println!("\nRates supported on {device}:");
+    for rate in [44_100u32, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000] {
+        let ok = hwp.test_rate(rate).is_ok();
+        println!("  {:>7} Hz  {}", rate, if ok { "yes" } else { "no" });
+    }
+
+    Ok(())
+}
+
 /// Picks the first ALSA format the device accepts, in the priority order the phase-0 spec
 /// requires for each source bit depth. Takes `test_format` as a closure so this can be unit
 /// tested without opening a real device (the hard rule for this phase is: never open the

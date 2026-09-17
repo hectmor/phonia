@@ -1,0 +1,10 @@
+[package]
+name = "phoniad"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+phonia-core.workspace = true
+tokio.workspace = true
