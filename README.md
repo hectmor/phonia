@@ -1,33 +1,33 @@
-# phonia -- fase 0
+# phonia -- phase 0
 
-Spike de línea de comandos que valida, de punta a punta, el camino de audio de **phonia**
-(el futuro reproductor TIDAL hi-fi con TUI + daemon): login PKCE -> `playbackinfo` HiRes ->
-descarga de segmentos DASH -> decodificación FLAC -> salida ALSA *bit-perfect* a un DAC USB.
+End-to-end CLI spike that validates **phonia**'s audio path (the future TIDAL hi-fi player
+with TUI + daemon): PKCE login -> HiRes `playbackinfo` -> DASH segment download -> FLAC
+decoding -> *bit-perfect* ALSA output to a USB DAC.
 
-No hay TUI ni daemon todavía: esto es un CLI de una sola pasada para probar que cada eslabón
-de la cadena funciona con hardware real (un Fosi Audio DS2 en `hw:1,0` durante el desarrollo).
+There's no TUI or daemon yet: this is a single-pass CLI to prove that every link in the
+chain works with real hardware (a Fosi Audio DS2 at `hw:1,0` during development).
 
-## Comandos
+## Commands
 
-- **`phonia login`** -- Inicia sesión en TIDAL con el flujo PKCE (obligatorio: el flujo de
-  device-code nunca recibe la entitlement `HI_RES_LOSSLESS`, aunque la cuenta la tenga). Abre
-  una URL en el navegador (o la imprime si no se pudo abrir sola); tras iniciar sesión, TIDAL
-  redirige a una página de error ("oops"), eso es normal -- copia la URL completa de la barra
-  de direcciones y pégala en la terminal. Guarda la sesión en
-  `~/.config/phonia/session.json` (permisos `0600`).
+- **`phonia login`** -- Logs in to TIDAL with the PKCE flow (required: the device-code flow
+  never gets granted the `HI_RES_LOSSLESS` entitlement, even if the account has it). Opens a
+  URL in the browser (or prints it if it couldn't be opened automatically); after logging in,
+  TIDAL redirects to an error page ("oops"), that's expected -- copy the full URL from the
+  address bar and paste it into the terminal. Saves the session to
+  `~/.config/phonia/session.json` (`0600` permissions).
 
-- **`phonia play <TRACK_ID> [--device hw:1,0] [--quality hires|lossless] [--save-mp4 <ruta>]`**
-  -- Descarga y reproduce una pista por su ID. Consulta `playbackinfo`, descarga el manifiesto
-  DASH (HiRes) o el archivo directo (Lossless/High/Low), lo decodifica y lo saca por ALSA.
-  `--save-mp4` además guarda los bytes descargados en disco (útil para inspeccionar el fMP4).
+- **`phonia play <TRACK_ID> [--device hw:1,0] [--quality hires|lossless] [--save-mp4 <path>]`**
+  -- Downloads and plays a track by its ID. Queries `playbackinfo`, downloads the DASH manifest
+  (HiRes) or the direct file (Lossless/High/Low), decodes it and outputs it via ALSA.
+  `--save-mp4` additionally saves the downloaded bytes to disk (useful for inspecting the fMP4).
 
-- **`phonia play-file <ruta> [--device hw:1,0]`** -- Decodifica y reproduce un archivo local
-  (FLAC o fMP4) por la misma ruta de salida ALSA, sin tocar TIDAL. Sirve para probar el DAC de
-  forma aislada.
+- **`phonia play-file <path> [--device hw:1,0]`** -- Decodes and plays a local file (FLAC or
+  fMP4) through the same ALSA output path, without touching TIDAL. Useful for testing the DAC
+  in isolation.
 
-- **`phonia probe-device [--device hw:1,0]`** -- Abre el dispositivo ALSA indicado en modo
-  reproducción (sin escribir nada) y lista qué formatos (`S16_LE`, `S24_3LE`, `S24_LE`,
-  `S32_LE`) y qué frecuencias (44.1 kHz .. 384 kHz) acepta de forma nativa.
+- **`phonia probe-device [--device hw:1,0]`** -- Opens the given ALSA device in playback mode
+  (without writing anything) and lists which formats (`S16_LE`, `S24_3LE`, `S24_LE`, `S32_LE`)
+  and which rates (44.1 kHz .. 384 kHz) it accepts natively.
 
 All commands are run with `cargo run -p phonia -- <command>`, for example:
 
@@ -38,46 +38,46 @@ cargo run -p phonia -- play-file track.flac --device hw:1,0
 cargo run -p phonia -- probe-device --device hw:1,0
 ```
 
-## Cómo verificar que la salida es bit-perfect
+## How to verify the output is bit-perfect
 
-Al reproducir con `phonia play` o `phonia play-file` contra un dispositivo `hw:N,D`, tras el
-primer bloque de audio se imprime el contenido de
-`/proc/asound/card<N>/pcm<D>p/sub0/hw_params` seguido de un veredicto:
-
-```
-Fuente: FLAC 24-bit/96000 Hz 2ch → hw:1,0 S24_3LE 96000 Hz  ✔ BIT-PERFECT
-```
-
-o, si algo no cuadra (frecuencia o formato distintos a los negociados, o el dispositivo no es
-`hw:N,D`):
+When playing with `phonia play` or `phonia play-file` against a `hw:N,D` device, after the
+first audio chunk the contents of `/proc/asound/card<N>/pcm<D>p/sub0/hw_params` are printed,
+followed by a verdict:
 
 ```
-Fuente: FLAC 24-bit/96000 Hz 2ch → hw:1,0 S24_3LE  ✖ CONVERTED (la tarjeta reporta 48000 Hz en vez de 96000 Hz)
+Source: FLAC 24-bit/96000 Hz 2ch → hw:1,0 S24_3LE 96000 Hz  ✔ BIT-PERFECT
 ```
 
-También puedes comprobarlo a mano en otra terminal mientras suena algo:
+or, if something doesn't match (a different rate or format than what was negotiated, or the
+device is not `hw:N,D`):
+
+```
+Source: FLAC 24-bit/96000 Hz 2ch → hw:1,0 S24_3LE  ✖ CONVERTED (the card reports 48000 Hz instead of 96000 Hz)
+```
+
+You can also check it by hand in another terminal while something is playing:
 
 ```sh
 cat /proc/asound/card1/pcm0p/sub0/hw_params
 ```
 
-Si ves `closed`, nada tiene el dispositivo abierto en ese momento.
+If you see `closed`, nothing has the device open at that moment.
 
-## Importante: PipeWire no debe tener el DAC abierto
+## Important: PipeWire must not have the DAC open
 
-`phonia` abre el dispositivo ALSA (`hw:1,0` por defecto) directamente, sin pasar por
-`plughw`/`default`/`dmix`, porque cualquiera de esas capas puede remuestrear o mezclar el
-audio y rompe la garantía de bit-perfect. Si PipeWire (u otra aplicación) ya tiene el DAC
-abierto, `phonia` fallará al abrir el dispositivo con un error EBUSY explicando que hay que
-liberarlo primero (por ejemplo, pausando la reproducción hacia esa tarjeta desde PipeWire, o
-silenciando/deshabilitando su perfil para esa tarjeta mientras se usa `phonia`).
+`phonia` opens the ALSA device (`hw:1,0` by default) directly, without going through
+`plughw`/`default`/`dmix`, because any of those layers can resample or mix the audio and
+break the bit-perfect guarantee. If PipeWire (or another application) already has the DAC
+open, `phonia` will fail to open the device with an EBUSY error explaining that it needs to
+be released first (for example, by pausing playback to that card from PipeWire, or by
+muting/disabling its profile for that card while using `phonia`).
 
-## Estado de la fase 0
+## Phase 0 status
 
-- `cargo build` y `cargo test` pasan limpio; `cargo clippy` sin warnings.
-- Lo que sigue quedando fuera de esta fase (llegará en fases posteriores): streaming real sin
-  buffering completo en memoria, TUI, daemon, gapless, `%0Nd` en plantillas de segmento DASH,
-  soporte de cifrado de manifiesto.
+- `cargo build` and `cargo test` pass cleanly; `cargo clippy` has no warnings.
+- What's still out of scope for this phase (coming in later phases): real streaming without
+  buffering the whole track in memory, TUI, daemon, gapless playback, `%0Nd` in DASH segment
+  templates, manifest encryption support.
 
 ## Tech stack
 
@@ -145,10 +145,9 @@ more importantly, *why* it was chosen.
   decoder's left-justified `i32` samples into that format with pure bit shifts.
 
 - **[`anyhow`](https://docs.rs/anyhow)** -- error handling with contextual, human-readable
-  messages (in Spanish, since this phase is operated directly by a person, not consumed as a
-  library) at every fallible step, from "no saved session, run `phonia login`" to "the device
+  messages at every fallible step, from "no saved session, run `phonia login`" to "the device
   doesn't support any lossless integer format for a 24-bit source."
 
-## Licencia
+## License
 
-MIT. Consulta el archivo [LICENSE](LICENSE).
+MIT. See the [LICENSE](LICENSE) file.

@@ -29,7 +29,7 @@ pub fn build_http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .build()
-        .context("construyendo el cliente HTTP")
+        .context("building the HTTP client")
 }
 
 /// Maps our `AudioQuality` to the exact string TIDAL's API expects for the `audioquality` query
@@ -118,12 +118,12 @@ pub async fn fetch_playback_info(
         .auth
         .access_token
         .clone()
-        .ok_or_else(|| anyhow!("no hay token de acceso; ejecuta `phonia login` primero"))?;
+        .ok_or_else(|| anyhow!("no access token; run `phonia login` first"))?;
     let country_code = client
         .user_info
         .as_ref()
         .map(|u| u.country_code.clone())
-        .ok_or_else(|| anyhow!("no hay información de usuario cargada; ejecuta `phonia login` primero"))?;
+        .ok_or_else(|| anyhow!("no user info loaded; run `phonia login` first"))?;
 
     let url = format!(
         "{}/tracks/{}/playbackinfopostpaywall",
@@ -142,43 +142,43 @@ pub async fn fetch_playback_info(
         ])
         .send()
         .await
-        .context("solicitando playbackinfopostpaywall a TIDAL")?;
+        .context("requesting playbackinfopostpaywall from TIDAL")?;
 
     let status = response.status();
     let body = response
         .text()
         .await
-        .context("leyendo la respuesta de playbackinfopostpaywall")?;
+        .context("reading the playbackinfopostpaywall response")?;
     if !status.is_success() {
-        bail!("TIDAL respondió {status} a playbackinfopostpaywall:\n{body}");
+        bail!("TIDAL responded {status} to playbackinfopostpaywall:\n{body}");
     }
 
     let raw: RawPlaybackInfo = serde_json::from_str(&body)
-        .with_context(|| format!("parseando la respuesta JSON de playbackinfopostpaywall:\n{body}"))?;
+        .with_context(|| format!("parsing the playbackinfopostpaywall JSON response:\n{body}"))?;
 
     if matches!(quality, AudioQuality::HiRes) && raw.audio_quality != "HI_RES_LOSSLESS" {
         eprintln!(
-            "Aviso: TIDAL degradó la calidad a {}: la pista no existe en HiRes o el token no tiene \
-             ese permiso. Si usaste un login viejo, repite `phonia login`.",
+            "Warning: TIDAL downgraded the quality to {}: the track doesn't exist in HiRes, or \
+             the token doesn't have that entitlement. If you used an old login, re-run `phonia login`.",
             raw.audio_quality
         );
     }
 
     let manifest_bytes = BASE64
         .decode(&raw.manifest)
-        .context("decodificando el campo manifest (base64)")?;
+        .context("decoding the manifest field (base64)")?;
     let manifest_text =
-        String::from_utf8(manifest_bytes).context("el manifiesto decodificado no es UTF-8")?;
+        String::from_utf8(manifest_bytes).context("the decoded manifest is not valid UTF-8")?;
 
     let manifest = if let Ok(json_manifest) = serde_json::from_str::<RawJsonManifest>(&manifest_text) {
         let url = json_manifest
             .urls
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow!("el manifiesto JSON no contiene ninguna URL"))?;
+            .ok_or_else(|| anyhow!("the JSON manifest contains no URL"))?;
         ManifestKind::Json { url, codecs: json_manifest.codecs }
     } else {
-        let dash = dash::parse_mpd(&manifest_text).context("parseando el manifiesto DASH (MPD)")?;
+        let dash = dash::parse_mpd(&manifest_text).context("parsing the DASH (MPD) manifest")?;
         ManifestKind::Dash(dash)
     };
 
@@ -195,8 +195,8 @@ pub async fn fetch_playback_info(
 
 pub fn print_playback_info(info: &PlaybackInfo) {
     println!("Track ID:        {}", info.track_id);
-    println!("Modo de audio:   {}", info.audio_mode);
-    println!("Calidad:         {}", info.audio_quality);
+    println!("Audio mode:      {}", info.audio_mode);
+    println!("Quality:         {}", info.audio_quality);
     println!(
         "Bit depth:       {}",
         info.bit_depth.map(|b| b.to_string()).unwrap_or_else(|| "?".to_string())
@@ -215,12 +215,12 @@ pub async fn download_json_manifest(http: &reqwest::Client, url: &str) -> Result
         .get(url)
         .send()
         .await
-        .context("descargando el audio (manifiesto JSON)")?;
+        .context("downloading the audio (JSON manifest)")?;
     let status = response.status();
     if !status.is_success() {
-        bail!("HTTP {status} descargando {url}");
+        bail!("HTTP {status} downloading {url}");
     }
-    let bytes = response.bytes().await.context("leyendo el cuerpo de la respuesta")?;
+    let bytes = response.bytes().await.context("reading the response body")?;
     Ok(bytes.to_vec())
 }
 
@@ -238,19 +238,19 @@ async fn download_segment(http: &reqwest::Client, url: &str) -> Result<Option<Ve
                     return Ok(None);
                 }
                 if !status.is_success() {
-                    last_err = Some(anyhow!("HTTP {status} descargando segmento"));
+                    last_err = Some(anyhow!("HTTP {status} downloading segment"));
                     continue;
                 }
                 match response.bytes().await {
                     Ok(bytes) => return Ok(Some(bytes.to_vec())),
-                    Err(e) => last_err = Some(anyhow::Error::new(e).context("leyendo bytes del segmento")),
+                    Err(e) => last_err = Some(anyhow::Error::new(e).context("reading segment bytes")),
                 }
             }
-            Err(e) => last_err = Some(anyhow::Error::new(e).context(format!("intento {attempt}/{MAX_SEGMENT_RETRIES}"))),
+            Err(e) => last_err = Some(anyhow::Error::new(e).context(format!("attempt {attempt}/{MAX_SEGMENT_RETRIES}"))),
         }
     }
 
-    Err(last_err.unwrap_or_else(|| anyhow!("fallo desconocido descargando segmento")))
+    Err(last_err.unwrap_or_else(|| anyhow!("unknown failure downloading segment")))
 }
 
 /// Downloads the init segment followed by all media segments of `dash`, concatenated into one
@@ -260,11 +260,11 @@ async fn download_segment(http: &reqwest::Client, url: &str) -> Result<Option<Ve
 pub async fn download_dash(http: &reqwest::Client, dash: &DashSegments) -> Result<Vec<u8>> {
     let mut combined = Vec::new();
 
-    print!("Descargando segmento de inicialización...");
+    print!("Downloading initialization segment...");
     std::io::Write::flush(&mut std::io::stdout()).ok();
     let init = download_segment(http, &dash.init_url)
         .await?
-        .ok_or_else(|| anyhow!("el segmento de inicialización no existe (HTTP 404/403): {}", dash.init_url))?;
+        .ok_or_else(|| anyhow!("the initialization segment does not exist (HTTP 404/403): {}", dash.init_url))?;
     combined.extend_from_slice(&init);
     println!(" ok ({} bytes)", init.len());
 
@@ -287,7 +287,7 @@ pub async fn download_dash(http: &reqwest::Client, dash: &DashSegments) -> Resul
                 combined.extend_from_slice(&bytes);
                 downloaded += 1;
                 print!(
-                    "\rDescargando segmentos: {}{}",
+                    "\rDownloading segments: {}{}",
                     downloaded,
                     dash.segment_count.map(|c| format!("/{c}")).unwrap_or_default()
                 );
@@ -296,11 +296,11 @@ pub async fn download_dash(http: &reqwest::Client, dash: &DashSegments) -> Resul
             None => {
                 if let Some(count) = dash.segment_count {
                     bail!(
-                        "el segmento {segment_number} no existe (HTTP 404/403) pero el manifiesto esperaba {count} segmentos"
+                        "segment {segment_number} does not exist (HTTP 404/403) but the manifest expected {count} segments"
                     );
                 }
                 if downloaded == 0 {
-                    bail!("no se pudo descargar ningún segmento de medios (el primero ya dio 404/403): {url}");
+                    bail!("could not download any media segment (the first one already returned 404/403): {url}");
                 }
                 // Fallback path (segment count unknown): a 404/403 after at least one
                 // successful segment means we've reached the end of the track.

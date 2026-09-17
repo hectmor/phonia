@@ -47,18 +47,18 @@ impl AlsaSink {
         total_duration: Option<Duration>,
         stop: Arc<AtomicBool>,
     ) -> Result<Self> {
-        let c_device = CString::new(device).context("nombre de dispositivo ALSA inválido")?;
+        let c_device = CString::new(device).context("invalid ALSA device name")?;
 
         let pcm = PCM::open(&c_device, Direction::Playback, false).map_err(|e| {
             if e.errno() == libc::EBUSY {
                 anyhow!(
-                    "el dispositivo '{device}' está ocupado (EBUSY): lo más probable es que \
-                     PipeWire (o alguna otra aplicación) lo tenga abierto. Pausa/desconecta la \
-                     reproducción hacia ese DAC (ej. `wpctl status`/silenciar el perfil de la \
-                     tarjeta en PipeWire) e inténtalo de nuevo.\nError original de ALSA: {e}"
+                    "device '{device}' is busy (EBUSY): PipeWire (or some other application) \
+                     most likely has it open. Pause/disconnect playback to that DAC (e.g. \
+                     `wpctl status`, or mute the card's profile in PipeWire) and try again.\n\
+                     Original ALSA error: {e}"
                 )
             } else {
-                anyhow!("no se pudo abrir el dispositivo ALSA '{device}': {e}")
+                anyhow!("could not open ALSA device '{device}': {e}")
             }
         })?;
 
@@ -66,43 +66,43 @@ impl AlsaSink {
         // `hw_params_current()`) is dropped before `pcm` is moved into `AlsaSink` below.
         let format = {
             let hwp =
-                HwParams::any(&pcm).context("no se pudieron obtener los hw_params por defecto")?;
+                HwParams::any(&pcm).context("could not get the default hw_params")?;
             hwp.set_access(Access::RWInterleaved)
-                .context("el dispositivo no soporta acceso entrelazado (RWInterleaved)")?;
+                .context("the device does not support interleaved access (RWInterleaved)")?;
             hwp.set_channels(source.channels)
-                .with_context(|| format!("el dispositivo no soporta {} canal(es)", source.channels))?;
+                .with_context(|| format!("the device does not support {} channel(s)", source.channels))?;
 
             // Never let ALSA (or a plug layer above it) resample under us: bit-perfect means
             // the hardware runs at exactly the source's rate, or we fail loudly.
             hwp.set_rate_resample(false)
-                .context("no se pudo desactivar el resampling automático")?;
+                .context("could not disable automatic resampling")?;
             hwp.set_rate(source.sample_rate, ValueOr::Nearest)
-                .with_context(|| format!("no se pudo pedir {} Hz", source.sample_rate))?;
+                .with_context(|| format!("could not request {} Hz", source.sample_rate))?;
 
             let format = pick_format(source.bits_per_sample, |f| hwp.test_format(f).is_ok())
-                .with_context(|| format!("negociando formato para el dispositivo '{device}'"))?;
-            hwp.set_format(format).context("no se pudo fijar el formato negociado")?;
+                .with_context(|| format!("negotiating format for device '{device}'"))?;
+            hwp.set_format(format).context("could not set the negotiated format")?;
 
             hwp.set_period_time_near(PERIOD_TIME_US, ValueOr::Nearest)
-                .context("no se pudo fijar el tamaño de periodo")?;
+                .context("could not set the period size")?;
             hwp.set_buffer_time_near(BUFFER_TIME_US, ValueOr::Nearest)
-                .context("no se pudo fijar el tamaño de buffer")?;
+                .context("could not set the buffer size")?;
 
-            pcm.hw_params(&hwp).context("no se pudieron aplicar los hw_params")?;
+            pcm.hw_params(&hwp).context("could not apply the hw_params")?;
 
             // Verify the rate that actually got committed to the hardware, since
             // ValueOr::Nearest may silently pick something else if the exact rate isn't
             // supported.
             let committed = pcm
                 .hw_params_current()
-                .context("no se pudieron leer los hw_params ya aplicados")?;
+                .context("could not read back the applied hw_params")?;
             let actual_rate = committed
                 .get_rate()
-                .context("no se pudo leer la frecuencia de muestreo aplicada")?;
+                .context("could not read the applied sample rate")?;
             if actual_rate != source.sample_rate {
                 bail!(
-                    "el dispositivo '{device}' no soporta {} Hz de forma nativa (ALSA aplicó {} Hz en su lugar); \
-                     abortando para no perder la garantía de bit-perfect",
+                    "device '{device}' does not support {} Hz natively (ALSA applied {} Hz instead); \
+                     aborting to avoid losing the bit-perfect guarantee",
                     source.sample_rate,
                     actual_rate
                 );
@@ -160,15 +160,15 @@ impl AlsaSink {
                     consecutive_zero_writes += 1;
                     if consecutive_zero_writes > MAX_CONSECUTIVE_ZERO_WRITES {
                         bail!(
-                            "el dispositivo '{}' dejó de aceptar audio ({} escrituras de 0 frames seguidas); \
-                             abortando en vez de descartar el resto del bloque en silencio",
+                            "device '{}' stopped accepting audio ({} consecutive 0-frame writes); \
+                             aborting instead of silently dropping the rest of the chunk",
                             self.device,
                             consecutive_zero_writes
                         );
                     }
                     self.pcm
                         .wait(Some(100))
-                        .context("esperando a que el dispositivo ALSA acepte más datos")?;
+                        .context("waiting for the ALSA device to accept more data")?;
                 }
                 Ok(frames) => {
                     consecutive_zero_writes = 0;
@@ -176,13 +176,13 @@ impl AlsaSink {
                     self.frames_written += frames as u64;
                 }
                 Err(e) if e.errno() == libc::EPIPE => {
-                    eprintln!("\nAviso: underrun (EPIPE) en '{}', recuperando...", self.device);
+                    eprintln!("\nWarning: underrun (EPIPE) on '{}', recovering...", self.device);
                     drop(io);
                     self.pcm
                         .try_recover(e, true)
-                        .context("no se pudo recuperar tras un underrun")?;
+                        .context("could not recover from an underrun")?;
                 }
-                Err(e) => return Err(e).context("error escribiendo al dispositivo ALSA"),
+                Err(e) => return Err(e).context("error writing to the ALSA device"),
             }
         }
 
@@ -208,7 +208,7 @@ impl AlsaSink {
         println!();
         let Some((card, device)) = parse_hw_device(&self.device) else {
             println!(
-                "Dispositivo '{}' no tiene forma hw:N,D; omito la verificación de /proc/asound.",
+                "Device '{}' is not in hw:N,D form; skipping the /proc/asound check.",
                 self.device
             );
             self.print_verdict(None, None, false);
@@ -225,14 +225,14 @@ impl AlsaSink {
                 self.print_verdict(proc_rate, proc_format, true);
             }
             Err(e) => {
-                println!("Aviso: no se pudo leer {path}: {e}");
+                println!("Warning: could not read {path}: {e}");
                 self.print_verdict(None, None, true);
             }
         }
     }
 
     fn print_verdict(&self, proc_rate: Option<u32>, proc_format: Option<String>, is_hw: bool) {
-        let fuente = format!(
+        let source = format!(
             "FLAC {}-bit/{} Hz {}ch",
             self.source.bits_per_sample, self.source.sample_rate, self.source.channels
         );
@@ -244,35 +244,35 @@ impl AlsaSink {
 
         if bit_perfect {
             println!(
-                "{fuente} → {} {} {} Hz  \u{2714} BIT-PERFECT",
+                "{source} → {} {} {} Hz  \u{2714} BIT-PERFECT",
                 self.device,
                 negotiated_format,
                 proc_rate.unwrap()
             );
         } else {
             let reason = if !is_hw {
-                "el dispositivo no es hw:N,D (posible resampling/mezcla vía dmix/PipeWire)".to_string()
+                "the device is not hw:N,D (possible resampling/mixing via dmix/PipeWire)".to_string()
             } else {
                 match (proc_rate, &proc_format) {
                     (None, _) | (_, None) => {
-                        "no se pudo leer /proc/asound para confirmarlo".to_string()
+                        "could not read /proc/asound to confirm it".to_string()
                     }
                     (Some(r), Some(f)) if r != self.source.sample_rate => {
-                        format!("la tarjeta reporta {r} Hz en vez de {} Hz", self.source.sample_rate)
+                        format!("the card reports {r} Hz instead of {} Hz", self.source.sample_rate)
                     }
                     (Some(_), Some(f)) => {
-                        format!("la tarjeta reporta el formato {f} en vez de {negotiated_format}")
+                        format!("the card reports format {f} instead of {negotiated_format}")
                     }
                 }
             };
-            println!("{fuente} → {} {}  \u{2716} CONVERTED ({reason})", self.device, negotiated_format);
+            println!("{source} → {} {}  \u{2716} CONVERTED ({reason})", self.device, negotiated_format);
         }
     }
 
     /// Drains the device so the last period is fully played out before returning.
     pub fn finish(self) -> Result<()> {
         println!();
-        self.pcm.drain().context("no se pudo hacer drain() del dispositivo ALSA")?;
+        self.pcm.drain().context("could not drain() the ALSA device")?;
         Ok(())
     }
 }
@@ -309,7 +309,7 @@ fn pick_format(bits_per_sample: u32, mut test_format: impl FnMut(Format) -> bool
     let candidates: &[Format] = match bits_per_sample {
         24 => &[Format::S243LE, Format::S32LE, Format::S24LE],
         16 => &[Format::S16LE, Format::S32LE],
-        other => bail!("profundidad de bits no soportada en la fase 0: {other} bits (solo 16/24)"),
+        other => bail!("unsupported bit depth in phase 0: {other} bits (only 16/24)"),
     };
 
     candidates
@@ -318,8 +318,8 @@ fn pick_format(bits_per_sample: u32, mut test_format: impl FnMut(Format) -> bool
         .find(|f| test_format(*f))
         .ok_or_else(|| {
             anyhow!(
-                "el dispositivo no acepta ningún formato entero sin pérdidas para una fuente de {bits_per_sample} bits \
-                 (probé: {candidates:?})"
+                "the device does not accept any lossless integer format for a {bits_per_sample}-bit source \
+                 (tried: {candidates:?})"
             )
         })
 }
@@ -330,7 +330,7 @@ fn bytes_per_sample(format: Format) -> usize {
         Format::S243LE => 3,
         Format::S24LE => 4,
         Format::S32LE => 4,
-        other => unreachable!("pick_format nunca debería elegir {other}"),
+        other => unreachable!("pick_format should never choose {other}"),
     }
 }
 
@@ -342,7 +342,7 @@ fn pack_sample(format: Format, sample: i32, out: &mut Vec<u8>) {
         Format::S243LE => out.extend_from_slice(&pack_s24_3le(sample)),
         Format::S24LE => out.extend_from_slice(&pack_s24le(sample)),
         Format::S32LE => out.extend_from_slice(&pack_s32le(sample)),
-        other => unreachable!("pick_format nunca debería elegir {other}"),
+        other => unreachable!("pick_format should never choose {other}"),
     }
 }
 
