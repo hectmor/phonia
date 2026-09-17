@@ -1,0 +1,19 @@
+[package]
+name = "phonia-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+alsa.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+dirs.workspace = true
+libc.workspace = true
+quick-xml.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+symphonia.workspace = true
+tidlers.workspace = true
+tokio.workspace = true

@@ -29,6 +29,15 @@ de la cadena funciona con hardware real (un Fosi Audio DS2 en `hw:1,0` durante e
   reproducción (sin escribir nada) y lista qué formatos (`S16_LE`, `S24_3LE`, `S24_LE`,
   `S32_LE`) y qué frecuencias (44.1 kHz .. 384 kHz) acepta de forma nativa.
 
+All commands are run with `cargo run -p phonia -- <command>`, for example:
+
+```sh
+cargo run -p phonia -- login
+cargo run -p phonia -- play 12345678 --device hw:1,0 --quality hires
+cargo run -p phonia -- play-file track.flac --device hw:1,0
+cargo run -p phonia -- probe-device --device hw:1,0
+```
+
 ## Cómo verificar que la salida es bit-perfect
 
 Al reproducir con `phonia play` o `phonia play-file` contra un dispositivo `hw:N,D`, tras el
