@@ -11,11 +11,13 @@ license = "MIT"
 alsa = "0.12.1"
 anyhow = "1.0.104"
 base64 = "0.22"
+bytes = "1.12"
 clap = { version = "4", features = ["derive"] }
 dirs = "5"
+futures-util = "0.3"
 libc = "0.2"
 quick-xml = "0.41"
-reqwest = { version = "0.13.5", features = ["query"] }
+reqwest = { version = "0.13.5", features = ["query", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 symphonia = { version = "0.6.1", features = ["flac", "isomp4"] }

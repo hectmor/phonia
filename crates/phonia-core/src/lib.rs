@@ -3,3 +3,4 @@ pub mod tidal;
 pub mod dash;
 pub mod decode;
 pub mod output;
+pub mod stream;

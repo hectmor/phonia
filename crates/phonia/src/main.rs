@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use phonia_core::output::alsa::{self, AlsaSink};
-use phonia_core::{auth, decode, tidal};
+use phonia_core::{auth, decode, stream, tidal};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -93,20 +93,19 @@ async fn run_play(
     let info = tidal::fetch_playback_info(&http, &client, track_id, quality).await?;
     tidal::print_playback_info(&info);
 
-    let (bytes, extension) = match &info.manifest {
-        tidal::ManifestKind::Json { url, .. } => {
-            println!("Downloading audio...");
-            (tidal::download_json_manifest(&http, url).await?, None)
-        }
-        tidal::ManifestKind::Dash(dash) => (tidal::download_dash(&http, dash).await?, Some("mp4")),
-    };
-
+    let tee = save_mp4
+        .map(|path| std::fs::File::create(path).with_context(|| format!("creating {path:?}")))
+        .transpose()?;
     if let Some(path) = save_mp4 {
-        std::fs::write(path, &bytes).with_context(|| format!("saving to {path:?}"))?;
-        println!("Saved to {path:?} ({} bytes)", bytes.len());
+        println!("Saving audio to {path:?} as it streams...");
     }
 
-    play_source(std::io::Cursor::new(bytes), extension, device.to_string()).await
+    let (source, extension) = match &info.manifest {
+        tidal::ManifestKind::Json { url, .. } => (stream::open_url(&http, url, tee), None),
+        tidal::ManifestKind::Dash(dash) => (stream::open_dash(&http, dash, tee), Some("mp4")),
+    };
+
+    play_source(source, extension, device.to_string()).await
 }
 
 async fn run_play_file(path: &Path, device: &str) -> Result<()> {
