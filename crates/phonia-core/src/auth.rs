@@ -16,9 +16,9 @@ use tidlers::auth::TidalAuth;
 
 fn session_path() -> Result<PathBuf> {
     let dir = dirs::config_dir()
-        .ok_or_else(|| anyhow!("no se pudo determinar el directorio de configuración del usuario"))?
+        .ok_or_else(|| anyhow!("could not determine the user's config directory"))?
         .join("phonia");
-    fs::create_dir_all(&dir).with_context(|| format!("creando el directorio de configuración {dir:?}"))?;
+    fs::create_dir_all(&dir).with_context(|| format!("creating config directory {dir:?}"))?;
     Ok(dir.join("session.json"))
 }
 
@@ -33,9 +33,9 @@ fn save_session(client: &TidalClient) -> Result<()> {
         .truncate(true)
         .mode(0o600)
         .open(&path)
-        .with_context(|| format!("abriendo {path:?} para guardar la sesión"))?;
+        .with_context(|| format!("opening {path:?} to save the session"))?;
     file.write_all(json.as_bytes())
-        .with_context(|| format!("escribiendo la sesión en {path:?}"))?;
+        .with_context(|| format!("writing the session to {path:?}"))?;
 
     Ok(())
 }
@@ -47,17 +47,17 @@ fn save_session(client: &TidalClient) -> Result<()> {
 pub async fn load_client() -> Result<TidalClient> {
     let path = session_path()?;
     if !path.exists() {
-        bail!("no hay ninguna sesión guardada todavía. Ejecuta `phonia login` primero.");
+        bail!("no session saved yet. Run `phonia login` first.");
     }
 
-    let json = fs::read_to_string(&path).with_context(|| format!("leyendo la sesión guardada en {path:?}"))?;
+    let json = fs::read_to_string(&path).with_context(|| format!("reading the saved session from {path:?}"))?;
     let mut client = TidalClient::from_json(&json)
-        .with_context(|| format!("la sesión guardada en {path:?} está corrupta; vuelve a hacer `phonia login`"))?;
+        .with_context(|| format!("the session saved at {path:?} is corrupt; run `phonia login` again"))?;
 
     client
         .refresh_access_token(false)
         .await
-        .context("refrescando el token de acceso")?;
+        .context("refreshing the access token")?;
 
     save_session(&client)?;
 
@@ -74,47 +74,47 @@ pub async fn login() -> Result<()> {
 
     let url = client
         .initiate_pkce_login()
-        .map_err(|e| anyhow!("no se pudo iniciar el login PKCE: {e}"))?;
+        .map_err(|e| anyhow!("could not start PKCE login: {e}"))?;
 
-    println!("Abre esta URL en tu navegador para iniciar sesión en TIDAL:\n\n  {url}\n");
+    println!("Open this URL in your browser to log in to TIDAL:\n\n  {url}\n");
     // Best effort only; on a headless box this will just fail silently and the user copy-pastes
     // the URL themselves.
     let _ = std::process::Command::new("xdg-open").arg(&url).status();
 
-    println!("Tras iniciar sesión, TIDAL te redirigirá a una página de error (\"oops\"), eso es");
-    println!("normal: copia la URL COMPLETA de la barra de direcciones de esa página y pégala aquí.");
-    print!("URL de redirección: ");
+    println!("After logging in, TIDAL will redirect you to an error page (\"oops\"), that's");
+    println!("expected: copy the FULL URL from that page's address bar and paste it here.");
+    print!("Redirect URL: ");
     std::io::stdout().flush().ok();
 
     let mut input = String::new();
     std::io::stdin()
         .read_line(&mut input)
-        .context("leyendo la URL de redirección de stdin")?;
+        .context("reading the redirect URL from stdin")?;
     let redirect_url = input.trim();
     if redirect_url.is_empty() {
-        bail!("no se recibió ninguna URL de redirección");
+        bail!("no redirect URL was received");
     }
 
     client
         .finish_pkce_login(redirect_url)
         .await
-        .map_err(|e| anyhow!("no se pudo completar el login PKCE: {e}"))?;
+        .map_err(|e| anyhow!("could not complete PKCE login: {e}"))?;
 
     if let Err(e) = client.refresh_user_info().await {
-        eprintln!("Aviso: no se pudo refrescar la información de usuario: {e}");
+        eprintln!("Warning: could not refresh user info: {e}");
     }
 
     save_session(&client)?;
 
     if let Some(user) = &client.user_info {
-        println!("\nSesión iniciada correctamente como: {}", user.username);
+        println!("\nLogged in successfully as: {}", user.username);
     } else {
-        println!("\nSesión iniciada correctamente.");
+        println!("\nLogged in successfully.");
     }
 
     match client.subscription().await {
-        Ok(sub) => println!("Tipo de suscripción: {}", sub.subscription.subscription_type),
-        Err(e) => eprintln!("Aviso: no se pudo obtener el tipo de suscripción: {e}"),
+        Ok(sub) => println!("Subscription type: {}", sub.subscription.subscription_type),
+        Err(e) => eprintln!("Warning: could not get the subscription type: {e}"),
     }
 
     Ok(())

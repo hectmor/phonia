@@ -17,7 +17,7 @@ use quick_xml::events::Event;
 /// bytes without this step silently corrupts those URLs, breaking the CDN's signature check.
 fn attr_value(a: &quick_xml::events::attributes::Attribute) -> Result<String> {
     Ok(a.normalized_value(XmlVersion::Implicit1_0)
-        .context("desescapando el valor de un atributo XML")?
+        .context("unescaping an XML attribute value")?
         .into_owned())
 }
 
@@ -74,7 +74,7 @@ pub fn parse_iso8601_duration_secs(s: &str) -> Result<f64> {
     let rest = s
         .trim()
         .strip_prefix("PT")
-        .ok_or_else(|| anyhow!("duración ISO8601 inválida (falta el prefijo PT): {s}"))?;
+        .ok_or_else(|| anyhow!("invalid ISO8601 duration (missing the PT prefix): {s}"))?;
 
     let mut secs = 0f64;
     let mut num = String::new();
@@ -93,7 +93,7 @@ pub fn parse_iso8601_duration_secs(s: &str) -> Result<f64> {
                 secs += parse_component(&num, s)?;
                 num.clear();
             }
-            other => bail!("carácter inesperado '{other}' en duración ISO8601: {s}"),
+            other => bail!("unexpected character '{other}' in ISO8601 duration: {s}"),
         }
     }
     Ok(secs)
@@ -101,7 +101,7 @@ pub fn parse_iso8601_duration_secs(s: &str) -> Result<f64> {
 
 fn parse_component(num: &str, whole: &str) -> Result<f64> {
     num.parse::<f64>()
-        .with_context(|| format!("no se pudo parsear el número '{num}' en duración ISO8601: {whole}"))
+        .with_context(|| format!("could not parse number '{num}' in ISO8601 duration: {whole}"))
 }
 
 /// Parses an MPD (DASH manifest) XML document, extracting the pieces needed to download a
@@ -129,7 +129,7 @@ pub fn parse_mpd(xml: &str) -> Result<DashSegments> {
     loop {
         match reader
             .read_event_into(&mut buf)
-            .context("error leyendo el XML del manifiesto MPD")?
+            .context("error reading the MPD manifest XML")?
         {
             Event::Eof => break,
             Event::Start(e) | Event::Empty(e) => {
@@ -184,7 +184,7 @@ pub fn parse_mpd(xml: &str) -> Result<DashSegments> {
                     // Entities (e.g. `&amp;` in a pre-signed URL's query string) arrive as
                     // separate `GeneralRef` events, not inline here, so this text fragment never
                     // contains an unresolved entity; it only needs a charset decode.
-                    let text = t.decode().context("error decodificando texto de <BaseURL>")?;
+                    let text = t.decode().context("error decoding <BaseURL> text")?;
                     base_url.get_or_insert_with(String::new).push_str(&text);
                 }
             }
@@ -192,13 +192,13 @@ pub fn parse_mpd(xml: &str) -> Result<DashSegments> {
                 let dest = base_url.get_or_insert_with(String::new);
                 if let Some(ch) = r
                     .resolve_char_ref()
-                    .context("resolviendo una referencia de carácter en <BaseURL>")?
+                    .context("resolving a character reference in <BaseURL>")?
                 {
                     dest.push(ch);
                 } else {
-                    let name = r.decode().context("decodificando una entidad en <BaseURL>")?;
+                    let name = r.decode().context("decoding an entity in <BaseURL>")?;
                     let resolved = quick_xml::escape::resolve_predefined_entity(&name)
-                        .ok_or_else(|| anyhow!("entidad XML desconocida en <BaseURL>: &{name};"))?;
+                        .ok_or_else(|| anyhow!("unknown XML entity in <BaseURL>: &{name};"))?;
                     dest.push_str(resolved);
                 }
             }
@@ -212,11 +212,11 @@ pub fn parse_mpd(xml: &str) -> Result<DashSegments> {
         buf.clear();
     }
 
-    let init_url = init_url.ok_or_else(|| anyhow!("el manifiesto MPD no tiene <SegmentTemplate initialization=...>"))?;
-    let media_url = media_url.ok_or_else(|| anyhow!("el manifiesto MPD no tiene <SegmentTemplate media=...>"))?;
+    let init_url = init_url.ok_or_else(|| anyhow!("the MPD manifest has no <SegmentTemplate initialization=...>"))?;
+    let media_url = media_url.ok_or_else(|| anyhow!("the MPD manifest has no <SegmentTemplate media=...>"))?;
 
     let segment_count = if let Some(count) = timeline_count {
-        Some(u32::try_from(count).context("el número de segmentos de <SegmentTimeline> es demasiado grande")?)
+        Some(u32::try_from(count).context("the <SegmentTimeline> segment count is too large")?)
     } else if let (Some(mpd_duration), Some(timescale), Some(duration)) =
         (media_presentation_duration.as_deref(), timescale, duration)
     {

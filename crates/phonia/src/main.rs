@@ -7,10 +7,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tidlers::client::models::playback::AudioQuality;
 
-/// phonia -- fase 0: spike de CLI que valida login PKCE -> playbackinfo HiRes -> segmentos DASH
-/// -> decodificación FLAC -> salida ALSA bit-perfect a un DAC USB.
+/// phonia -- phase 0: CLI spike that validates PKCE login -> HiRes playbackinfo -> DASH segments
+/// -> FLAC decoding -> bit-perfect ALSA output to a USB DAC.
 #[derive(Parser)]
-#[command(name = "phonia", about = "Reproductor TIDAL hi-fi bit-perfect (fase 0)")]
+#[command(name = "phonia", about = "Bit-perfect TIDAL hi-fi player (phase 0)")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -18,27 +18,27 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Inicia sesión en TIDAL mediante PKCE (necesario para poder recibir HI_RES_LOSSLESS).
+    /// Logs in to TIDAL via PKCE (required to be granted HI_RES_LOSSLESS).
     Login,
-    /// Descarga y reproduce una pista de TIDAL por su ID.
+    /// Downloads and plays a TIDAL track by its ID.
     Play {
         track_id: String,
         #[arg(long, default_value = "hw:1,0")]
         device: String,
         #[arg(long, value_enum, default_value_t = Quality::Hires)]
         quality: Quality,
-        /// Si se indica, guarda los bytes descargados (fMP4/DASH o el manifiesto JSON) en esta ruta.
+        /// If given, saves the downloaded bytes (fMP4/DASH or the JSON manifest) to this path.
         #[arg(long)]
         save_mp4: Option<PathBuf>,
     },
-    /// Decodifica y reproduce un archivo local (FLAC o fMP4) por la misma ruta de salida ALSA,
-    /// para poder probar la salida sin depender de TIDAL.
+    /// Decodes and plays a local file (FLAC or fMP4) through the same ALSA output path,
+    /// to test the output without depending on TIDAL.
     PlayFile {
         path: PathBuf,
         #[arg(long, default_value = "hw:1,0")]
         device: String,
     },
-    /// Lista qué formatos y frecuencias acepta el dispositivo ALSA indicado, sin reproducir nada.
+    /// Lists which formats and rates the given ALSA device accepts, without playing anything.
     ProbeDevice {
         #[arg(long, default_value = "hw:1,0")]
         device: String,
@@ -89,21 +89,21 @@ async fn run_play(
     let client = auth::load_client().await?;
     let http = tidal::build_http_client()?;
 
-    println!("Consultando playbackinfo para la pista {track_id}...");
+    println!("Fetching playbackinfo for track {track_id}...");
     let info = tidal::fetch_playback_info(&http, &client, track_id, quality).await?;
     tidal::print_playback_info(&info);
 
     let (bytes, extension) = match &info.manifest {
         tidal::ManifestKind::Json { url, .. } => {
-            println!("Descargando audio...");
+            println!("Downloading audio...");
             (tidal::download_json_manifest(&http, url).await?, None)
         }
         tidal::ManifestKind::Dash(dash) => (tidal::download_dash(&http, dash).await?, Some("mp4")),
     };
 
     if let Some(path) = save_mp4 {
-        std::fs::write(path, &bytes).with_context(|| format!("guardando en {path:?}"))?;
-        println!("Guardado en {path:?} ({} bytes)", bytes.len());
+        std::fs::write(path, &bytes).with_context(|| format!("saving to {path:?}"))?;
+        println!("Saved to {path:?} ({} bytes)", bytes.len());
     }
 
     play_source(std::io::Cursor::new(bytes), extension, device.to_string()).await
@@ -111,7 +111,7 @@ async fn run_play(
 
 async fn run_play_file(path: &Path, device: &str) -> Result<()> {
     let extension = path.extension().and_then(|e| e.to_str()).map(str::to_string);
-    let file = std::fs::File::open(path).with_context(|| format!("abriendo {path:?}"))?;
+    let file = std::fs::File::open(path).with_context(|| format!("opening {path:?}"))?;
     play_source(file, extension.as_deref(), device.to_string()).await
 }
 
@@ -127,7 +127,7 @@ async fn play_source(
         let stop = stop.clone();
         tokio::spawn(async move {
             if tokio::signal::ctrl_c().await.is_ok() {
-                println!("\nSeñal de interrupción recibida, deteniendo la reproducción...");
+                println!("\nInterrupt signal received, stopping playback...");
                 stop.store(true, Ordering::SeqCst);
             }
         });
@@ -137,22 +137,22 @@ async fn play_source(
 
     tokio::task::spawn_blocking(move || -> Result<()> {
         let decoder = decode::Decoder::open(source, extension.as_deref())
-            .context("abriendo el decodificador")?;
+            .context("opening the decoder")?;
         let spec = decoder.spec();
         println!(
-            "Fuente: {} bits / {} Hz / {} canal(es)",
+            "Source: {} bits / {} Hz / {} channel(s)",
             spec.bits_per_sample, spec.sample_rate, spec.channels
         );
 
         let mut sink =
-            AlsaSink::open(&device, spec, None, stop.clone()).context("abriendo la salida ALSA")?;
+            AlsaSink::open(&device, spec, None, stop.clone()).context("opening the ALSA output")?;
 
         decoder.run(|samples| sink.write_chunk(samples))?;
 
         sink.finish()
     })
     .await
-    .context("la tarea de decodificación/reproducción entró en pánico")??;
+    .context("the decode/playback task panicked")??;
 
     Ok(())
 }

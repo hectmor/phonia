@@ -83,39 +83,39 @@ impl Decoder {
 
         let format = symphonia::default::get_probe()
             .probe(&hint, mss, format_opts, metadata_opts)
-            .context("no se pudo reconocer el formato del stream de audio")?;
+            .context("could not recognize the audio stream's format")?;
 
         let track = format
             .default_track(TrackType::Audio)
-            .ok_or_else(|| anyhow!("no se encontró ninguna pista de audio decodificable"))?
+            .ok_or_else(|| anyhow!("no decodable audio track found"))?
             .clone();
 
         let codec_params = track
             .codec_params
             .as_ref()
-            .ok_or_else(|| anyhow!("la pista de audio no tiene parámetros de códec"))?;
+            .ok_or_else(|| anyhow!("the audio track has no codec parameters"))?;
         let audio_params = codec_params
             .audio()
-            .ok_or_else(|| anyhow!("la pista no es de audio"))?;
+            .ok_or_else(|| anyhow!("the track is not audio"))?;
 
         let sample_rate = audio_params
             .sample_rate
-            .ok_or_else(|| anyhow!("no se pudo determinar la frecuencia de muestreo de la fuente"))?;
+            .ok_or_else(|| anyhow!("could not determine the source's sample rate"))?;
         let channels = audio_params
             .channels
             .as_ref()
             .map(|c| c.count() as u32)
-            .ok_or_else(|| anyhow!("no se pudo determinar el número de canales de la fuente"))?;
+            .ok_or_else(|| anyhow!("could not determine the source's channel count"))?;
         let bits_per_sample = audio_params.bits_per_sample.ok_or_else(|| {
             anyhow!(
-                "no se pudo determinar bits_per_sample de la fuente (un FLAC debería reportar 16 o 24)"
+                "could not determine the source's bits_per_sample (a FLAC should report 16 or 24)"
             )
         })?;
 
         let dec_opts = Default::default();
         let decoder = symphonia::default::get_codecs()
             .make_audio_decoder(audio_params, &dec_opts)
-            .context("códec de audio no soportado")?;
+            .context("unsupported audio codec")?;
 
         Ok(Decoder {
             format,
@@ -146,10 +146,10 @@ impl Decoder {
                 Ok(None) => break,
                 Err(SymphoniaError::ResetRequired) => {
                     bail!(
-                        "el stream requiere reiniciar el decodificador a mitad de la reproducción; no soportado en la fase 0"
+                        "the stream requires resetting the decoder mid-playback; not supported in phase 0"
                     );
                 }
-                Err(e) => return Err(e).context("error leyendo el siguiente paquete del contenedor"),
+                Err(e) => return Err(e).context("error reading the next packet from the container"),
             };
 
             if packet.track_id != self.track_id {
@@ -159,14 +159,14 @@ impl Decoder {
             let decoded = match self.decoder.decode(&packet) {
                 Ok(decoded) => decoded,
                 Err(SymphoniaError::IoError(e)) => {
-                    eprintln!("Aviso: paquete descartado por error de E/S: {e}");
+                    eprintln!("Warning: packet dropped due to an I/O error: {e}");
                     continue;
                 }
                 Err(SymphoniaError::DecodeError(e)) => {
-                    eprintln!("Aviso: paquete descartado por error de decodificación: {e}");
+                    eprintln!("Warning: packet dropped due to a decode error: {e}");
                     continue;
                 }
-                Err(e) => return Err(e).context("error irrecuperable del decodificador"),
+                Err(e) => return Err(e).context("unrecoverable decoder error"),
             };
 
             // Integer path only: never route through f32/f64 here, that would break
