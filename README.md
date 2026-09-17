@@ -139,3 +139,7 @@ more importantly, *why* it was chosen.
   messages (in Spanish, since this phase is operated directly by a person, not consumed as a
   library) at every fallible step, from "no saved session, run `phonia login`" to "the device
   doesn't support any lossless integer format for a 24-bit source."
+
+## Licencia
+
+MIT. Consulta el archivo [LICENSE](LICENSE).
