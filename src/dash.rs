@@ -8,7 +8,18 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use quick_xml::Reader;
+use quick_xml::XmlVersion;
 use quick_xml::events::Event;
+
+/// Decodes an attribute's raw bytes as UTF-8 and unescapes XML entities (`&amp;` -> `&`, etc.).
+/// TIDAL's manifests routinely put pre-signed CDN URLs (with `&`-separated query parameters,
+/// escaped as `&amp;` per the XML spec) in `initialization`/`media` attributes; reading the raw
+/// bytes without this step silently corrupts those URLs, breaking the CDN's signature check.
+fn attr_value(a: &quick_xml::events::attributes::Attribute) -> Result<String> {
+    Ok(a.normalized_value(XmlVersion::Implicit1_0)
+        .context("desescapando el valor de un atributo XML")?
+        .into_owned())
+}
 
 /// Everything needed to download the init segment and all media segments of a single
 /// DASH (ISO/MP4) audio representation.
@@ -126,27 +137,25 @@ pub fn parse_mpd(xml: &str) -> Result<DashSegments> {
                     b"MPD" => {
                         for a in e.attributes().flatten() {
                             if a.key.as_ref() == b"mediaPresentationDuration" {
-                                media_presentation_duration =
-                                    Some(String::from_utf8_lossy(&a.value).to_string());
+                                media_presentation_duration = Some(attr_value(&a)?);
                             }
                         }
                     }
                     b"Representation" => {
                         for a in e.attributes().flatten() {
                             if a.key.as_ref() == b"codecs" {
-                                codecs = Some(String::from_utf8_lossy(&a.value).to_string());
+                                codecs = Some(attr_value(&a)?);
                             }
                         }
                     }
                     b"SegmentTemplate" => {
                         for a in e.attributes().flatten() {
-                            let value = String::from_utf8_lossy(&a.value).to_string();
                             match a.key.as_ref() {
-                                b"initialization" => init_url = Some(value),
-                                b"media" => media_url = Some(value),
-                                b"timescale" => timescale = value.parse().ok(),
-                                b"duration" => duration = value.parse().ok(),
-                                b"startNumber" => start_number = value.parse().unwrap_or(1),
+                                b"initialization" => init_url = Some(attr_value(&a)?),
+                                b"media" => media_url = Some(attr_value(&a)?),
+                                b"timescale" => timescale = attr_value(&a)?.parse().ok(),
+                                b"duration" => duration = attr_value(&a)?.parse().ok(),
+                                b"startNumber" => start_number = attr_value(&a)?.parse().unwrap_or(1),
                                 _ => {}
                             }
                         }
@@ -159,8 +168,7 @@ pub fn parse_mpd(xml: &str) -> Result<DashSegments> {
                         let mut r: u64 = 0;
                         for a in e.attributes().flatten() {
                             if a.key.as_ref() == b"r" {
-                                let value = String::from_utf8_lossy(&a.value).to_string();
-                                r = value.parse().unwrap_or(0);
+                                r = attr_value(&a)?.parse().unwrap_or(0);
                             }
                         }
                         *timeline_count.get_or_insert(0) += 1 + r;
@@ -173,13 +181,25 @@ pub fn parse_mpd(xml: &str) -> Result<DashSegments> {
             }
             Event::Text(t) => {
                 if pending_base_url {
-                    let text = t
-                        .decode()
-                        .context("error decodificando texto de <BaseURL>")?
-                        .into_owned();
-                    if !text.is_empty() {
-                        base_url = Some(text);
-                    }
+                    // Entities (e.g. `&amp;` in a pre-signed URL's query string) arrive as
+                    // separate `GeneralRef` events, not inline here, so this text fragment never
+                    // contains an unresolved entity; it only needs a charset decode.
+                    let text = t.decode().context("error decodificando texto de <BaseURL>")?;
+                    base_url.get_or_insert_with(String::new).push_str(&text);
+                }
+            }
+            Event::GeneralRef(r) if pending_base_url => {
+                let dest = base_url.get_or_insert_with(String::new);
+                if let Some(ch) = r
+                    .resolve_char_ref()
+                    .context("resolviendo una referencia de carácter en <BaseURL>")?
+                {
+                    dest.push(ch);
+                } else {
+                    let name = r.decode().context("decodificando una entidad en <BaseURL>")?;
+                    let resolved = quick_xml::escape::resolve_predefined_entity(&name)
+                        .ok_or_else(|| anyhow!("entidad XML desconocida en <BaseURL>: &{name};"))?;
+                    dest.push_str(resolved);
                 }
             }
             Event::End(e) => match e.name().as_ref() {
@@ -250,6 +270,32 @@ mod tests {
           </Period>
         </MPD>
     "#;
+
+    #[test]
+    fn ampersands_in_signed_urls_are_unescaped() {
+        // Regression test: TIDAL's real manifests put pre-signed CDN URLs (with `&`-separated
+        // query parameters, escaped as `&amp;` per the XML spec) in `initialization`/`media`.
+        // Reading the raw attribute bytes without unescaping corrupts the URL's signature,
+        // which the CDN then rejects with a 404/403.
+        let xml = r#"
+            <MPD>
+              <Period>
+                <AdaptationSet mimeType="audio/mp4">
+                  <Representation codecs="flac">
+                    <BaseURL>https://cdn.example.com/track/?a=1&amp;b=2/</BaseURL>
+                    <SegmentTemplate initialization="init.mp4?x=1&amp;y=2" media="chunk-$Number$.m4s?x=1&amp;y=2" startNumber="1"/>
+                  </Representation>
+                </AdaptationSet>
+              </Period>
+            </MPD>
+        "#;
+        let parsed = parse_mpd(xml).expect("should parse");
+        assert_eq!(parsed.init_url, "https://cdn.example.com/track/?a=1&b=2/init.mp4?x=1&y=2");
+        assert_eq!(
+            parsed.media_url_template,
+            "https://cdn.example.com/track/?a=1&b=2/chunk-$Number$.m4s?x=1&y=2"
+        );
+    }
 
     #[test]
     fn segment_timeline_counts_s_elements_with_repeat() {
