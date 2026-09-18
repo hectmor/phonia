@@ -192,32 +192,20 @@ async fn download_segment(http: &reqwest::Client, url: &str) -> Result<Option<By
     Err(last_err.unwrap_or_else(|| anyhow!("unknown failure downloading segment")))
 }
 
-/// Prints (and keeps up to date on one `\r` line) a compact progress counter while the initial
-/// read-ahead buffer is filling. Stops updating once the prefetch window is full -- by then the
-/// decoder should be consuming the stream, and we don't want to keep fighting the ALSA sink's own
-/// `\r` progress line for the rest of the track. Returns whether the line was left open (i.e.
-/// still needs a trailing newline before anything else prints to stdout).
-fn report_prefetch_progress(downloaded: u32, total: Option<u32>) -> bool {
-    if downloaded > PREFETCH_DEPTH as u32 {
-        return false;
-    }
-    print!(
-        "\rBuffering: {downloaded}{}",
-        total.map(|t| format!("/{t}")).unwrap_or_default()
-    );
-    std::io::Write::flush(&mut std::io::stdout()).ok();
-    if downloaded == PREFETCH_DEPTH as u32 {
-        println!();
-        return false;
-    }
-    true
-}
-
 /// Downloads the init segment followed by all media segments of `dash`, sending each one over
 /// `tx` in order. Honours `segment_count` when known; otherwise stops at the first 404/403
 /// (requiring at least one successful media segment first), same rules the old
 /// `tidal::download_dash` used.
 async fn run_dash_download(http: reqwest::Client, dash: DashSegments, tx: mpsc::Sender<ChunkResult>) {
+    // `println!` locks stdout for the whole line, so complete lines from different threads can't
+    // interleave -- only unterminated `\r` lines can. So this producer prints exactly one
+    // complete line up front and never touches stdout again; only the ALSA sink owns a `\r`
+    // progress line for the rest of playback.
+    match dash.segment_count {
+        Some(total) => println!("Buffering {PREFETCH_DEPTH} segments ahead (track has {total} segments)..."),
+        None => println!("Buffering {PREFETCH_DEPTH} segments ahead..."),
+    }
+
     let init = match download_segment(&http, &dash.init_url).await {
         Ok(Some(bytes)) => bytes,
         Ok(None) => {
@@ -241,7 +229,6 @@ async fn run_dash_download(http: reqwest::Client, dash: DashSegments, tx: mpsc::
     let known_range = dash.segment_range();
     let mut segment_number = known_range.as_ref().map_or(dash.start_number, |r| *r.start());
     let mut downloaded = 0u32;
-    let mut line_open = false;
 
     loop {
         if let Some(range) = &known_range
@@ -254,7 +241,6 @@ async fn run_dash_download(http: reqwest::Client, dash: DashSegments, tx: mpsc::
         match download_segment(&http, &url).await {
             Ok(Some(bytes)) => {
                 downloaded += 1;
-                line_open = report_prefetch_progress(downloaded, dash.segment_count);
                 if tx.send(Ok(bytes)).await.is_err() {
                     return; // Decoder side gone; stop cleanly.
                 }
@@ -287,10 +273,6 @@ async fn run_dash_download(http: reqwest::Client, dash: DashSegments, tx: mpsc::
 
         segment_number += 1;
     }
-
-    if line_open {
-        println!();
-    }
 }
 
 /// Opens a streaming source over a DASH (fragmented MP4) representation: sends the init segment
@@ -313,6 +295,9 @@ pub fn open_url(http: &reqwest::Client, url: &str, tee: Option<std::fs::File>) -
     let http = http.clone();
     let url = url.to_string();
     tokio::spawn(async move {
+        // See the comment in `run_dash_download`: one complete line up front, nothing else.
+        println!("Buffering...");
+
         let response = match http.get(&url).send().await {
             Ok(r) => r,
             Err(e) => {
@@ -329,13 +314,9 @@ pub fn open_url(http: &reqwest::Client, url: &str, tee: Option<std::fs::File>) -
         }
 
         let mut chunks = response.bytes_stream();
-        let mut downloaded_chunks = 0u32;
-        let mut line_open = false;
         while let Some(chunk) = chunks.next().await {
             match chunk {
                 Ok(bytes) => {
-                    downloaded_chunks += 1;
-                    line_open = report_prefetch_progress(downloaded_chunks, None);
                     if tx.send(Ok(bytes)).await.is_err() {
                         return; // Decoder side gone; stop cleanly.
                     }
@@ -345,9 +326,6 @@ pub fn open_url(http: &reqwest::Client, url: &str, tee: Option<std::fs::File>) -
                     return;
                 }
             }
-        }
-        if line_open {
-            println!();
         }
     });
     SegmentStream::new(rx, tee.map(|f| Box::new(f) as Box<dyn Write + Send + Sync>))
