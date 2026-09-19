@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use phonia_core::output::alsa::{self, AlsaSink};
 use phonia_core::{auth, decode, stream, tidal};
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tidlers::client::models::playback::AudioQuality;
@@ -61,7 +62,7 @@ impl From<Quality> for AudioQuality {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let result = match cli.command {
@@ -73,11 +74,13 @@ async fn main() -> Result<()> {
         Command::ProbeDevice { device } => alsa::probe_device(&device),
     };
 
-    if let Err(e) = &result {
-        eprintln!("Error: {e:#}");
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: {e:#}");
+            ExitCode::FAILURE
+        }
     }
-
-    result
 }
 
 async fn run_play(
