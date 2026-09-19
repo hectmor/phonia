@@ -5,12 +5,20 @@
 //! (which is what a blocking `writei` does: it waits for the DAC to consume audio). Everything
 //! that reaches the "DAC" is recorded, so tests can assert on the exact sample stream, including
 //! across pauses, flushes and seeks.
+//!
+//! In blocking mode ([`FakeSinkHandle::set_blocking`]) a write to a full queue waits until the test
+//! calls [`FakeSinkHandle::advance`], like a real `writei`. That holds the audio thread at a known
+//! point, which is what makes "stop/next in the middle of a track" deterministic to test.
 
-use super::AudioSink;
+use super::{AudioSink, SinkFactory};
 use crate::decode::SourceSpec;
 use anyhow::{Result, bail};
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
+
+/// A blocked write gives up after this long, so a test bug fails instead of hanging.
+const BLOCKED_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 const DEFAULT_PERIOD_FRAMES: usize = 1024;
 const DEFAULT_CAPACITY_FRAMES: usize = 4096;
@@ -23,15 +31,22 @@ struct State {
     played: Vec<i32>,
     paused: bool,
     autoplay: bool,
+    blocking: bool,
     flushes: u32,
     drains: u32,
+}
+
+struct Shared {
+    state: Mutex<State>,
+    /// Signalled whenever room may have opened up in the queue.
+    room: Condvar,
 }
 
 pub struct FakeSink {
     spec: SourceSpec,
     period_frames: usize,
     capacity_frames: usize,
-    state: Arc<Mutex<State>>,
+    shared: Arc<Shared>,
 }
 
 /// A view onto a [`FakeSink`] that stays usable from the test thread while the sink itself has
@@ -39,7 +54,7 @@ pub struct FakeSink {
 #[derive(Clone)]
 pub struct FakeSinkHandle {
     spec: SourceSpec,
-    state: Arc<Mutex<State>>,
+    shared: Arc<Shared>,
 }
 
 impl FakeSink {
@@ -51,19 +66,31 @@ impl FakeSink {
 
     pub fn with_sizes(spec: SourceSpec, period_frames: usize, capacity_frames: usize) -> (Self, FakeSinkHandle) {
         assert!(period_frames > 0 && capacity_frames >= period_frames);
-        let state = Arc::new(Mutex::new(State::default()));
-        let handle = FakeSinkHandle { spec, state: state.clone() };
-        (Self { spec, period_frames, capacity_frames, state }, handle)
+        let shared = Arc::new(Shared { state: Mutex::new(State::default()), room: Condvar::new() });
+        let handle = FakeSinkHandle { spec, shared: shared.clone() };
+        (Self { spec, period_frames, capacity_frames, shared }, handle)
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap()
+        self.shared.state.lock().unwrap()
     }
 }
 
 impl FakeSinkHandle {
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap()
+        self.shared.state.lock().unwrap()
+    }
+
+    /// The format the sink was opened with.
+    pub fn spec(&self) -> SourceSpec {
+        self.spec
+    }
+
+    /// In blocking mode a write to a full queue waits for [`FakeSinkHandle::advance`] instead of
+    /// playing the oldest audio to make room.
+    pub fn set_blocking(&self, blocking: bool) {
+        self.lock().blocking = blocking;
+        self.shared.room.notify_all();
     }
 
     /// In autoplay mode every write is played immediately (the queue is always empty), which
@@ -82,6 +109,7 @@ impl FakeSinkHandle {
         let samples = (frames * channels).min(state.queued.len());
         let drained: Vec<i32> = state.queued.drain(..samples).collect();
         state.played.extend(drained);
+        self.shared.room.notify_all();
     }
 
     /// Everything that has reached the DAC so far.
@@ -115,19 +143,30 @@ impl AudioSink for FakeSink {
         let channels = self.spec.channels as usize;
         let frames = (samples.len() / channels).min(self.period_frames);
         let samples = &samples[..frames * channels];
+        let capacity = self.capacity_frames * channels;
 
+        let deadline = Instant::now() + BLOCKED_WRITE_TIMEOUT;
         let mut state = self.lock();
-        if state.paused {
-            bail!("write() called on a paused sink");
+        loop {
+            if state.paused {
+                bail!("write() called on a paused sink");
+            }
+            if state.autoplay {
+                state.played.extend_from_slice(samples);
+                return Ok(frames);
+            }
+            if !state.blocking || state.queued.len() + samples.len() <= capacity {
+                break;
+            }
+            // A real blocking write waits for the DAC to consume audio when the queue is full.
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                bail!("write blocked for more than {BLOCKED_WRITE_TIMEOUT:?}: the test never advanced the sink");
+            };
+            state = self.shared.room.wait_timeout(state, remaining).unwrap().0;
         }
 
-        if state.autoplay {
-            state.played.extend_from_slice(samples);
-            return Ok(frames);
-        }
-
-        // A real blocking write waits for the DAC to consume audio when the queue is full.
-        let overflow = (state.queued.len() + samples.len()).saturating_sub(self.capacity_frames * channels);
+        // Non-blocking: when the queue is full, play the oldest audio to make room.
+        let overflow = (state.queued.len() + samples.len()).saturating_sub(capacity);
         if overflow > 0 {
             let drained: Vec<i32> = state.queued.drain(..overflow).collect();
             state.played.extend(drained);
@@ -147,6 +186,7 @@ impl AudioSink for FakeSink {
 
     fn resume(&mut self) -> Result<()> {
         self.lock().paused = false;
+        self.shared.room.notify_all();
         Ok(())
     }
 
@@ -155,6 +195,7 @@ impl AudioSink for FakeSink {
         state.queued.clear();
         state.paused = false;
         state.flushes += 1;
+        self.shared.room.notify_all();
         Ok(())
     }
 
@@ -164,7 +205,51 @@ impl AudioSink for FakeSink {
         let drained: Vec<i32> = state.queued.drain(..).collect();
         state.played.extend(drained);
         state.drains += 1;
+        self.shared.room.notify_all();
         Ok(())
+    }
+}
+
+/// How the sinks a [`FakeSinkFactory`] opens behave.
+#[derive(Clone, Copy)]
+enum Mode {
+    Autoplay,
+    Blocking,
+}
+
+/// A [`SinkFactory`] that opens [`FakeSink`]s and keeps a handle to each, so tests can inspect
+/// what the engine did (how many sinks it opened, and what each one played).
+pub struct FakeSinkFactory {
+    mode: Mode,
+    handles: Mutex<Vec<FakeSinkHandle>>,
+}
+
+impl FakeSinkFactory {
+    /// Sinks that play every write immediately.
+    pub fn autoplay() -> Arc<Self> {
+        Arc::new(Self { mode: Mode::Autoplay, handles: Mutex::new(Vec::new()) })
+    }
+
+    /// Sinks that block on a full queue until the test advances them.
+    pub fn blocking() -> Arc<Self> {
+        Arc::new(Self { mode: Mode::Blocking, handles: Mutex::new(Vec::new()) })
+    }
+
+    /// One handle per sink opened so far, oldest first.
+    pub fn handles(&self) -> Vec<FakeSinkHandle> {
+        self.handles.lock().unwrap().clone()
+    }
+}
+
+impl SinkFactory for FakeSinkFactory {
+    fn open(&self, spec: SourceSpec) -> Result<Box<dyn AudioSink>> {
+        let (sink, handle) = FakeSink::new(spec);
+        match self.mode {
+            Mode::Autoplay => handle.set_autoplay(true),
+            Mode::Blocking => handle.set_blocking(true),
+        }
+        self.handles.lock().unwrap().push(handle);
+        Ok(Box::new(sink))
     }
 }
 
@@ -283,5 +368,37 @@ mod tests {
         handle.set_autoplay(true);
         std::thread::spawn(move || write_all(&mut sink, &ramp(0, 100))).join().unwrap();
         assert_eq!(handle.played(), ramp(0, 100));
+    }
+
+    #[test]
+    fn blocking_write_waits_until_the_dac_makes_room() {
+        let (mut sink, handle) = FakeSink::with_sizes(SPEC, 100, 200);
+        handle.set_blocking(true);
+        write_all(&mut sink, &ramp(0, 200)); // exactly fills the queue
+
+        let writer = std::thread::spawn(move || {
+            write_all(&mut sink, &ramp(200, 100));
+            sink
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!writer.is_finished(), "the write must be blocked on a full queue");
+        assert_eq!(handle.queued_frames(), 200);
+
+        handle.advance(100);
+        let mut sink = writer.join().unwrap();
+        sink.drain().unwrap();
+        assert_eq!(handle.played(), ramp(0, 300));
+    }
+
+    #[test]
+    fn factory_opens_sinks_in_the_requested_mode_and_keeps_their_handles() {
+        let factory = FakeSinkFactory::autoplay();
+        let mut sink = factory.open(SPEC).unwrap();
+        sink.write(&ramp(0, 10)).unwrap();
+        assert_eq!(factory.handles().len(), 1);
+        assert_eq!(factory.handles()[0].played(), ramp(0, 10));
+
+        factory.open(SPEC).unwrap();
+        assert_eq!(factory.handles().len(), 2);
     }
 }

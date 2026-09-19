@@ -42,3 +42,10 @@ pub trait AudioSink {
     /// Blocks until everything queued has been played.
     fn drain(&mut self) -> Result<()>;
 }
+
+/// Opens sinks for the engine, which decides when (a new track with a different format needs a
+/// new device configuration). Called on the audio thread, so the sink it returns never has to be
+/// `Send`.
+pub trait SinkFactory: Send + Sync {
+    fn open(&self, spec: SourceSpec) -> Result<Box<dyn AudioSink>>;
+}
