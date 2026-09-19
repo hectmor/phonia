@@ -262,7 +262,7 @@ impl Decoder {
     }
 }
 
-fn frames_to_duration(frames: u64, sample_rate: u32) -> Duration {
+pub(crate) fn frames_to_duration(frames: u64, sample_rate: u32) -> Duration {
     let sample_rate = u64::from(sample_rate.max(1));
     Duration::new(frames / sample_rate, ((frames % sample_rate) * 1_000_000_000 / sample_rate) as u32)
 }

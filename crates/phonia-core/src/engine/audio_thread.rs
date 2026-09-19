@@ -6,12 +6,14 @@
 //! message, so this loop has a single place to wait.
 
 use super::supplier::{Advance, LoadedTrack, TrackMedia, TrackSupplier};
+use super::PREVIOUS_RESTART_AFTER;
 use super::types::{Command, EndReason, Event, State, Status, TrackMeta, TrackRef};
-use crate::decode::{Decoder, SourceSpec};
+use crate::decode::{Decoder, SourceSpec, frames_to_duration};
 use crate::output::{AudioSink, SinkFactory};
 use anyhow::{Context as _, Result, anyhow};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
@@ -36,6 +38,7 @@ pub(super) struct Context {
     pub supplier: Arc<dyn TrackSupplier>,
     pub events: broadcast::Sender<Event>,
     pub status: watch::Sender<Status>,
+    pub position_interval: Duration,
 }
 
 pub(super) fn run(ctx: Context) {
@@ -69,6 +72,15 @@ impl Source {
         }
     }
 
+    fn duration(&self) -> Option<Duration> {
+        match self {
+            Source::Decoder(decoder) => decoder.duration(),
+            Source::Raw { samples, spec, .. } => {
+                Some(frames_to_duration((samples.len() / spec.channels as usize) as u64, spec.sample_rate))
+            }
+        }
+    }
+
     /// Replaces `out` with the next chunk of interleaved samples; `false` at the end.
     fn next_chunk_into(&mut self, out: &mut Vec<i32>) -> Result<bool> {
         match self {
@@ -97,6 +109,12 @@ struct Playing {
     /// Whether the sink itself was paused. A track that starts paused never touched the sink,
     /// so there is nothing to resume there.
     sink_paused: bool,
+    /// Frames the sink has accepted since the track started.
+    frames_written: u64,
+    duration: Option<Duration>,
+    /// What the listener had heard when the position was last reported.
+    position: Duration,
+    last_position_at: Instant,
 }
 
 struct AudioThread {
@@ -163,6 +181,11 @@ impl AudioThread {
                 self.interrupt_current();
                 self.request_load(LoadTarget::Advance(Advance::Next));
             }
+            Msg::Command(Command::Previous) => {
+                let restart = self.heard_position() >= PREVIOUS_RESTART_AFTER;
+                self.interrupt_current();
+                self.request_load(LoadTarget::Advance(if restart { Advance::Restart } else { Advance::Previous }));
+            }
             Msg::Command(Command::Stop) => self.stop(),
             Msg::Command(Command::Pause) => self.pause(),
             Msg::Command(Command::Resume) => self.resume(),
@@ -212,7 +235,34 @@ impl AudioThread {
         let frames = sink.write(&playing.pending[playing.offset..])?;
         // A sink that takes nothing from a partial frame would otherwise spin forever.
         playing.offset = if frames == 0 { playing.pending.len() } else { playing.offset + frames * channels };
+        playing.frames_written += frames as u64;
+
+        if playing.last_position_at.elapsed() >= self.ctx.position_interval {
+            self.emit_position();
+        }
         Ok(())
+    }
+
+    /// What the listener has actually heard: everything handed to the device except what it has
+    /// not played yet. Counting only what was written would run ahead by the device's buffer.
+    fn heard_position(&mut self) -> Duration {
+        let (Some(playing), Some(sink)) = (self.current.as_ref(), self.sink.as_mut()) else {
+            return Duration::ZERO;
+        };
+        // If the device can't say, assume nothing is queued.
+        let queued = sink.delay_frames().unwrap_or(0);
+        let heard = playing.frames_written.saturating_sub(queued);
+        frames_to_duration(heard, playing.source.spec().sample_rate)
+    }
+
+    fn emit_position(&mut self) {
+        let position = self.heard_position();
+        let Some(playing) = self.current.as_mut() else { return };
+        playing.position = position;
+        playing.last_position_at = Instant::now();
+        let duration = playing.duration;
+        self.publish_status();
+        self.emit(Event::Position { position, duration });
     }
 
     fn track_completed(&mut self) {
@@ -222,6 +272,7 @@ impl AudioThread {
             self.fail(error.context("draining the audio output"));
             return;
         }
+        self.emit_position();
         if let Some(playing) = self.current.take() {
             self.emit(Event::TrackEnded { meta: playing.meta, reason: EndReason::Completed });
         }
@@ -238,6 +289,7 @@ impl AudioThread {
         };
 
         let spec = source.spec();
+        let duration = meta.duration.or_else(|| source.duration());
         if !self.sink.as_ref().is_some_and(|sink| sink.spec() == spec) {
             // The device can only be opened once, so the old configuration has to go first.
             self.sink = None;
@@ -250,11 +302,16 @@ impl AudioThread {
             pending: Vec::new(),
             offset: 0,
             sink_paused: false,
+            frames_written: 0,
+            duration,
+            position: Duration::ZERO,
+            last_position_at: Instant::now(),
         });
         self.emit(Event::TrackStarted { meta, spec });
         let state = if self.pause_when_ready { State::Paused } else { State::Playing };
         self.pause_when_ready = false;
         self.set_state(state);
+        self.emit_position();
         Ok(())
     }
 
@@ -270,6 +327,7 @@ impl AudioThread {
                     playing.sink_paused = true;
                 }
                 self.set_state(State::Paused);
+                self.emit_position();
             }
             State::Paused | State::Stopped => {}
         }
@@ -361,14 +419,21 @@ impl AudioThread {
     fn set_state(&mut self, state: State) {
         let changed = self.state != state;
         self.state = state;
-        self.ctx.status.send_replace(Status {
-            state,
-            track: self.current.as_ref().map(|playing| playing.meta.clone()),
-            spec: self.current.as_ref().map(|playing| playing.source.spec()),
-        });
+        self.publish_status();
         if changed {
             self.emit(Event::StateChanged(state));
         }
+    }
+
+    fn publish_status(&self) {
+        let playing = self.current.as_ref();
+        self.ctx.status.send_replace(Status {
+            state: self.state,
+            track: playing.map(|p| p.meta.clone()),
+            spec: playing.map(|p| p.source.spec()),
+            position: playing.map_or(Duration::ZERO, |p| p.position),
+            duration: playing.and_then(|p| p.duration),
+        });
     }
 
     fn emit(&self, event: Event) {

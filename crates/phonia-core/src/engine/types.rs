@@ -24,6 +24,9 @@ pub enum Command {
     Stop,
     /// Skips to the supplier's next track.
     Next,
+    /// Goes back to the previous track, or starts the current one over if it has been playing
+    /// for [`super::PREVIOUS_RESTART_AFTER`] or more.
+    Previous,
     /// Silences playback without losing the position. Pausing while a track is still loading
     /// makes it start paused.
     Pause,
@@ -50,6 +53,9 @@ pub struct Status {
     /// The current track; `None` unless `state` is [`State::Playing`] or [`State::Paused`].
     pub track: Option<TrackMeta>,
     pub spec: Option<SourceSpec>,
+    /// What the listener has heard of the current track, as of the last [`Event::Position`].
+    pub position: Duration,
+    pub duration: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +74,10 @@ pub enum Event {
     /// Sent just before `StateChanged(Playing)`.
     TrackStarted { meta: TrackMeta, spec: SourceSpec },
     TrackEnded { meta: TrackMeta, reason: EndReason },
+    /// How much of the current track has actually been heard (not merely handed to the device),
+    /// sent about four times a second while playing, and also when a track starts, pauses or
+    /// ends. The last one of a completed track equals its length.
+    Position { position: Duration, duration: Option<Duration> },
     /// The supplier has no further track to offer.
     QueueExhausted,
     /// Something went wrong; the engine has stopped, but stays usable.

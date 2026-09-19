@@ -1,6 +1,6 @@
 use super::audio_thread::Msg;
 use super::*;
-use crate::decode::SourceSpec;
+use crate::decode::{SourceSpec, frames_to_duration};
 use crate::output::fake::{FakeSinkFactory, FakeSinkHandle};
 use crate::testutil::{expected, wav};
 use futures_util::future::BoxFuture;
@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast::error::TryRecvError;
 
 const SPEC_48K: SourceSpec = SourceSpec { sample_rate: 48_000, channels: 2, bits_per_sample: 24 };
+/// A tiny rate, so "three seconds in" is only a few thousand frames.
+const SPEC_1K: SourceSpec = SourceSpec { sample_rate: 1_000, channels: 2, bits_per_sample: 24 };
 const SPEC_96K: SourceSpec = SourceSpec { sample_rate: 96_000, channels: 2, bits_per_sample: 24 };
 /// Matches the WAVs from `testutil::wav`.
 const SPEC_WAV: SourceSpec = SourceSpec { sample_rate: 44_100, channels: 2, bits_per_sample: 16 };
@@ -65,9 +67,14 @@ impl TestSupplier {
 }
 
 impl TrackSupplier for TestSupplier {
-    fn advance(&self, _how: Advance) -> Option<TrackRef> {
-        let next = self.cursor.lock().unwrap().map_or(0, |index| index + 1);
-        self.tracks.get(next).map(|track| TrackRef(track.id.to_string()))
+    fn advance(&self, how: Advance) -> Option<TrackRef> {
+        let cursor = *self.cursor.lock().unwrap();
+        let target = match how {
+            Advance::Auto | Advance::Next => Some(cursor.map_or(0, |index| index + 1)),
+            Advance::Previous => cursor.and_then(|index| index.checked_sub(1)),
+            Advance::Restart => cursor,
+        };
+        target.and_then(|index| self.tracks.get(index)).map(|track| TrackRef(track.id.to_string()))
     }
 
     fn open(&self, track: TrackRef) -> BoxFuture<'static, anyhow::Result<LoadedTrack>> {
@@ -101,15 +108,23 @@ struct Harness {
     engine: Engine,
     sinks: Arc<FakeSinkFactory>,
     events: broadcast::Receiver<Event>,
+    /// A second subscription that, unlike `events`, keeps the `Position` events.
+    raw_events: broadcast::Receiver<Event>,
     _rt: tokio::runtime::Runtime,
 }
 
 impl Harness {
     fn new(tracks: Vec<TestTrack>, sinks: Arc<FakeSinkFactory>) -> Self {
+        Self::with_position_interval(tracks, sinks, Duration::from_millis(250))
+    }
+
+    fn with_position_interval(tracks: Vec<TestTrack>, sinks: Arc<FakeSinkFactory>, interval: Duration) -> Self {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
-        let engine = Engine::spawn(rt.handle().clone(), sinks.clone(), TestSupplier::new(tracks)).unwrap();
-        let events = engine.subscribe();
-        Self { engine, sinks, events, _rt: rt }
+        let engine =
+            Engine::spawn_with_position_interval(rt.handle().clone(), sinks.clone(), TestSupplier::new(tracks), interval)
+                .unwrap();
+        let (events, raw_events) = (engine.subscribe(), engine.subscribe());
+        Self { engine, sinks, events, raw_events, _rt: rt }
     }
 
     fn send(&self, command: Command) {
@@ -120,10 +135,13 @@ impl Harness {
         self.send(Command::Play(Some(TrackRef(id.to_string()))));
     }
 
+    /// The next event other than `Position`, which has its own helpers so it doesn't clutter the
+    /// lifecycle sequences the other tests assert on.
     fn next_event(&mut self) -> Event {
         let deadline = Instant::now() + TIMEOUT;
         loop {
             match self.events.try_recv() {
+                Ok(Event::Position { .. }) => continue,
                 Ok(event) => return event,
                 Err(TryRecvError::Lagged(_)) => continue,
                 Err(TryRecvError::Closed) => panic!("the event channel closed"),
@@ -150,18 +168,51 @@ impl Harness {
         self.events_until(stop).iter().map(label).collect()
     }
 
-    /// Asserts nothing else is reported for `duration`.
+    /// Asserts nothing else is reported for `duration` (position reports aside).
     fn assert_quiet_for(&mut self, duration: Duration) {
         std::thread::sleep(duration);
-        match self.events.try_recv() {
-            Err(TryRecvError::Empty) => {}
-            other => panic!("expected no more events, got {other:?}"),
+        loop {
+            match self.events.try_recv() {
+                Ok(Event::Position { .. }) => continue,
+                Err(TryRecvError::Empty) => return,
+                other => panic!("expected no more events, got {other:?}"),
+            }
+        }
+    }
+
+    /// The next reported position (and the track length), skipping every other event.
+    fn next_position(&mut self) -> (Duration, Option<Duration>) {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            match self.raw_events.try_recv() {
+                Ok(Event::Position { position, duration }) => return (position, duration),
+                Ok(_) | Err(TryRecvError::Lagged(_)) => continue,
+                Err(TryRecvError::Closed) => panic!("the event channel closed"),
+                Err(TryRecvError::Empty) if Instant::now() > deadline => panic!("timed out waiting for a position"),
+                Err(TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        }
+    }
+
+    /// Positions until one satisfies `stop`, which is included.
+    fn positions_until(&mut self, stop: impl Fn(Duration) -> bool) -> Vec<Duration> {
+        let mut positions = Vec::new();
+        loop {
+            let (position, _) = self.next_position();
+            positions.push(position);
+            if stop(position) {
+                return positions;
+            }
         }
     }
 
     fn sink(&self, index: usize) -> FakeSinkHandle {
         self.sinks.handles()[index].clone()
     }
+}
+
+fn stopped_status() -> Status {
+    Status { state: State::Stopped, track: None, spec: None, position: Duration::ZERO, duration: None }
 }
 
 fn label(event: &Event) -> String {
@@ -171,6 +222,7 @@ fn label(event: &Event) -> String {
         Event::TrackEnded { meta, reason } => format!("ended:{}:{reason:?}", meta.track.0),
         Event::QueueExhausted => "exhausted".to_string(),
         Event::Error { message } => format!("error:{message}"),
+        Event::Position { .. } => unreachable!("positions are filtered out before labelling"),
     }
 }
 
@@ -193,7 +245,7 @@ fn wait_until(what: &str, condition: impl Fn() -> bool) {
 #[test]
 fn a_fresh_engine_is_stopped() {
     let h = Harness::new(vec![], FakeSinkFactory::autoplay());
-    assert_eq!(h.engine.status(), Status { state: State::Stopped, track: None, spec: None });
+    assert_eq!(h.engine.status(), stopped_status());
 }
 
 #[test]
@@ -571,7 +623,7 @@ fn stop_while_paused_discards_the_queue_and_releases_the_device() {
     assert_eq!(h.labels_until(is_stopped), ["ended:a:Interrupted", "state:Stopped"]);
     assert_eq!(sink.flush_count(), 1);
     assert!(!sink.is_paused());
-    assert_eq!(h.engine.status(), Status { state: State::Stopped, track: None, spec: None });
+    assert_eq!(h.engine.status(), stopped_status());
 }
 
 #[test]
@@ -602,4 +654,128 @@ fn shutdown_while_paused_does_not_hang() {
     h.events_until(|e| matches!(e, Event::StateChanged(State::Paused)));
     h.engine.shutdown();
     assert_eq!(sink.flush_count(), 1);
+}
+
+#[test]
+fn position_is_what_was_heard_not_what_was_written() {
+    let frames = 20_000;
+    let mut h = Harness::with_position_interval(
+        vec![TestTrack::pcm("a", frames)],
+        FakeSinkFactory::blocking(),
+        Duration::ZERO,
+    );
+    let sink = play_until_queue_is_full(&mut h, "a");
+
+    // Four periods are written but none played yet: nothing has been heard.
+    assert_eq!(h.engine.status().position, Duration::ZERO);
+
+    // The DAC plays 1500 frames, freeing room for the engine's blocked write to complete.
+    sink.advance(1500);
+    let heard = frames_to_duration(1500, 48_000);
+    let positions = h.positions_until(|p| p > Duration::ZERO);
+    assert_eq!(positions.last(), Some(&heard), "written minus still queued");
+
+    let status = h.engine.status();
+    assert_eq!(status.position, heard);
+    assert_eq!(status.duration, Some(frames_to_duration(frames as u64, 48_000)));
+    sink.set_blocking(false);
+}
+
+#[test]
+fn a_completed_track_ends_with_its_full_length_as_the_last_position() {
+    let frames = 10_000;
+    let mut h = Harness::with_position_interval(
+        vec![TestTrack::pcm("a", frames)],
+        FakeSinkFactory::autoplay(),
+        Duration::ZERO,
+    );
+    h.play("a");
+    let length = frames_to_duration(frames as u64, 48_000);
+
+    let positions = h.positions_until(|p| p == length);
+    assert_eq!(positions[0], Duration::ZERO, "a track starts at zero");
+    assert!(positions.windows(2).all(|w| w[0] <= w[1]), "position never goes backwards: {positions:?}");
+
+    // Completion reports the position once more, after the device has played everything.
+    assert_eq!(h.next_position(), (length, Some(length)));
+}
+
+#[test]
+fn position_holds_still_while_paused() {
+    let mut h = Harness::with_position_interval(
+        vec![TestTrack::pcm("a", 30_000)],
+        FakeSinkFactory::blocking(),
+        Duration::ZERO,
+    );
+    let sink = play_until_queue_is_full(&mut h, "a");
+    sink.advance(2000);
+    wait_until("the writer is blocked again", || sink.queued_frames() > CAPACITY - PERIOD);
+
+    h.send(Command::Pause);
+    sink.advance(PERIOD);
+    h.events_until(|e| matches!(e, Event::StateChanged(State::Paused)));
+
+    let heard_at_pause = frames_to_duration((sink.played().len() / 2) as u64, 48_000);
+    let paused = h.engine.status();
+    assert_eq!(paused.position, heard_at_pause);
+
+    sink.advance(10_000); // ignored: the device is paused
+    h.assert_quiet_for(Duration::from_millis(100));
+    assert_eq!(h.engine.status().position, heard_at_pause);
+}
+
+#[test]
+fn previous_early_in_a_track_goes_back_one_track() {
+    let mut h = Harness::new(
+        vec![TestTrack::pcm("a", 30_000), TestTrack::pcm("b", 30_000)],
+        FakeSinkFactory::blocking(),
+    );
+    let sink = play_until_queue_is_full(&mut h, "b");
+
+    h.send(Command::Previous);
+    sink.advance(PERIOD);
+    let labels = h.labels_until(is_started_label("started:a"));
+    assert_eq!(labels, ["state:Playing", "ended:b:Interrupted", "state:Loading", "started:a"]);
+    sink.set_blocking(false);
+}
+
+fn is_started_label(wanted: &'static str) -> impl Fn(&Event) -> bool {
+    move |event| label(event) == wanted
+}
+
+#[test]
+fn previous_after_three_seconds_restarts_the_current_track() {
+    let frames = 10_000;
+    let mut h = Harness::new(
+        vec![TestTrack::pcm("prev", 100), TestTrack::pcm_with("long", frames, SPEC_1K)],
+        FakeSinkFactory::blocking(),
+    );
+    let sink = play_until_queue_is_full(&mut h, "long");
+
+    // Let the device play 3.5 s (at 1 kHz) and wait for the engine to be blocked again.
+    sink.advance(3_500);
+    wait_until("the writer is blocked again", || sink.queued_frames() > CAPACITY - PERIOD);
+
+    h.send(Command::Previous);
+    sink.advance(PERIOD);
+    let labels = h.labels_until(is_started_label("started:long"));
+    assert_eq!(labels, ["state:Playing", "ended:long:Interrupted", "state:Loading", "started:long"]);
+
+    sink.set_blocking(false);
+    h.labels_until(is_stopped);
+    let played = sink.played();
+    assert_eq!(played[played.len() - frames * 2..], ramp(frames), "the restarted track plays from its first frame");
+}
+
+#[test]
+fn previous_on_the_first_track_reports_an_empty_queue() {
+    let mut h = Harness::new(vec![TestTrack::pcm("a", 30_000)], FakeSinkFactory::blocking());
+    let sink = play_until_queue_is_full(&mut h, "a");
+
+    h.send(Command::Previous);
+    sink.advance(PERIOD);
+    assert_eq!(
+        h.labels_until(is_stopped),
+        ["state:Playing", "ended:a:Interrupted", "state:Loading", "exhausted", "state:Stopped"]
+    );
 }

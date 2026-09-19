@@ -15,6 +15,14 @@ mod tests;
 pub use supplier::{Advance, LoadedTrack, TrackMedia, TrackSupplier};
 pub use types::{Command, EndReason, Event, State, Status, TrackMeta, TrackRef};
 
+use std::time::Duration;
+
+/// How often a playing track reports its position.
+const POSITION_INTERVAL: Duration = Duration::from_millis(250);
+
+/// `Previous` restarts the current track instead of going back once it has played this long.
+pub const PREVIOUS_RESTART_AFTER: Duration = Duration::from_secs(3);
+
 use crate::output::SinkFactory;
 use anyhow::{Context as _, Result, anyhow};
 use audio_thread::{Context, Msg};
@@ -37,11 +45,37 @@ pub struct Engine {
 impl Engine {
     /// Starts the audio thread. `rt` runs the supplier's (possibly slow) `open` calls.
     pub fn spawn(rt: Handle, sinks: Arc<dyn SinkFactory>, supplier: Arc<dyn TrackSupplier>) -> Result<Self> {
+        Self::spawn_with_position_interval(rt, sinks, supplier, POSITION_INTERVAL)
+    }
+
+    /// Like [`Engine::spawn`], with a custom interval between position reports; a zero interval
+    /// reports after every write, which tests use to observe positions deterministically.
+    pub(crate) fn spawn_with_position_interval(
+        rt: Handle,
+        sinks: Arc<dyn SinkFactory>,
+        supplier: Arc<dyn TrackSupplier>,
+        position_interval: Duration,
+    ) -> Result<Self> {
         let (tx, rx) = mpsc::channel();
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
-        let (status_tx, status) = watch::channel(Status { state: State::Stopped, track: None, spec: None });
+        let (status_tx, status) = watch::channel(Status {
+            state: State::Stopped,
+            track: None,
+            spec: None,
+            position: Duration::ZERO,
+            duration: None,
+        });
 
-        let ctx = Context { rx, tx: tx.clone(), rt, sinks, supplier, events: events.clone(), status: status_tx };
+        let ctx = Context {
+            rx,
+            tx: tx.clone(),
+            rt,
+            sinks,
+            supplier,
+            events: events.clone(),
+            status: status_tx,
+            position_interval,
+        };
         let thread = std::thread::Builder::new()
             .name("phonia-audio".into())
             .spawn(move || audio_thread::run(ctx))

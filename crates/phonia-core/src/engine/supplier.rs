@@ -14,6 +14,11 @@ pub enum Advance {
     Auto,
     /// The user asked to skip ahead.
     Next,
+    /// The user asked to go back one track.
+    Previous,
+    /// The user asked to go back, but far enough into the track that it starts over: the supplier
+    /// answers with the current track again.
+    Restart,
 }
 
 /// The audio of an opened track.
