@@ -24,6 +24,13 @@ pub enum Command {
     Stop,
     /// Skips to the supplier's next track.
     Next,
+    /// Silences playback without losing the position. Pausing while a track is still loading
+    /// makes it start paused.
+    Pause,
+    /// Continues after a [`Command::Pause`].
+    Resume,
+    /// `Pause` if playing (or loading), `Resume` if paused.
+    TogglePause,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,13 +39,15 @@ pub enum State {
     /// Waiting for the supplier to resolve a track. Nothing is audible.
     Loading,
     Playing,
+    /// A track is loaded and its position is kept, but the audio is silent.
+    Paused,
 }
 
 /// A snapshot of the engine, always up to date on [`super::Engine::status`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Status {
     pub state: State,
-    /// The track being played; `None` unless `state` is [`State::Playing`].
+    /// The current track; `None` unless `state` is [`State::Playing`] or [`State::Paused`].
     pub track: Option<TrackMeta>,
     pub spec: Option<SourceSpec>,
 }

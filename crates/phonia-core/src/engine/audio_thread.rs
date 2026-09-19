@@ -44,6 +44,7 @@ pub(super) fn run(ctx: Context) {
         state: State::Stopped,
         generation: 0,
         load_task: None,
+        pause_when_ready: false,
         sink: None,
         current: None,
     }
@@ -93,6 +94,9 @@ struct Playing {
     /// The chunk being written to the sink, of which `offset` samples are already in.
     pending: Vec<i32>,
     offset: usize,
+    /// Whether the sink itself was paused. A track that starts paused never touched the sink,
+    /// so there is nothing to resume there.
+    sink_paused: bool,
 }
 
 struct AudioThread {
@@ -102,6 +106,8 @@ struct AudioThread {
     /// answers a question nobody is asking any more and is dropped.
     generation: u64,
     load_task: Option<JoinHandle<()>>,
+    /// A `Pause` arrived while the track was still loading: start it paused.
+    pause_when_ready: bool,
     /// Kept open between tracks of the same format, so there is no gap or click.
     sink: Option<Box<dyn AudioSink>>,
     current: Option<Playing>,
@@ -110,8 +116,9 @@ struct AudioThread {
 impl AudioThread {
     fn run(mut self) {
         loop {
-            // While playing, poll for messages between writes; otherwise sleep until one comes.
-            let msg = if self.current.is_some() {
+            // While playing, poll for messages between writes; otherwise (stopped, loading or
+            // paused) sleep until one comes instead of spinning.
+            let msg = if self.state == State::Playing {
                 match self.ctx.rx.try_recv() {
                     Ok(msg) => Some(msg),
                     Err(TryRecvError::Empty) => None,
@@ -157,6 +164,12 @@ impl AudioThread {
                 self.request_load(LoadTarget::Advance(Advance::Next));
             }
             Msg::Command(Command::Stop) => self.stop(),
+            Msg::Command(Command::Pause) => self.pause(),
+            Msg::Command(Command::Resume) => self.resume(),
+            Msg::Command(Command::TogglePause) => match self.state {
+                State::Playing | State::Loading if !self.pause_when_ready => self.pause(),
+                _ => self.resume(),
+            },
             Msg::Loaded { generation, track } if self.is_awaited(generation) => {
                 if let Err(error) = self.start_track(*track) {
                     self.fail(error);
@@ -231,10 +244,54 @@ impl AudioThread {
             self.sink = Some(self.ctx.sinks.open(spec).context("opening the audio output")?);
         }
 
-        self.current = Some(Playing { meta: meta.clone(), source, pending: Vec::new(), offset: 0 });
+        self.current = Some(Playing {
+            meta: meta.clone(),
+            source,
+            pending: Vec::new(),
+            offset: 0,
+            sink_paused: false,
+        });
         self.emit(Event::TrackStarted { meta, spec });
-        self.set_state(State::Playing);
+        let state = if self.pause_when_ready { State::Paused } else { State::Playing };
+        self.pause_when_ready = false;
+        self.set_state(state);
         Ok(())
+    }
+
+    fn pause(&mut self) {
+        match self.state {
+            State::Loading => self.pause_when_ready = true,
+            State::Playing => {
+                if let (Some(playing), Some(sink)) = (self.current.as_mut(), self.sink.as_mut()) {
+                    if let Err(error) = sink.pause() {
+                        self.fail(error.context("pausing the audio output"));
+                        return;
+                    }
+                    playing.sink_paused = true;
+                }
+                self.set_state(State::Paused);
+            }
+            State::Paused | State::Stopped => {}
+        }
+    }
+
+    fn resume(&mut self) {
+        match self.state {
+            State::Loading => self.pause_when_ready = false,
+            State::Paused => {
+                if let (Some(playing), Some(sink)) = (self.current.as_mut(), self.sink.as_mut())
+                    && playing.sink_paused
+                {
+                    if let Err(error) = sink.resume() {
+                        self.fail(error.context("resuming the audio output"));
+                        return;
+                    }
+                    playing.sink_paused = false;
+                }
+                self.set_state(State::Playing);
+            }
+            State::Playing | State::Stopped => {}
+        }
     }
 
     /// Cuts the current track short, discarding whatever is queued in the device so it is never
@@ -253,6 +310,7 @@ impl AudioThread {
     fn stop(&mut self) {
         self.interrupt_current();
         self.cancel_load();
+        self.pause_when_ready = false;
         self.sink = None;
         self.set_state(State::Stopped);
     }
@@ -263,6 +321,7 @@ impl AudioThread {
             self.emit(Event::TrackEnded { meta: playing.meta, reason: EndReason::Failed });
         }
         self.cancel_load();
+        self.pause_when_ready = false;
         self.sink = None;
         self.set_state(State::Stopped);
     }
@@ -276,6 +335,8 @@ impl AudioThread {
 
     fn request_load(&mut self, target: LoadTarget) {
         self.cancel_load();
+        // A pause applies to the track being loaded, not to whichever one replaces it.
+        self.pause_when_ready = false;
         self.set_state(State::Loading);
 
         let generation = self.generation;

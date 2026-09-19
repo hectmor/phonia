@@ -454,3 +454,152 @@ fn undecodable_encoded_media_is_reported_as_an_error() {
     assert!(labels[1].starts_with("error:opening the decoder"), "{labels:?}");
     assert_eq!(labels[2], "state:Stopped");
 }
+
+/// Starts `id` on a blocking sink and waits until the engine is stuck writing to a full queue,
+/// mid-track.
+fn play_until_queue_is_full(h: &mut Harness, id: &str) -> FakeSinkHandle {
+    h.play(id);
+    h.events_until(is_started);
+    let sink = h.sink(0);
+    wait_until("the device queue is full", || sink.queued_frames() == CAPACITY);
+    sink
+}
+
+#[test]
+fn pause_silences_the_device_and_resume_continues_bit_for_bit() {
+    let frames = 30_000;
+    let mut h = Harness::new(vec![TestTrack::pcm("a", frames)], FakeSinkFactory::blocking());
+    let sink = play_until_queue_is_full(&mut h, "a");
+
+    h.send(Command::Pause);
+    sink.advance(PERIOD); // lets the blocked write return, so the engine can see the Pause
+    assert_eq!(h.labels_until(|e| matches!(e, Event::StateChanged(State::Paused))), ["state:Playing", "state:Paused"]);
+    assert!(sink.is_paused());
+    assert_eq!(h.engine.status().state, State::Paused);
+    assert!(h.engine.status().track.is_some(), "the track is kept while paused");
+
+    // Time passes while paused: nothing may move, and the engine must not keep writing (the
+    // fake rejects writes on a paused sink, which would surface as an error).
+    let (played, queued) = (sink.played(), sink.queued_frames());
+    sink.advance(10_000);
+    h.assert_quiet_for(Duration::from_millis(150));
+    assert_eq!((sink.played(), sink.queued_frames()), (played, queued));
+
+    h.send(Command::Resume);
+    assert_eq!(h.next_event(), Event::StateChanged(State::Playing));
+    assert!(!sink.is_paused());
+
+    sink.set_blocking(false);
+    h.labels_until(is_stopped);
+    assert_eq!(sink.played(), ramp(frames), "no sample lost or repeated across the pause");
+}
+
+#[test]
+fn pausing_twice_or_resuming_while_playing_changes_nothing() {
+    let mut h = Harness::new(vec![TestTrack::pcm("a", 30_000)], FakeSinkFactory::blocking());
+    let sink = play_until_queue_is_full(&mut h, "a");
+
+    h.send(Command::Resume); // not paused: ignored
+    h.send(Command::Pause);
+    h.send(Command::Pause); // already paused: ignored
+    sink.advance(PERIOD);
+    assert_eq!(h.labels_until(|e| matches!(e, Event::StateChanged(State::Paused))), ["state:Playing", "state:Paused"]);
+    h.assert_quiet_for(Duration::from_millis(100));
+
+    sink.set_blocking(false);
+    h.send(Command::Resume);
+    h.send(Command::Resume);
+    assert_eq!(h.next_event(), Event::StateChanged(State::Playing));
+}
+
+#[test]
+fn toggle_pause_alternates_between_playing_and_paused() {
+    let mut h = Harness::new(vec![TestTrack::pcm("a", 30_000)], FakeSinkFactory::blocking());
+    let sink = play_until_queue_is_full(&mut h, "a");
+
+    h.send(Command::TogglePause);
+    sink.advance(PERIOD);
+    h.events_until(|e| matches!(e, Event::StateChanged(State::Paused)));
+
+    sink.set_blocking(false);
+    h.send(Command::TogglePause);
+    assert_eq!(h.next_event(), Event::StateChanged(State::Playing));
+}
+
+#[test]
+fn pausing_while_a_track_loads_starts_it_paused_without_touching_the_device() {
+    let frames = 20_000;
+    let track = TestTrack::pcm("a", frames).slow(Duration::from_millis(150));
+    let mut h = Harness::new(vec![track], FakeSinkFactory::autoplay());
+    h.play("a");
+    h.send(Command::Pause);
+
+    assert_eq!(h.labels_until(|e| matches!(e, Event::StateChanged(State::Paused))), ["state:Loading", "started:a", "state:Paused"]);
+    let sink = h.sink(0);
+    h.assert_quiet_for(Duration::from_millis(100));
+    assert!(sink.played().is_empty(), "nothing is written while paused");
+    assert!(!sink.is_paused(), "the sink was never asked to pause");
+
+    h.send(Command::Resume);
+    assert_eq!(h.next_event(), Event::StateChanged(State::Playing));
+    h.labels_until(is_stopped);
+    assert_eq!(sink.played(), ramp(frames));
+}
+
+#[test]
+fn resuming_while_a_track_loads_cancels_the_pending_pause() {
+    let track = TestTrack::pcm("a", 1_000).slow(Duration::from_millis(150));
+    let mut h = Harness::new(vec![track], FakeSinkFactory::autoplay());
+    h.play("a");
+    h.send(Command::Pause);
+    h.send(Command::Resume);
+
+    let labels = h.labels_until(is_stopped);
+    assert!(!labels.iter().any(|l| l == "state:Paused"), "{labels:?}");
+    assert_eq!(labels[..3], ["state:Loading", "started:a", "state:Playing"]);
+}
+
+#[test]
+fn stop_while_paused_discards_the_queue_and_releases_the_device() {
+    let mut h = Harness::new(vec![TestTrack::pcm("a", 30_000)], FakeSinkFactory::blocking());
+    let sink = play_until_queue_is_full(&mut h, "a");
+    h.send(Command::Pause);
+    sink.advance(PERIOD);
+    h.events_until(|e| matches!(e, Event::StateChanged(State::Paused)));
+
+    h.send(Command::Stop);
+    assert_eq!(h.labels_until(is_stopped), ["ended:a:Interrupted", "state:Stopped"]);
+    assert_eq!(sink.flush_count(), 1);
+    assert!(!sink.is_paused());
+    assert_eq!(h.engine.status(), Status { state: State::Stopped, track: None, spec: None });
+}
+
+#[test]
+fn next_while_paused_starts_the_next_track_playing() {
+    let b_frames = 2_000;
+    let mut h = Harness::new(
+        vec![TestTrack::pcm("a", 30_000), TestTrack::pcm("b", b_frames)],
+        FakeSinkFactory::blocking(),
+    );
+    let sink = play_until_queue_is_full(&mut h, "a");
+    h.send(Command::Pause);
+    sink.advance(PERIOD);
+    h.events_until(|e| matches!(e, Event::StateChanged(State::Paused)));
+
+    h.send(Command::Next);
+    let labels = h.labels_until(is_stopped);
+    assert_eq!(labels[..5], ["ended:a:Interrupted", "state:Loading", "started:b", "state:Playing", "ended:b:Completed"]);
+    let played = sink.played();
+    assert_eq!(played[played.len() - b_frames * 2..], ramp(b_frames), "b plays in full");
+}
+
+#[test]
+fn shutdown_while_paused_does_not_hang() {
+    let mut h = Harness::new(vec![TestTrack::pcm("a", 30_000)], FakeSinkFactory::blocking());
+    let sink = play_until_queue_is_full(&mut h, "a");
+    h.send(Command::Pause);
+    sink.advance(PERIOD);
+    h.events_until(|e| matches!(e, Event::StateChanged(State::Paused)));
+    h.engine.shutdown();
+    assert_eq!(sink.flush_count(), 1);
+}
