@@ -5,18 +5,16 @@
 //! left-justified `i32` samples (see `crate::decode` for where that convention comes from) into
 //! that format with pure bit shifts -- no rounding, no dithering, no resampling.
 
-use alsa::pcm::{Access, Format, HwParams, PCM};
+use alsa::pcm::{Access, Format, HwParams, PCM, State};
 use alsa::{Direction, ValueOr};
 use anyhow::{Context, Result, anyhow, bail};
 use std::ffi::CString;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
 
-use crate::decode::{ChunkAction, SourceSpec};
+use super::AudioSink;
+use crate::decode::SourceSpec;
 
 /// Target period/buffer sizes. Chosen as a reasonable phase-1-will-tune-this default: short
-/// enough for responsive Ctrl+C, long enough not to underrun on a loaded system.
+/// enough for responsive pause/seek/Ctrl+C, long enough not to underrun on a loaded system.
 const PERIOD_TIME_US: u32 = 100_000;
 const BUFFER_TIME_US: u32 = 500_000;
 
@@ -24,29 +22,35 @@ const BUFFER_TIME_US: u32 = 500_000;
 /// error out instead of silently discarding the rest of the chunk.
 const MAX_CONSECUTIVE_ZERO_WRITES: u32 = 50;
 
+/// Whether playback is running, and if not, how it was paused.
+enum PauseState {
+    Running,
+    /// Paused with `snd_pcm_pause`: the device keeps its queued audio.
+    Hardware,
+    /// Paused with `snd_pcm_drop` because the device can't pause. `replay` holds the audio that
+    /// had been queued but not yet played, to be written again on resume.
+    Dropped { replay: Vec<u8> },
+}
+
 pub struct AlsaSink {
     pcm: PCM,
     device: String,
     format: Format,
     source: SourceSpec,
-    total_duration: Option<Duration>,
-    stop: Arc<AtomicBool>,
+    period_frames: usize,
+    can_pause: bool,
     scratch: Vec<u8>,
-    frames_written: u64,
-    started_at: Option<Instant>,
-    diagnostics_printed: bool,
+    /// The most recently written device-format bytes, at least as many as the device can hold
+    /// queued. Needed to replay what a drop-based pause threw away.
+    tail: TailBuffer,
+    pause: PauseState,
 }
 
 impl AlsaSink {
     /// Opens `device` (e.g. `"hw:1,0"`) for playback and negotiates hardware parameters for
     /// `source`. Fails loudly and clearly if the device is busy, or if it cannot provide the
     /// exact sample rate / a lossless integer format for the source's bit depth.
-    pub fn open(
-        device: &str,
-        source: SourceSpec,
-        total_duration: Option<Duration>,
-        stop: Arc<AtomicBool>,
-    ) -> Result<Self> {
+    pub fn open(device: &str, source: SourceSpec) -> Result<Self> {
         let c_device = CString::new(device).context("invalid ALSA device name")?;
 
         let pcm = PCM::open(&c_device, Direction::Playback, false).map_err(|e| {
@@ -64,7 +68,7 @@ impl AlsaSink {
 
         // Scoped so every `HwParams` borrow of `pcm` (including the one behind
         // `hw_params_current()`) is dropped before `pcm` is moved into `AlsaSink` below.
-        let format = {
+        let (format, period_frames, buffer_frames, can_pause) = {
             let hwp =
                 HwParams::any(&pcm).context("could not get the default hw_params")?;
             hwp.set_access(Access::RWInterleaved)
@@ -108,20 +112,28 @@ impl AlsaSink {
                 );
             }
 
-            format
+            let period_frames = committed
+                .get_period_size()
+                .context("could not read the applied period size")?;
+            let buffer_frames = committed
+                .get_buffer_size()
+                .context("could not read the applied buffer size")?;
+
+            (format, period_frames.max(1) as usize, buffer_frames.max(1) as usize, committed.can_pause())
         };
+
+        let bytes_per_frame = bytes_per_sample(format) * source.channels as usize;
 
         Ok(AlsaSink {
             pcm,
             device: device.to_string(),
             format,
             source,
-            total_duration,
-            stop,
+            period_frames,
+            can_pause,
             scratch: Vec::new(),
-            frames_written: 0,
-            started_at: None,
-            diagnostics_printed: false,
+            tail: TailBuffer::new(buffer_frames * bytes_per_frame),
+            pause: PauseState::Running,
         })
     }
 
@@ -129,82 +141,15 @@ impl AlsaSink {
         bytes_per_sample(self.format) * self.source.channels as usize
     }
 
-    /// Packs and writes one decoded chunk. Returns [`ChunkAction::Stop`] once Ctrl+C has been
-    /// requested, so the caller's decode loop can unwind cleanly.
-    pub fn write_chunk(&mut self, samples: &[i32]) -> Result<ChunkAction> {
-        if self.stop.load(Ordering::Relaxed) {
-            return Ok(ChunkAction::Stop);
-        }
-        if self.started_at.is_none() {
-            self.started_at = Some(Instant::now());
-        }
-
-        self.scratch.clear();
-        pack_frames(self.format, samples, &mut self.scratch);
-
-        let bytes_per_frame = self.bytes_per_frame();
-        let mut offset = 0usize;
-        let mut consecutive_zero_writes = 0u32;
-        while offset < self.scratch.len() {
-            if self.stop.load(Ordering::Relaxed) {
-                return Ok(ChunkAction::Stop);
-            }
-
-            let io = self.pcm.io_bytes();
-            match io.writei(&self.scratch[offset..]) {
-                Ok(0) => {
-                    // In blocking mode this shouldn't normally happen, but never silently drop
-                    // the rest of the chunk: wait for the device to accept more and retry, and
-                    // only give up (loudly) if it's stuck for an unreasonably long time.
-                    drop(io);
-                    consecutive_zero_writes += 1;
-                    if consecutive_zero_writes > MAX_CONSECUTIVE_ZERO_WRITES {
-                        bail!(
-                            "device '{}' stopped accepting audio ({} consecutive 0-frame writes); \
-                             aborting instead of silently dropping the rest of the chunk",
-                            self.device,
-                            consecutive_zero_writes
-                        );
-                    }
-                    self.pcm
-                        .wait(Some(100))
-                        .context("waiting for the ALSA device to accept more data")?;
-                }
-                Ok(frames) => {
-                    consecutive_zero_writes = 0;
-                    offset += frames * bytes_per_frame;
-                    self.frames_written += frames as u64;
-                }
-                Err(e) if e.errno() == libc::EPIPE => {
-                    eprintln!("\nWarning: underrun (EPIPE) on '{}', recovering...", self.device);
-                    drop(io);
-                    self.pcm
-                        .try_recover(e, true)
-                        .context("could not recover from an underrun")?;
-                }
-                Err(e) => return Err(e).context("error writing to the ALSA device"),
-            }
-        }
-
-        if !self.diagnostics_printed {
-            self.print_first_write_diagnostics();
-            self.diagnostics_printed = true;
-        }
-        self.print_progress();
-
-        Ok(ChunkAction::Continue)
-    }
-
-    fn print_progress(&self) {
-        let elapsed_secs = self.frames_written as f64 / self.source.sample_rate as f64;
-        let total_secs = self.total_duration.map(|d| d.as_secs_f64());
-        print!("\r{}", format_progress(elapsed_secs, total_secs));
-        let _ = std::io::Write::flush(&mut std::io::stdout());
+    /// Whether the device pauses in hardware. When it doesn't (typical for USB DACs), pausing
+    /// drops the queue and replays it on resume instead.
+    pub fn supports_hw_pause(&self) -> bool {
+        self.can_pause
     }
 
     /// Reads back `/proc/asound/card<N>/pcm<D>p/sub0/hw_params` (only meaningful for `hw:N,D`
     /// devices) and prints the bit-perfect verdict for this playback session.
-    fn print_first_write_diagnostics(&self) {
+    pub fn print_diagnostics(&self) {
         println!();
         let Some((card, device)) = parse_hw_device(&self.device) else {
             println!(
@@ -268,12 +213,171 @@ impl AlsaSink {
             println!("{source} → {} {}  \u{2716} CONVERTED ({reason})", self.device, negotiated_format);
         }
     }
+}
 
-    /// Drains the device so the last period is fully played out before returning.
-    pub fn finish(self) -> Result<()> {
-        println!();
-        self.pcm.drain().context("could not drain() the ALSA device")?;
+/// Writes all of `bytes` (whole frames of `bytes_per_frame` each) to `pcm`, blocking as needed.
+fn write_all(pcm: &PCM, device: &str, bytes_per_frame: usize, bytes: &[u8]) -> Result<()> {
+    let mut offset = 0usize;
+    let mut consecutive_zero_writes = 0u32;
+    while offset < bytes.len() {
+        let io = pcm.io_bytes();
+        match io.writei(&bytes[offset..]) {
+            Ok(0) => {
+                // In blocking mode this shouldn't normally happen, but never silently drop the
+                // rest of the data: wait for the device to accept more and retry, and only give
+                // up (loudly) if it's stuck for an unreasonably long time.
+                drop(io);
+                consecutive_zero_writes += 1;
+                if consecutive_zero_writes > MAX_CONSECUTIVE_ZERO_WRITES {
+                    bail!(
+                        "device '{device}' stopped accepting audio ({consecutive_zero_writes} consecutive \
+                         0-frame writes); aborting instead of silently dropping the rest of the chunk"
+                    );
+                }
+                pcm.wait(Some(100)).context("waiting for the ALSA device to accept more data")?;
+            }
+            Ok(frames) => {
+                consecutive_zero_writes = 0;
+                offset += frames * bytes_per_frame;
+            }
+            Err(e) if e.errno() == libc::EPIPE => {
+                eprintln!("\nWarning: underrun (EPIPE) on '{device}', recovering...");
+                drop(io);
+                pcm.try_recover(e, true).context("could not recover from an underrun")?;
+            }
+            Err(e) => return Err(e).context("error writing to the ALSA device"),
+        }
+    }
+    Ok(())
+}
+
+impl AudioSink for AlsaSink {
+    fn spec(&self) -> SourceSpec {
+        self.source
+    }
+
+    fn write(&mut self, samples: &[i32]) -> Result<usize> {
+        if !matches!(self.pause, PauseState::Running) {
+            bail!("write() called on a paused ALSA sink");
+        }
+
+        let channels = self.source.channels as usize;
+        let frames = (samples.len() / channels).min(self.period_frames);
+        if frames == 0 {
+            return Ok(0);
+        }
+
+        self.scratch.clear();
+        pack_frames(self.format, &samples[..frames * channels], &mut self.scratch);
+        write_all(&self.pcm, &self.device, self.bytes_per_frame(), &self.scratch)?;
+        self.tail.push(&self.scratch);
+
+        Ok(frames)
+    }
+
+    fn delay_frames(&mut self) -> Result<u64> {
+        if let PauseState::Dropped { replay } = &self.pause {
+            return Ok((replay.len() / self.bytes_per_frame()) as u64);
+        }
+        // Only a running (or hardware-paused) stream has audio in flight. In any other state
+        // `snd_pcm_delay` can report a stale residual (a few hundred frames right after
+        // drop+prepare on the HDA card), and it fails outright after an underrun.
+        match self.pcm.state() {
+            State::Running | State::Paused | State::Draining => {
+                Ok(self.pcm.delay().map(|d| d.max(0) as u64).unwrap_or(0))
+            }
+            _ => Ok(0),
+        }
+    }
+
+    fn pause(&mut self) -> Result<()> {
+        if !matches!(self.pause, PauseState::Running) {
+            return Ok(());
+        }
+
+        if self.can_pause && self.pcm.pause(true).is_ok() {
+            self.pause = PauseState::Hardware;
+            return Ok(());
+        }
+
+        // The frames still queued in the device have not reached the DAC. Grab them from the
+        // tail before dropping, so resuming can replay them instead of skipping that audio.
+        let bytes_per_frame = self.bytes_per_frame();
+        let pending_frames = self
+            .pcm
+            .delay()
+            .map(|d| d.max(0) as usize)
+            .unwrap_or(0)
+            .min(self.tail.len() / bytes_per_frame);
+        let replay = self.tail.take_last(pending_frames * bytes_per_frame);
+
+        self.pcm.drop().context("could not drop() the ALSA device to pause")?;
+        self.tail.clear();
+        self.pause = PauseState::Dropped { replay };
         Ok(())
+    }
+
+    fn resume(&mut self) -> Result<()> {
+        match std::mem::replace(&mut self.pause, PauseState::Running) {
+            PauseState::Running => {}
+            PauseState::Hardware => self.pcm.pause(false).context("could not resume the ALSA device")?,
+            PauseState::Dropped { replay } => {
+                self.pcm.prepare().context("could not prepare() the ALSA device to resume")?;
+                write_all(&self.pcm, &self.device, self.bytes_per_frame(), &replay)?;
+                self.tail.push(&replay);
+            }
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        self.pcm.drop().context("could not drop() the ALSA device")?;
+        self.pcm.prepare().context("could not prepare() the ALSA device")?;
+        self.tail.clear();
+        self.pause = PauseState::Running;
+        Ok(())
+    }
+
+    fn drain(&mut self) -> Result<()> {
+        // A paused device would never finish draining.
+        self.resume()?;
+        self.pcm.drain().context("could not drain() the ALSA device")
+    }
+}
+
+/// The last `capacity` bytes written to the device, kept so audio thrown away by a drop-based
+/// pause can be replayed. Only ever holds whole frames, so trimming from the front (`capacity`
+/// is a multiple of the frame size) never splits one.
+struct TailBuffer {
+    capacity: usize,
+    bytes: Vec<u8>,
+}
+
+impl TailBuffer {
+    fn new(capacity: usize) -> Self {
+        Self { capacity, bytes: Vec::new() }
+    }
+
+    fn len(&self) -> usize {
+        self.bytes.len().min(self.capacity)
+    }
+
+    fn push(&mut self, data: &[u8]) {
+        self.bytes.extend_from_slice(data);
+        // Trim in batches rather than on every push.
+        if self.bytes.len() > self.capacity * 2 {
+            self.bytes.drain(..self.bytes.len() - self.capacity);
+        }
+    }
+
+    /// The last `n` bytes (fewer if less is held).
+    fn take_last(&self, n: usize) -> Vec<u8> {
+        let n = n.min(self.len());
+        self.bytes[self.bytes.len() - n..].to_vec()
+    }
+
+    fn clear(&mut self) {
+        self.bytes.clear();
     }
 }
 
@@ -398,13 +502,6 @@ fn extract_proc_rate(contents: &str) -> Option<u32> {
     value.split_whitespace().next()?.parse().ok()
 }
 
-fn format_progress(elapsed_secs: f64, total_secs: Option<f64>) -> String {
-    match total_secs {
-        Some(total) => format!("{:>6.1}s / {:>6.1}s", elapsed_secs, total),
-        None => format!("{:>6.1}s", elapsed_secs),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,12 +596,79 @@ mod tests {
     }
 
     #[test]
-    fn format_progress_without_total() {
-        assert_eq!(format_progress(12.3, None), "  12.3s");
+    fn tail_buffer_returns_the_most_recent_bytes() {
+        let mut tail = TailBuffer::new(8);
+        tail.push(&[1, 2, 3, 4]);
+        tail.push(&[5, 6]);
+        assert_eq!(tail.take_last(3), vec![4, 5, 6]);
+        assert_eq!(tail.take_last(6), vec![1, 2, 3, 4, 5, 6]);
     }
 
     #[test]
-    fn format_progress_with_total() {
-        assert_eq!(format_progress(12.3, Some(205.1)), "  12.3s /  205.1s");
+    fn tail_buffer_never_reports_more_than_its_capacity() {
+        let mut tail = TailBuffer::new(4);
+        for chunk in 0u8..20 {
+            tail.push(&[chunk * 2, chunk * 2 + 1]);
+        }
+        assert_eq!(tail.len(), 4);
+        assert_eq!(tail.take_last(100), vec![36, 37, 38, 39]);
+    }
+
+    #[test]
+    fn tail_buffer_take_last_on_an_empty_buffer_is_empty() {
+        let tail = TailBuffer::new(8);
+        assert!(tail.take_last(4).is_empty());
+    }
+
+    #[test]
+    fn tail_buffer_clear_forgets_everything() {
+        let mut tail = TailBuffer::new(8);
+        tail.push(&[1, 2, 3, 4]);
+        tail.clear();
+        assert_eq!(tail.len(), 0);
+        assert!(tail.take_last(4).is_empty());
+    }
+
+    /// Needs a real DAC that nothing else (e.g. PipeWire) has open. Writes silence only, so
+    /// nothing is audible. Run with:
+    /// `PHONIA_TEST_DEVICE=hw:1,0 cargo test -p phonia-core hardware -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs a real, free ALSA device"]
+    fn hardware_pause_resume_flush_accounting() {
+        let device = std::env::var("PHONIA_TEST_DEVICE").unwrap_or_else(|_| "hw:1,0".into());
+        let spec = SourceSpec { sample_rate: 48_000, channels: 2, bits_per_sample: 24 };
+        let mut sink = AlsaSink::open(&device, spec).expect("opening the device");
+        println!("{device}: hw pause supported = {}", sink.supports_hw_pause());
+
+        let silence = vec![0i32; 48_000 / 10 * 2];
+        let mut written = 0u64;
+        for _ in 0..3 {
+            let mut offset = 0;
+            while offset < silence.len() {
+                let frames = sink.write(&silence[offset..]).unwrap();
+                assert!(frames > 0);
+                offset += frames * 2;
+                written += frames as u64;
+            }
+        }
+
+        let before = sink.delay_frames().unwrap();
+        assert!(before > 0 && before <= written, "delay {before} vs written {written}");
+
+        sink.pause().unwrap();
+        let paused = sink.delay_frames().unwrap();
+        println!("delay before pause = {before}, while paused = {paused}");
+        assert!(paused > 0, "a pause must not lose the queued audio");
+        assert!(paused <= before + 1, "delay grew while paused: {paused} > {before}");
+        assert!(sink.write(&silence).is_err(), "writing while paused must be rejected");
+
+        sink.resume().unwrap();
+        assert!(sink.delay_frames().unwrap() > 0, "resume must bring the queued audio back");
+
+        sink.flush().unwrap();
+        assert_eq!(sink.delay_frames().unwrap(), 0);
+        assert!(sink.write(&silence).unwrap() > 0, "the sink must accept audio after a flush");
+
+        sink.drain().unwrap();
     }
 }

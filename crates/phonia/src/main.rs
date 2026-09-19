@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use phonia_core::decode::ChunkAction;
+use phonia_core::output::AudioSink;
 use phonia_core::output::alsa::{self, AlsaSink};
 use phonia_core::{auth, decode, stream, tidal};
 use std::io::IsTerminal;
@@ -161,15 +163,61 @@ async fn play_source(
             spec.bits_per_sample, spec.sample_rate, spec.channels
         );
 
-        let mut sink =
-            AlsaSink::open(&device, spec, None, stop.clone()).context("opening the ALSA output")?;
+        let total_secs = decoder.duration().map(|d| d.as_secs_f64());
+        let mut sink = AlsaSink::open(&device, spec).context("opening the ALSA output")?;
 
-        decoder.run(|samples| sink.write_chunk(samples))?;
+        let channels = spec.channels as usize;
+        let mut frames_written = 0u64;
+        let mut diagnostics_printed = false;
+        decoder.run(|samples| {
+            let mut offset = 0;
+            while offset < samples.len() {
+                if stop.load(Ordering::Relaxed) {
+                    return Ok(ChunkAction::Stop);
+                }
+                let frames = sink.write(&samples[offset..])?;
+                offset += frames * channels;
+                frames_written += frames as u64;
+            }
 
-        sink.finish()
+            if !diagnostics_printed {
+                println!();
+                sink.print_diagnostics();
+                diagnostics_printed = true;
+            }
+            let elapsed_secs = frames_written as f64 / f64::from(spec.sample_rate);
+            print!("\r{}", format_progress(elapsed_secs, total_secs));
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            Ok(ChunkAction::Continue)
+        })?;
+
+        println!();
+        sink.drain()
     })
     .await
     .context("the decode/playback task panicked")??;
 
     Ok(())
+}
+
+fn format_progress(elapsed_secs: f64, total_secs: Option<f64>) -> String {
+    match total_secs {
+        Some(total) => format!("{:>6.1}s / {:>6.1}s", elapsed_secs, total),
+        None => format!("{:>6.1}s", elapsed_secs),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_progress_without_total() {
+        assert_eq!(format_progress(12.3, None), "  12.3s");
+    }
+
+    #[test]
+    fn format_progress_with_total() {
+        assert_eq!(format_progress(12.3, Some(205.1)), "  12.3s /  205.1s");
+    }
 }
