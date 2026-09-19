@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use phonia_core::output::alsa::{self, AlsaSink};
 use phonia_core::{auth, decode, stream, tidal};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -20,7 +21,17 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Logs in to TIDAL via PKCE (required to be granted HI_RES_LOSSLESS).
-    Login,
+    ///
+    /// In a terminal this prompts for the redirect URL. Without one (or with `--no-wait`) it
+    /// only prints the login URL; finish afterwards with `--finish <redirect-url>`.
+    Login {
+        /// Print the login URL and exit instead of waiting for the redirect URL.
+        #[arg(long, conflicts_with = "finish")]
+        no_wait: bool,
+        /// Finish a login started with `--no-wait`, using the URL the browser ended up on.
+        #[arg(long, value_name = "REDIRECT_URL")]
+        finish: Option<String>,
+    },
     /// Downloads and plays a TIDAL track by its ID.
     Play {
         track_id: String,
@@ -66,7 +77,11 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Command::Login => auth::login().await,
+        Command::Login { no_wait, finish } => match finish {
+            Some(redirect_url) => auth::login_finish(&redirect_url).await,
+            None if no_wait || !std::io::stdin().is_terminal() => auth::login_begin(),
+            None => auth::login().await,
+        },
         Command::Play { track_id, device, quality, save_mp4 } => {
             run_play(&track_id, &device, quality.into(), save_mp4.as_deref()).await
         }
