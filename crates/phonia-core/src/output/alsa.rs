@@ -10,7 +10,7 @@ use alsa::{Direction, ValueOr};
 use anyhow::{Context, Result, anyhow, bail};
 use std::ffi::CString;
 
-use super::AudioSink;
+use super::{AudioSink, SinkFactory};
 use crate::decode::SourceSpec;
 
 /// Target period/buffer sizes. Chosen as a reasonable phase-1-will-tune-this default: short
@@ -44,6 +44,8 @@ pub struct AlsaSink {
     /// queued. Needed to replay what a drop-based pause threw away.
     tail: TailBuffer,
     pause: PauseState,
+    /// Print the bit-perfect verdict after the first successful write.
+    diagnostics_pending: bool,
 }
 
 impl AlsaSink {
@@ -134,7 +136,15 @@ impl AlsaSink {
             scratch: Vec::new(),
             tail: TailBuffer::new(buffer_frames * bytes_per_frame),
             pause: PauseState::Running,
+            diagnostics_pending: false,
         })
+    }
+
+    /// Prints the bit-perfect verdict (see [`AlsaSink::print_diagnostics`]) once the first audio
+    /// has been written, which is when the device reports the parameters it actually runs with.
+    pub fn with_diagnostics(mut self) -> Self {
+        self.diagnostics_pending = true;
+        self
     }
 
     fn bytes_per_frame(&self) -> usize {
@@ -272,6 +282,11 @@ impl AudioSink for AlsaSink {
         write_all(&self.pcm, &self.device, self.bytes_per_frame(), &self.scratch)?;
         self.tail.push(&self.scratch);
 
+        if self.diagnostics_pending {
+            self.diagnostics_pending = false;
+            println!();
+            self.print_diagnostics();
+        }
         Ok(frames)
     }
 
@@ -342,6 +357,31 @@ impl AudioSink for AlsaSink {
         // A paused device would never finish draining.
         self.resume()?;
         self.pcm.drain().context("could not drain() the ALSA device")
+    }
+}
+
+/// Opens [`AlsaSink`]s on one device, for the playback engine.
+pub struct AlsaSinkFactory {
+    device: String,
+    print_diagnostics: bool,
+}
+
+impl AlsaSinkFactory {
+    pub fn new(device: impl Into<String>) -> Self {
+        Self { device: device.into(), print_diagnostics: false }
+    }
+
+    /// Have every sink print the bit-perfect verdict when it starts playing.
+    pub fn print_diagnostics(mut self) -> Self {
+        self.print_diagnostics = true;
+        self
+    }
+}
+
+impl SinkFactory for AlsaSinkFactory {
+    fn open(&self, spec: SourceSpec) -> Result<Box<dyn AudioSink>> {
+        let sink = AlsaSink::open(&self.device, spec)?;
+        Ok(Box::new(if self.print_diagnostics { sink.with_diagnostics() } else { sink }))
     }
 }
 

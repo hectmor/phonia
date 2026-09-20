@@ -16,14 +16,21 @@ chain works with real hardware (a Fosi Audio DS2 at `hw:1,0` during development)
   address bar and paste it into the terminal. Saves the session to
   `~/.config/phonia/session.json` (`0600` permissions).
 
-- **`phonia play <TRACK_ID> [--device hw:1,0] [--quality hires|lossless] [--save-mp4 <path>]`**
-  -- Downloads and plays a track by its ID. Queries `playbackinfo`, downloads the DASH manifest
+- **`phonia play <TRACK_ID> [--device hw:1,0] [--quality hires|lossless] [--save-mp4 <path>] [--interactive]`**
+  -- Streams and plays a track by its ID. Queries `playbackinfo`, streams the DASH manifest
   (HiRes) or the direct file (Lossless/High/Low), decodes it and outputs it via ALSA.
-  `--save-mp4` additionally saves the downloaded bytes to disk (useful for inspecting the fMP4).
+  `--save-mp4` additionally saves the streamed bytes to disk (useful for inspecting the fMP4).
 
-- **`phonia play-file <path> [--device hw:1,0]`** -- Decodes and plays a local file (FLAC or
-  fMP4) through the same ALSA output path, without touching TIDAL. Useful for testing the DAC
-  in isolation.
+- **`phonia play-file <path>... [--device hw:1,0] [--interactive]`** -- Decodes and plays local
+  files (FLAC or fMP4), one after another, through the same playback engine and ALSA output,
+  without touching TIDAL. Useful for testing the DAC in isolation.
+
+- **`--interactive`** (on `play` and `play-file`) reads playback commands from the keyboard; type
+  one and press Enter: `p` (or just Enter) pauses/resumes, `f` / `r` seek 10 s forward / back,
+  `s <seconds>` seeks to a position, `n` / `b` go to the next / previous track (`b` restarts the
+  current track after 3 s), `q` quits, `?` lists them. Seeking works on every source: local
+  files are repositioned in place, and a TIDAL HiRes stream is reopened at the right segment and
+  trimmed to the exact frame. Ctrl+C stops playback and releases the DAC.
 
 - **`phonia probe-device [--device hw:1,0]`** -- Opens the given ALSA device in playback mode
   (without writing anything) and lists which formats (`S16_LE`, `S24_3LE`, `S24_LE`, `S32_LE`)
@@ -34,7 +41,7 @@ All commands are run with `cargo run -p phonia -- <command>`, for example:
 ```sh
 cargo run -p phonia -- login
 cargo run -p phonia -- play 12345678 --device hw:1,0 --quality hires
-cargo run -p phonia -- play-file track.flac --device hw:1,0
+cargo run -p phonia -- play-file one.flac two.flac --device hw:1,0 --interactive
 cargo run -p phonia -- probe-device --device hw:1,0
 ```
 
@@ -75,9 +82,10 @@ muting/disabling its profile for that card while using `phonia`).
 ## Phase 0 status
 
 - `cargo build` and `cargo test` pass cleanly; `cargo clippy` has no warnings.
-- What's still out of scope for this phase (coming in later phases): real streaming without
-  buffering the whole track in memory, TUI, daemon, gapless playback, `%0Nd` in DASH segment
-  templates, manifest encryption support.
+- Since then: DASH segments are streamed on demand, and playback runs through an engine with
+  pause, seek, next/previous and a heard-position report (issue #10).
+- What's still out of scope (coming in later phases): TUI, daemon, gapless playback, `%0Nd` in
+  DASH segment templates, manifest encryption support.
 
 ## Tech stack
 
@@ -97,9 +105,11 @@ more importantly, *why* it was chosen.
 
 - **[`tokio`](https://docs.rs/tokio)** -- the async runtime. Needed because talking to TIDAL
   (`reqwest`, `tidlers`) is inherently async I/O. The decode+ALSA-write loop, by contrast, is
-  synchronous, CPU/IO-bound blocking work, so it runs on its own thread via
-  `tokio::task::spawn_blocking` instead of the async executor's thread pool -- blocking that pool
-  would stall every other async task (including the Ctrl+C listener) for the whole playback.
+  synchronous, blocking work, so the playback engine runs it on a dedicated OS thread instead of
+  the async executor's thread pool -- blocking that pool would stall every other async task
+  (including the Ctrl+C listener, and the segment downloads the audio thread waits on) for the
+  whole playback. Anything slow the engine needs (asking TIDAL for a track) runs on the runtime
+  and comes back to the audio thread as a message.
 
 - **[`reqwest`](https://docs.rs/reqwest)** -- the HTTP client used both for TIDAL's REST API
   (`playbackinfopostpaywall`) and for downloading DASH segments / direct audio URLs from TIDAL's
