@@ -1,8 +1,8 @@
 use super::audio_thread::Msg;
 use super::*;
-use crate::decode::{SourceSpec, frames_to_duration};
+use crate::decode::{SourceSpec, duration_to_frames, frames_to_duration};
 use crate::output::fake::{FakeSinkFactory, FakeSinkHandle};
-use crate::testutil::{expected, wav};
+use crate::testutil::{NonSeekable, RATE, expected, wav, wav_slice};
 use futures_util::future::BoxFuture;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -29,6 +29,9 @@ fn ramp(frames: usize) -> Vec<i32> {
 enum Media {
     Pcm { samples: Vec<i32>, spec: SourceSpec },
     Wav(Vec<u8>),
+    /// A WAV that can only be opened in whole segments of `segment_frames`, like a DASH stream:
+    /// opening it at a time gives the segment containing it, as a stream that can't rewind.
+    Segmented { frames: usize, segment_frames: usize },
     Broken,
 }
 
@@ -37,19 +40,45 @@ struct TestTrack {
     id: &'static str,
     media: Media,
     open_delay: Duration,
+    seek: SeekMode,
+    /// Opening this track anywhere but the start fails, to exercise a failed seek.
+    fail_reopen: bool,
 }
 
 impl TestTrack {
+    fn new(id: &'static str, media: Media) -> Self {
+        Self { id, media, open_delay: Duration::ZERO, seek: SeekMode::None, fail_reopen: false }
+    }
+
     fn pcm(id: &'static str, frames: usize) -> Self {
         Self::pcm_with(id, frames, SPEC_48K)
     }
 
     fn pcm_with(id: &'static str, frames: usize, spec: SourceSpec) -> Self {
-        Self { id, media: Media::Pcm { samples: ramp(frames), spec }, open_delay: Duration::ZERO }
+        Self::new(id, Media::Pcm { samples: ramp(frames), spec })
+    }
+
+    /// A WAV of `frames` frames at 44.1 kHz.
+    fn wav(id: &'static str, frames: usize) -> Self {
+        Self::new(id, Media::Wav(wav(frames)))
+    }
+
+    fn segmented(id: &'static str, frames: usize, segment_frames: usize) -> Self {
+        Self { seek: SeekMode::Reopen, ..Self::new(id, Media::Segmented { frames, segment_frames }) }
     }
 
     fn slow(mut self, delay: Duration) -> Self {
         self.open_delay = delay;
+        self
+    }
+
+    fn seekable(mut self, mode: SeekMode) -> Self {
+        self.seek = mode;
+        self
+    }
+
+    fn failing_reopen(mut self) -> Self {
+        self.fail_reopen = true;
         self
     }
 }
@@ -77,7 +106,7 @@ impl TrackSupplier for TestSupplier {
         target.and_then(|index| self.tracks.get(index)).map(|track| TrackRef(track.id.to_string()))
     }
 
-    fn open(&self, track: TrackRef) -> BoxFuture<'static, anyhow::Result<LoadedTrack>> {
+    fn open(&self, track: TrackRef, at: Duration) -> BoxFuture<'static, anyhow::Result<LoadedTrack>> {
         let Some(index) = self.tracks.iter().position(|t| t.id == track.0) else {
             return Box::pin(async move { Err(anyhow!("no such track: {}", track.0)) });
         };
@@ -86,18 +115,38 @@ impl TrackSupplier for TestSupplier {
         let test_track = self.tracks[index].clone();
         Box::pin(async move {
             tokio::time::sleep(test_track.open_delay).await;
+            if test_track.fail_reopen && at > Duration::ZERO {
+                return Err(anyhow!("the connection dropped while reopening the track"));
+            }
             let meta = TrackMeta { track, title: None, duration: None };
-            match test_track.media {
-                Media::Pcm { samples, spec } => Ok(LoadedTrack { meta, media: TrackMedia::RawPcm { samples, spec } }),
-                Media::Wav(bytes) => Ok(LoadedTrack {
+            let loaded = match test_track.media {
+                Media::Pcm { samples, spec } => LoadedTrack::new(meta, TrackMedia::RawPcm { samples, spec }),
+                Media::Wav(bytes) => LoadedTrack::new(
                     meta,
-                    media: TrackMedia::Encoded {
-                        source: Box::new(std::io::Cursor::new(bytes)),
+                    TrackMedia::Encoded {
+                        source: match test_track.seek {
+                            // A network stream can't rewind, so neither can this one.
+                            SeekMode::ForwardOnly | SeekMode::Reopen => Box::new(NonSeekable(std::io::Cursor::new(bytes))),
+                            _ => Box::new(std::io::Cursor::new(bytes)),
+                        },
                         extension: Some("wav".into()),
                     },
-                }),
-                Media::Broken => Err(anyhow!("the track's media is broken")),
-            }
+                ),
+                Media::Segmented { frames, segment_frames } => {
+                    let wanted = duration_to_frames(at, RATE) as usize;
+                    let boundary = wanted / segment_frames * segment_frames;
+                    LoadedTrack::new(
+                        meta,
+                        TrackMedia::Encoded {
+                            source: Box::new(NonSeekable(std::io::Cursor::new(wav_slice(boundary, frames - boundary)))),
+                            extension: Some("wav".into()),
+                        },
+                    )
+                    .starting_at(frames_to_duration(boundary as u64, RATE))
+                }
+                Media::Broken => return Err(anyhow!("the track's media is broken")),
+            };
+            Ok(LoadedTrack { seek: test_track.seek, ..loaded })
         })
     }
 }
@@ -220,6 +269,8 @@ fn label(event: &Event) -> String {
         Event::StateChanged(state) => format!("state:{state:?}"),
         Event::TrackStarted { meta, .. } => format!("started:{}", meta.track.0),
         Event::TrackEnded { meta, reason } => format!("ended:{}:{reason:?}", meta.track.0),
+        Event::Seeked { position } => format!("seeked:{position:?}"),
+        Event::SeekRejected { reason } => format!("seek-rejected:{reason}"),
         Event::QueueExhausted => "exhausted".to_string(),
         Event::Error { message } => format!("error:{message}"),
         Event::Position { .. } => unreachable!("positions are filtered out before labelling"),
@@ -234,7 +285,7 @@ fn is_started(event: &Event) -> bool {
     matches!(event, Event::TrackStarted { .. })
 }
 
-fn wait_until(what: &str, condition: impl Fn() -> bool) {
+fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
     let deadline = Instant::now() + TIMEOUT;
     while !condition() {
         assert!(Instant::now() < deadline, "timed out waiting until {what}");
@@ -447,10 +498,10 @@ fn a_newer_request_supersedes_a_slow_load() {
 #[test]
 fn load_results_nobody_asked_for_are_ignored() {
     let mut h = Harness::new(vec![], FakeSinkFactory::autoplay());
-    let unsolicited = LoadedTrack {
-        meta: TrackMeta { track: TrackRef("ghost".into()), title: None, duration: None },
-        media: TrackMedia::RawPcm { samples: ramp(100), spec: SPEC_48K },
-    };
+    let unsolicited = LoadedTrack::new(
+        TrackMeta { track: TrackRef("ghost".into()), title: None, duration: None },
+        TrackMedia::RawPcm { samples: ramp(100), spec: SPEC_48K },
+    );
     h.engine.tx.send(Msg::Loaded { generation: 0, track: Box::new(unsolicited) }).unwrap();
     h.engine.tx.send(Msg::LoadFailed { generation: 7, error: "stale".into() }).unwrap();
     h.engine.tx.send(Msg::QueueExhausted { generation: 7 }).unwrap();
@@ -477,7 +528,7 @@ fn a_track_that_fails_to_load_reports_the_error_and_the_engine_stays_usable() {
 
 #[test]
 fn media_that_cannot_be_opened_is_an_error_not_a_crash() {
-    let broken = TestTrack { id: "bad", media: Media::Broken, open_delay: Duration::ZERO };
+    let broken = TestTrack::new("bad", Media::Broken);
     let mut h = Harness::new(vec![broken], FakeSinkFactory::autoplay());
     h.play("bad");
     let labels = h.labels_until(is_stopped);
@@ -487,7 +538,7 @@ fn media_that_cannot_be_opened_is_an_error_not_a_crash() {
 #[test]
 fn encoded_media_goes_through_the_decoder_and_plays_bit_for_bit() {
     let frames = 30_000;
-    let track = TestTrack { id: "wav", media: Media::Wav(wav(frames)), open_delay: Duration::ZERO };
+    let track = TestTrack::wav("wav", frames);
     let mut h = Harness::new(vec![track], FakeSinkFactory::autoplay());
     h.play("wav");
     h.labels_until(is_stopped);
@@ -498,7 +549,7 @@ fn encoded_media_goes_through_the_decoder_and_plays_bit_for_bit() {
 
 #[test]
 fn undecodable_encoded_media_is_reported_as_an_error() {
-    let garbage = TestTrack { id: "junk", media: Media::Wav(vec![0u8; 64]), open_delay: Duration::ZERO };
+    let garbage = TestTrack::new("junk", Media::Wav(vec![0u8; 64]));
     let mut h = Harness::new(vec![garbage], FakeSinkFactory::autoplay());
     h.play("junk");
     let labels = h.labels_until(is_stopped);
@@ -513,8 +564,22 @@ fn play_until_queue_is_full(h: &mut Harness, id: &str) -> FakeSinkHandle {
     h.play(id);
     h.events_until(is_started);
     let sink = h.sink(0);
-    wait_until("the device queue is full", || sink.queued_frames() == CAPACITY);
+    wait_until_the_writer_is_blocked(&sink);
     sink
+}
+
+/// Waits until the queue is (nearly) full and has stopped growing: the engine is stuck in
+/// `write`. Decoded chunks aren't a whole number of periods, so the queue can stall a little
+/// short of its capacity.
+fn wait_until_the_writer_is_blocked(sink: &FakeSinkHandle) {
+    let mut last = None;
+    wait_until("the writer is blocked on a full queue", || {
+        let queued = sink.queued_frames();
+        let stable = last == Some(queued);
+        last = Some(queued);
+        std::thread::sleep(Duration::from_millis(20));
+        stable && queued > CAPACITY - PERIOD
+    });
 }
 
 #[test]
@@ -778,4 +843,296 @@ fn previous_on_the_first_track_reports_an_empty_queue() {
         h.labels_until(is_stopped),
         ["state:Playing", "ended:a:Interrupted", "state:Loading", "exhausted", "state:Stopped"]
     );
+}
+
+fn secs(seconds: u64) -> Duration {
+    Duration::from_secs(seconds)
+}
+
+/// Whether the audio the DAC played ends with exactly `expected`.
+fn ends_with(played: &[i32], expected: &[i32]) -> bool {
+    played.len() >= expected.len() && played[played.len() - expected.len()..] == *expected
+}
+
+/// What a 44.1 kHz WAV of `frames` frames sounds like from frame `from` on.
+fn wav_from(from: usize, frames: usize) -> Vec<i32> {
+    expected(from * 2, frames * 2)
+}
+
+/// Sends `command`, then lets the DAC play one period so an engine blocked writing to the full
+/// queue can return and see it.
+fn send_and_unblock(h: &Harness, sink: &FakeSinkHandle, command: Command) {
+    h.send(command);
+    sink.advance(PERIOD);
+}
+
+fn seek_to(h: &Harness, sink: &FakeSinkHandle, at: Duration) {
+    send_and_unblock(h, sink, Command::Seek(SeekTarget::Absolute(at)));
+}
+
+#[test]
+fn seeking_in_place_jumps_and_never_plays_the_flushed_audio() {
+    let frames = 100_000;
+    let mut h = Harness::new(
+        vec![TestTrack::wav("a", frames).seekable(SeekMode::InPlace)],
+        FakeSinkFactory::blocking(),
+    );
+    let sink = play_until_queue_is_full(&mut h, "a");
+
+    seek_to(&h, &sink, secs(1));
+    assert_eq!(h.labels_until(|e| matches!(e, Event::Seeked { .. })), ["state:Playing", "seeked:1s"]);
+    assert_eq!(h.positions_until(|p| p == secs(1)).last(), Some(&secs(1)), "the position is the target at once");
+    assert_eq!(sink.flush_count(), 1);
+
+    sink.set_blocking(false);
+    h.labels_until(is_stopped);
+    let played = sink.played();
+    let after_seek = wav_from(44_100, frames);
+    assert!(ends_with(&played, &after_seek), "after the seek, exactly the audio from 1 s on");
+    let before_seek = played.len() - after_seek.len();
+    assert!(before_seek <= PERIOD * 2, "only audio the DAC had already taken before the seek may be heard");
+    assert_eq!(played[..before_seek], wav_from(0, before_seek / 2)[..]);
+}
+
+#[test]
+fn seeking_raw_pcm_in_place_also_lands_on_the_exact_frame() {
+    let frames = 100_000;
+    let mut h = Harness::new(
+        vec![TestTrack::pcm("a", frames).seekable(SeekMode::InPlace)],
+        FakeSinkFactory::blocking(),
+    );
+    let sink = play_until_queue_is_full(&mut h, "a");
+
+    seek_to(&h, &sink, secs(1));
+    h.labels_until(|e| matches!(e, Event::Seeked { .. }));
+    sink.set_blocking(false);
+    h.labels_until(is_stopped);
+    assert!(ends_with(&sink.played(), &ramp(frames)[48_000 * 2..]));
+}
+
+#[test]
+fn relative_seeks_are_measured_from_what_has_been_heard() {
+    let mut h = Harness::new(
+        vec![TestTrack::wav("a", 500_000).seekable(SeekMode::InPlace)],
+        FakeSinkFactory::blocking(),
+    );
+    let sink = play_until_queue_is_full(&mut h, "a");
+
+    send_and_unblock(&h, &sink, Command::Seek(SeekTarget::Forward(secs(2))));
+    let labels = h.events_until(|e| matches!(e, Event::Seeked { .. }));
+    let Some(Event::Seeked { position }) = labels.last() else { unreachable!() };
+    // The DAC had played one period when the seek was handled; +2 s from there (give or take the
+    // frame the container rounds to).
+    let expected_position = frames_to_duration(PERIOD as u64, RATE) + secs(2);
+    let one_frame = frames_to_duration(1, RATE) + Duration::from_nanos(10);
+    assert!(position.abs_diff(expected_position) <= one_frame, "{position:?} vs {expected_position:?}");
+
+    // Going back further than the start stops at the start.
+    send_and_unblock(&h, &sink, Command::Seek(SeekTarget::Backward(secs(60))));
+    assert_eq!(h.next_event(), Event::Seeked { position: Duration::ZERO });
+    sink.set_blocking(false);
+}
+
+#[test]
+fn seeking_past_the_end_ends_the_track_and_moves_on() {
+    let mut h = Harness::new(
+        vec![TestTrack::wav("a", 30_000).seekable(SeekMode::InPlace), TestTrack::pcm("b", 3_000)],
+        FakeSinkFactory::blocking(),
+    );
+    let sink = play_until_queue_is_full(&mut h, "a");
+
+    seek_to(&h, &sink, secs(60));
+    assert_eq!(
+        h.labels_until(is_stopped),
+        [
+            "state:Playing",
+            "ended:a:Completed",
+            "state:Loading",
+            "started:b",
+            "state:Playing",
+            "ended:b:Completed",
+            "state:Loading",
+            "exhausted",
+            "state:Stopped"
+        ]
+    );
+}
+
+#[test]
+fn a_track_that_cannot_seek_rejects_the_request_and_keeps_playing() {
+    let frames = 30_000;
+    let mut h = Harness::new(vec![TestTrack::pcm("a", frames)], FakeSinkFactory::blocking());
+    let sink = play_until_queue_is_full(&mut h, "a");
+
+    seek_to(&h, &sink, secs(1));
+    assert_eq!(
+        h.labels_until(|e| matches!(e, Event::SeekRejected { .. })),
+        ["state:Playing", "seek-rejected:this track can't be seeked"]
+    );
+    assert_eq!(sink.flush_count(), 0, "a rejected seek touches nothing");
+
+    sink.set_blocking(false);
+    h.labels_until(is_stopped);
+    assert_eq!(sink.played(), ramp(frames), "the track played on undisturbed");
+}
+
+#[test]
+fn seeking_with_nothing_to_seek_in_is_rejected() {
+    let mut h = Harness::new(
+        vec![TestTrack::pcm("slow", 1_000).slow(Duration::from_millis(300))],
+        FakeSinkFactory::autoplay(),
+    );
+    h.send(Command::Seek(SeekTarget::Absolute(secs(1))));
+    assert_eq!(h.next_event(), Event::SeekRejected { reason: "nothing is playing".into() });
+
+    h.play("slow"); // still loading: no position to seek from either
+    assert_eq!(h.next_event(), Event::StateChanged(State::Loading));
+    h.send(Command::Seek(SeekTarget::Absolute(secs(1))));
+    assert_eq!(h.next_event(), Event::SeekRejected { reason: "nothing is playing".into() });
+}
+
+#[test]
+fn a_forward_only_stream_skips_ahead_but_refuses_to_go_back() {
+    let frames = 200_000;
+    let mut h = Harness::new(
+        vec![TestTrack::wav("a", frames).seekable(SeekMode::ForwardOnly)],
+        FakeSinkFactory::blocking(),
+    );
+    let sink = play_until_queue_is_full(&mut h, "a");
+
+    seek_to(&h, &sink, secs(1));
+    assert_eq!(h.labels_until(|e| matches!(e, Event::Seeked { .. })), ["state:Playing", "seeked:1s"]);
+
+    // Back to before the point it has already decoded up to: impossible on this stream.
+    seek_to(&h, &sink, Duration::from_millis(500));
+    let rejected = h.next_event();
+    assert!(matches!(&rejected, Event::SeekRejected { reason } if reason.contains("only seek forward")), "{rejected:?}");
+
+    seek_to(&h, &sink, secs(2));
+    assert_eq!(h.next_event(), Event::Seeked { position: secs(2) });
+
+    sink.set_blocking(false);
+    h.labels_until(is_stopped);
+    assert!(ends_with(&sink.played(), &wav_from(88_200, frames)), "lands on exactly 2 s");
+}
+
+#[test]
+fn forward_seeks_in_a_row_compose() {
+    let frames = 200_000;
+    let mut h = Harness::new(
+        vec![TestTrack::wav("a", frames).seekable(SeekMode::ForwardOnly)],
+        FakeSinkFactory::blocking(),
+    );
+    let sink = play_until_queue_is_full(&mut h, "a");
+
+    // Sent together, so the second arrives before the decoder has dropped what the first asked.
+    h.send(Command::Seek(SeekTarget::Absolute(secs(1))));
+    h.send(Command::Seek(SeekTarget::Absolute(secs(2))));
+    sink.advance(PERIOD);
+    let seeks: Vec<Event> = h.events_until(|e| matches!(e, Event::Seeked { position } if *position == secs(2)));
+    assert!(seeks.iter().any(|e| *e == Event::Seeked { position: secs(1) }));
+
+    sink.set_blocking(false);
+    h.labels_until(is_stopped);
+    assert!(ends_with(&sink.played(), &wav_from(88_200, frames)));
+}
+
+#[test]
+fn a_stream_that_cannot_rewind_is_reopened_at_the_target_and_lands_on_the_exact_frame() {
+    let frames = 100_000;
+    // 0.5 s segments, and a target of 1.2 s that falls inside the third one.
+    let mut h = Harness::new(vec![TestTrack::segmented("a", frames, 22_050)], FakeSinkFactory::blocking());
+    let sink = play_until_queue_is_full(&mut h, "a");
+
+    seek_to(&h, &sink, Duration::from_millis(1_200));
+    assert_eq!(
+        h.labels_until(|e| matches!(e, Event::Seeked { .. })),
+        ["state:Playing", "state:Seeking", "seeked:1.2s"]
+    );
+    assert_eq!(h.next_event(), Event::StateChanged(State::Playing), "audio resumes without a new track starting");
+
+    sink.set_blocking(false);
+    let labels = h.labels_until(is_stopped);
+    assert_eq!(labels, ["ended:a:Completed", "state:Loading", "exhausted", "state:Stopped"]);
+    assert!(ends_with(&sink.played(), &wav_from(52_920, frames)), "starts exactly at 1.2 s, not at the segment boundary");
+}
+
+#[test]
+fn while_a_seek_reopens_the_track_the_position_is_already_the_target() {
+    let track = TestTrack::segmented("a", 100_000, 22_050).slow(Duration::from_millis(300));
+    let mut h = Harness::new(vec![track], FakeSinkFactory::blocking());
+    let sink = play_until_queue_is_full(&mut h, "a");
+
+    seek_to(&h, &sink, Duration::from_millis(1_200));
+    wait_until("the engine is reopening the track", || h.engine.status().state == State::Seeking);
+    let status = h.engine.status();
+    assert_eq!(status.position, Duration::from_millis(1_200));
+    assert!(status.track.is_some(), "the track is known while it is reopened");
+
+    wait_until("playing again", || h.engine.status().state == State::Playing);
+    sink.set_blocking(false);
+}
+
+#[test]
+fn a_seek_while_paused_stays_paused_and_resumes_at_the_target() {
+    let frames = 100_000;
+    let mut h = Harness::new(vec![TestTrack::segmented("a", frames, 22_050)], FakeSinkFactory::blocking());
+    let sink = play_until_queue_is_full(&mut h, "a");
+    send_and_unblock(&h, &sink, Command::Pause);
+    h.events_until(|e| matches!(e, Event::StateChanged(State::Paused)));
+
+    h.send(Command::Seek(SeekTarget::Absolute(Duration::from_millis(1_200))));
+    assert_eq!(
+        h.labels_until(|e| matches!(e, Event::StateChanged(State::Paused))),
+        ["state:Seeking", "seeked:1.2s", "state:Paused"]
+    );
+    h.assert_quiet_for(Duration::from_millis(100));
+    assert_eq!(sink.queued_frames(), 0, "nothing is written while paused");
+
+    h.send(Command::Resume);
+    assert_eq!(h.next_event(), Event::StateChanged(State::Playing));
+    sink.set_blocking(false);
+    h.labels_until(is_stopped);
+    assert!(ends_with(&sink.played(), &wav_from(52_920, frames)));
+}
+
+#[test]
+fn a_new_track_request_during_a_reopening_seek_wins() {
+    let slow = TestTrack::segmented("a", 100_000, 22_050).slow(Duration::from_millis(300));
+    let mut h = Harness::new(vec![slow, TestTrack::pcm("b", 2_000)], FakeSinkFactory::blocking());
+    let sink = play_until_queue_is_full(&mut h, "a");
+
+    seek_to(&h, &sink, Duration::from_millis(1_200));
+    wait_until("the engine is reopening the track", || h.engine.status().state == State::Seeking);
+    h.play("b");
+
+    let labels = h.labels_until(is_stopped);
+    let tail = &labels[labels.iter().position(|l| l == "ended:a:Interrupted").unwrap()..];
+    assert_eq!(
+        tail,
+        ["ended:a:Interrupted", "state:Loading", "started:b", "state:Playing", "ended:b:Completed", "state:Loading", "exhausted", "state:Stopped"]
+    );
+    // Long enough for the abandoned reopening to have arrived, had it not been superseded.
+    h.assert_quiet_for(Duration::from_millis(400));
+}
+
+#[test]
+fn a_seek_whose_reopening_fails_stops_the_engine_with_an_error() {
+    let track = TestTrack::segmented("a", 100_000, 22_050).failing_reopen();
+    let mut h = Harness::new(vec![track], FakeSinkFactory::blocking());
+    let sink = play_until_queue_is_full(&mut h, "a");
+
+    seek_to(&h, &sink, Duration::from_millis(1_200));
+    assert_eq!(
+        h.labels_until(is_stopped),
+        [
+            "state:Playing",
+            "state:Seeking",
+            "seeked:1.2s",
+            "error:the connection dropped while reopening the track",
+            "ended:a:Failed",
+            "state:Stopped"
+        ]
+    );
+    assert_eq!(h.engine.status().state, State::Stopped);
 }

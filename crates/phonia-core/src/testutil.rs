@@ -11,6 +11,12 @@ pub fn sample_at(index: usize) -> i16 {
 /// A 16-bit stereo PCM WAV with `frames` frames, where sample `i` (counting L and R) is
 /// `sample_at(i)`. WAV needs no external file and is seekable in memory.
 pub fn wav(frames: usize) -> Vec<u8> {
+    wav_slice(0, frames)
+}
+
+/// Like [`wav`], but holding frames `from_frame..from_frame + frames` of the same signal: what a
+/// stream reopened partway through a track carries.
+pub fn wav_slice(from_frame: usize, frames: usize) -> Vec<u8> {
     let data_len = (frames * 4) as u32;
     let mut out = Vec::new();
     out.extend_from_slice(b"RIFF");
@@ -25,7 +31,7 @@ pub fn wav(frames: usize) -> Vec<u8> {
     out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
     out.extend_from_slice(b"data");
     out.extend_from_slice(&data_len.to_le_bytes());
-    for i in 0..frames * 2 {
+    for i in from_frame * 2..(from_frame + frames) * 2 {
         out.extend_from_slice(&sample_at(i).to_le_bytes());
     }
     out
@@ -35,4 +41,29 @@ pub fn wav(frames: usize) -> Vec<u8> {
 /// `i32`.
 pub fn expected(from_sample: usize, to_sample: usize) -> Vec<i32> {
     (from_sample..to_sample).map(|i| i32::from(sample_at(i)) << 16).collect()
+}
+
+/// A source that can be read but never repositioned, like a network stream.
+pub struct NonSeekable<R>(pub R);
+
+impl<R: std::io::Read> std::io::Read for NonSeekable<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl<R> std::io::Seek for NonSeekable<R> {
+    fn seek(&mut self, _pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        Err(std::io::Error::other("this source can't seek"))
+    }
+}
+
+impl<R: std::io::Read + Send + Sync> symphonia::core::io::MediaSource for NonSeekable<R> {
+    fn is_seekable(&self) -> bool {
+        false
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        None
+    }
 }

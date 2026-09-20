@@ -12,8 +12,8 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use supplier::{Advance, LoadedTrack, TrackMedia, TrackSupplier};
-pub use types::{Command, EndReason, Event, State, Status, TrackMeta, TrackRef};
+pub use supplier::{Advance, LoadedTrack, SeekMode, TrackMedia, TrackSupplier};
+pub use types::{Command, EndReason, Event, SeekTarget, State, Status, TrackMeta, TrackRef};
 
 use std::time::Duration;
 

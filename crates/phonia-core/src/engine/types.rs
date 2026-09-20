@@ -15,6 +15,16 @@ pub struct TrackMeta {
     pub duration: Option<Duration>,
 }
 
+/// Where to move within the current track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeekTarget {
+    Absolute(Duration),
+    /// Ahead of what has been heard so far.
+    Forward(Duration),
+    /// Behind what has been heard so far, stopping at the start of the track.
+    Backward(Duration),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// Plays the given track, replacing whatever is playing. `None` starts from whatever the
@@ -34,6 +44,10 @@ pub enum Command {
     Resume,
     /// `Pause` if playing (or loading), `Resume` if paused.
     TogglePause,
+    /// Moves within the current track. Reported with [`Event::Seeked`], or
+    /// [`Event::SeekRejected`] if the track can't do it. Pausing is unaffected: a seek while
+    /// paused stays paused.
+    Seek(SeekTarget),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,13 +58,18 @@ pub enum State {
     Playing,
     /// A track is loaded and its position is kept, but the audio is silent.
     Paused,
+    /// The current track is being reopened at a new position (a stream that can't rewind is
+    /// opened again where the seek points). Silent, like [`State::Loading`], but the track and
+    /// the position it will resume from are known.
+    Seeking,
 }
 
 /// A snapshot of the engine, always up to date on [`super::Engine::status`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Status {
     pub state: State,
-    /// The current track; `None` unless `state` is [`State::Playing`] or [`State::Paused`].
+    /// The current track; `None` unless `state` is [`State::Playing`], [`State::Paused`] or
+    /// [`State::Seeking`].
     pub track: Option<TrackMeta>,
     pub spec: Option<SourceSpec>,
     /// What the listener has heard of the current track, as of the last [`Event::Position`].
@@ -78,6 +97,12 @@ pub enum Event {
     /// sent about four times a second while playing, and also when a track starts, pauses or
     /// ends. The last one of a completed track equals its length.
     Position { position: Duration, duration: Option<Duration> },
+    /// A seek was applied: the position playback will continue from. Sent as soon as the seek is
+    /// accepted, so for a track that has to be reopened it precedes the audio actually resuming
+    /// (see [`State::Seeking`]).
+    Seeked { position: Duration },
+    /// A seek could not be done, with why. Playback carries on as if it had not been requested.
+    SeekRejected { reason: String },
     /// The supplier has no further track to offer.
     QueueExhausted,
     /// Something went wrong; the engine has stopped, but stays usable.
