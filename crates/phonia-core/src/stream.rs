@@ -192,11 +192,17 @@ async fn download_segment(http: &reqwest::Client, url: &str) -> Result<Option<By
     Err(last_err.unwrap_or_else(|| anyhow!("unknown failure downloading segment")))
 }
 
-/// Downloads the init segment followed by all media segments of `dash`, sending each one over
-/// `tx` in order. Honours `segment_count` when known; otherwise stops at the first 404/403
-/// (requiring at least one successful media segment first), same rules the old
-/// `tidal::download_dash` used.
-async fn run_dash_download(http: reqwest::Client, dash: DashSegments, tx: mpsc::Sender<ChunkResult>) {
+/// Downloads the init segment followed by the media segments of `dash` from `first_segment` on,
+/// sending each one over `tx` in order. The init segment always comes first, since a decoder can
+/// make nothing of a media segment without it. Honours `segment_count` when known; otherwise
+/// stops at the first 404/403 (requiring at least one successful media segment first), same
+/// rules the old `tidal::download_dash` used.
+async fn run_dash_download(
+    http: reqwest::Client,
+    dash: DashSegments,
+    first_segment: u32,
+    tx: mpsc::Sender<ChunkResult>,
+) {
     // `println!` locks stdout for the whole line, so complete lines from different threads can't
     // interleave -- only unterminated `\r` lines can. So this producer prints exactly one
     // complete line up front and never touches stdout again; only the ALSA sink owns a `\r`
@@ -226,8 +232,8 @@ async fn run_dash_download(http: reqwest::Client, dash: DashSegments, tx: mpsc::
         return; // The decoder side was dropped (cancellation); stop cleanly, no panic.
     }
 
-    let known_range = dash.segment_range();
-    let mut segment_number = known_range.as_ref().map_or(dash.start_number, |r| *r.start());
+    let known_range = dash.segment_range_from(first_segment);
+    let mut segment_number = first_segment;
     let mut downloaded = 0u32;
 
     loop {
@@ -280,10 +286,23 @@ async fn run_dash_download(http: reqwest::Client, dash: DashSegments, tx: mpsc::
 /// stopping at the first 404/403. Only spawns the download task; fetches nothing itself, so this
 /// function returns immediately.
 pub fn open_dash(http: &reqwest::Client, dash: &DashSegments, tee: Option<std::fs::File>) -> SegmentStream {
+    open_dash_from(http, dash, dash.start_number, tee)
+}
+
+/// Like [`open_dash`], starting at media segment `first_segment` (a `$Number$`, e.g. one from
+/// [`DashSegments::segment_for_time`]). This is how a seek is done on a network stream, which
+/// can't be rewound: open a new stream at the right segment and drop the old one. The init
+/// segment is still sent first.
+pub fn open_dash_from(
+    http: &reqwest::Client,
+    dash: &DashSegments,
+    first_segment: u32,
+    tee: Option<std::fs::File>,
+) -> SegmentStream {
     let (tx, rx) = mpsc::channel(PREFETCH_DEPTH);
     let http = http.clone();
     let dash = dash.clone();
-    tokio::spawn(run_dash_download(http, dash, tx));
+    tokio::spawn(run_dash_download(http, dash, first_segment, tx));
     SegmentStream::new(rx, tee.map(|f| Box::new(f) as Box<dyn Write + Send + Sync>))
 }
 
@@ -540,4 +559,82 @@ mod tests {
         assert!(!stream.is_seekable());
         assert_eq!(stream.byte_len(), None);
     }
+
+    /// A minimal local HTTP server: `/init` answers `INIT`, `/seg/N` answers `SEG<N>` for N up to
+    /// `last_segment` and 404 beyond it. Returns its base URL.
+    async fn serve_segments(last_segment: u32) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { return };
+                tokio::spawn(async move {
+                    let mut request = [0u8; 2048];
+                    let n = socket.read(&mut request).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&request[..n]);
+                    let path = request.split_whitespace().nth(1).unwrap_or("");
+                    let (status, body) = match path.strip_prefix("/seg/").and_then(|n| n.parse::<u32>().ok()) {
+                        _ if path == "/init" => ("200 OK", "INIT".to_string()),
+                        Some(n) if (1..=last_segment).contains(&n) => ("200 OK", format!("SEG{n}")),
+                        _ => ("404 Not Found", String::new()),
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        base
+    }
+
+    fn dash_at(base: &str, segments: u32) -> DashSegments {
+        DashSegments {
+            init_url: format!("{base}/init"),
+            media_url_template: format!("{base}/seg/$Number$"),
+            start_number: 1,
+            segment_count: Some(segments),
+            codecs: None,
+            timescale: 1,
+            timing: crate::dash::SegmentTiming::Unknown,
+            presentation_duration: None,
+        }
+    }
+
+    /// Reads a stream to its end off the async runtime, as the audio thread does.
+    async fn read_all(mut stream: SegmentStream) -> Vec<u8> {
+        tokio::task::spawn_blocking(move || {
+            let mut out = Vec::new();
+            io::Read::read_to_end(&mut stream, &mut out).unwrap();
+            out
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_dash_streams_the_init_segment_then_every_segment() {
+        let base = serve_segments(5).await;
+        let stream = open_dash(&reqwest::Client::new(), &dash_at(&base, 5), None);
+        assert_eq!(read_all(stream).await, b"INITSEG1SEG2SEG3SEG4SEG5");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_dash_from_sends_the_init_segment_first_and_then_starts_at_the_given_segment() {
+        let base = serve_segments(5).await;
+        let stream = open_dash_from(&reqwest::Client::new(), &dash_at(&base, 5), 3, None);
+        assert_eq!(read_all(stream).await, b"INITSEG3SEG4SEG5");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_dash_from_the_last_segment_and_past_the_end() {
+        let base = serve_segments(5).await;
+        let http = reqwest::Client::new();
+        assert_eq!(read_all(open_dash_from(&http, &dash_at(&base, 5), 5, None)).await, b"INITSEG5");
+        assert_eq!(read_all(open_dash_from(&http, &dash_at(&base, 5), 6, None)).await, b"INIT");
+    }
 }
+

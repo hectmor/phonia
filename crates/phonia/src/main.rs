@@ -1,12 +1,15 @@
+mod player;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use phonia_core::output::alsa::{self, AlsaSink};
-use phonia_core::{auth, decode, stream, tidal};
+use phonia_core::engine::{Command as EngineCommand, TrackRef};
+use phonia_core::output::alsa;
+use phonia_core::suppliers::{FileSupplier, TidalSupplier};
+use phonia_core::{auth, tidal};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tidlers::client::models::playback::AudioQuality;
 
 /// phonia -- phase 0: CLI spike that validates PKCE login -> HiRes playbackinfo -> DASH segments
@@ -42,13 +45,20 @@ enum Command {
         /// If given, saves the downloaded bytes (fMP4/DASH or the JSON manifest) to this path.
         #[arg(long)]
         save_mp4: Option<PathBuf>,
+        /// Read playback commands from the keyboard (pause, seek, ...); `?` lists them.
+        #[arg(long)]
+        interactive: bool,
     },
-    /// Decodes and plays a local file (FLAC or fMP4) through the same ALSA output path,
-    /// to test the output without depending on TIDAL.
+    /// Decodes and plays local files (FLAC or fMP4), one after another, through the same
+    /// playback engine and ALSA output, to test them without depending on TIDAL.
     PlayFile {
-        path: PathBuf,
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
         #[arg(long, default_value = "hw:1,0")]
         device: String,
+        /// Read playback commands from the keyboard (pause, seek, next, ...); `?` lists them.
+        #[arg(long)]
+        interactive: bool,
     },
     /// Lists which formats and rates the given ALSA device accepts, without playing anything.
     ProbeDevice {
@@ -82,10 +92,12 @@ async fn main() -> ExitCode {
             None if no_wait || !std::io::stdin().is_terminal() => auth::login_begin(),
             None => auth::login().await,
         },
-        Command::Play { track_id, device, quality, save_mp4 } => {
-            run_play(&track_id, &device, quality.into(), save_mp4.as_deref()).await
+        Command::Play { track_id, device, quality, save_mp4, interactive } => {
+            run_play(&track_id, &device, quality.into(), save_mp4.as_deref(), interactive).await
         }
-        Command::PlayFile { path, device } => run_play_file(&path, &device).await,
+        Command::PlayFile { paths, device, interactive } => {
+            player::run(FileSupplier::new(paths), &device, EngineCommand::Play(None), interactive).await
+        }
         Command::ProbeDevice { device } => alsa::probe_device(&device),
     };
 
@@ -103,73 +115,18 @@ async fn run_play(
     device: &str,
     quality: AudioQuality,
     save_mp4: Option<&Path>,
+    interactive: bool,
 ) -> Result<()> {
     let client = auth::load_client().await?;
     let http = tidal::build_http_client()?;
 
-    println!("Fetching playbackinfo for track {track_id}...");
-    let info = tidal::fetch_playback_info(&http, &client, track_id, quality).await?;
-    tidal::print_playback_info(&info);
-
-    let tee = save_mp4
-        .map(|path| std::fs::File::create(path).with_context(|| format!("creating {path:?}")))
-        .transpose()?;
+    let mut supplier = TidalSupplier::new(http, Arc::new(client), quality).print_info();
     if let Some(path) = save_mp4 {
+        let file = std::fs::File::create(path).with_context(|| format!("creating {path:?}"))?;
         println!("Saving audio to {path:?} as it streams...");
+        supplier = supplier.saving_to(file);
     }
 
-    let (source, extension) = match &info.manifest {
-        tidal::ManifestKind::Json { url, .. } => (stream::open_url(&http, url, tee), None),
-        tidal::ManifestKind::Dash(dash) => (stream::open_dash(&http, dash, tee), Some("mp4")),
-    };
-
-    play_source(source, extension, device.to_string()).await
-}
-
-async fn run_play_file(path: &Path, device: &str) -> Result<()> {
-    let extension = path.extension().and_then(|e| e.to_str()).map(str::to_string);
-    let file = std::fs::File::open(path).with_context(|| format!("opening {path:?}"))?;
-    play_source(file, extension.as_deref(), device.to_string()).await
-}
-
-/// Shared decode+play path for both `play` and `play-file`: decodes `source` and streams the
-/// result to the bit-perfect ALSA sink, watching for Ctrl+C between writes.
-async fn play_source(
-    source: impl symphonia::core::io::MediaSource + 'static,
-    extension: Option<&str>,
-    device: String,
-) -> Result<()> {
-    let stop = Arc::new(AtomicBool::new(false));
-    {
-        let stop = stop.clone();
-        tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                println!("\nInterrupt signal received, stopping playback...");
-                stop.store(true, Ordering::SeqCst);
-            }
-        });
-    }
-
-    let extension = extension.map(str::to_string);
-
-    tokio::task::spawn_blocking(move || -> Result<()> {
-        let decoder = decode::Decoder::open(source, extension.as_deref())
-            .context("opening the decoder")?;
-        let spec = decoder.spec();
-        println!(
-            "Source: {} bits / {} Hz / {} channel(s)",
-            spec.bits_per_sample, spec.sample_rate, spec.channels
-        );
-
-        let mut sink =
-            AlsaSink::open(&device, spec, None, stop.clone()).context("opening the ALSA output")?;
-
-        decoder.run(|samples| sink.write_chunk(samples))?;
-
-        sink.finish()
-    })
-    .await
-    .context("the decode/playback task panicked")??;
-
-    Ok(())
+    let start = EngineCommand::Play(Some(TrackRef(track_id.to_string())));
+    player::run(Arc::new(supplier), device, start, interactive).await
 }
