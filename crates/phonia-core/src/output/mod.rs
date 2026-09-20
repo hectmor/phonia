@@ -39,7 +39,8 @@ pub trait AudioSink {
     /// for new audio (also when paused).
     fn flush(&mut self) -> Result<()>;
 
-    /// Blocks until everything queued has been played.
+    /// Blocks until everything queued has been played. The sink can be written to again
+    /// afterwards: the engine reuses it for the next track of the same format.
     fn drain(&mut self) -> Result<()>;
 }
 

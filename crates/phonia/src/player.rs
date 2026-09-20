@@ -1,9 +1,10 @@
-//! The terminal player: runs the playback engine, shows progress and, optionally, reads
-//! commands from the keyboard.
+//! The terminal player: plays a queue through the playback engine, shows progress and,
+//! optionally, reads commands from the keyboard.
 
 use anyhow::{Result, anyhow};
 use phonia_core::engine::{Command, Engine, EndReason, Event, SeekTarget, State, TrackSupplier};
 use phonia_core::output::alsa::AlsaSinkFactory;
+use phonia_core::queue::{ItemId, Queue, QueueSnapshot, Repeat};
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,6 +19,8 @@ const HELP: &str = "\
 Commands (type one and press Enter):
   p or Enter  pause / resume     n  next track      b  previous track
   f  forward 10 s                r  back 10 s       s <seconds>  seek to a position
+  l  list the queue              z  shuffle on/off  x  repeat off/all/one
+  d <n>  remove entry n          j <n>  jump to entry n
   q  quit                        ?  this help";
 
 /// What the user asked for on the keyboard.
@@ -29,6 +32,12 @@ enum Key {
     Forward,
     Rewind,
     SeekTo(Duration),
+    List,
+    ToggleShuffle,
+    CycleRepeat,
+    /// An entry, numbered from 1 as `l` lists them.
+    Remove(usize),
+    Jump(usize),
     Help,
     Quit,
     Unknown(String),
@@ -43,13 +52,25 @@ fn parse_key(line: &str) -> Key {
         "f" => Key::Forward,
         "r" => Key::Rewind,
         "q" => Key::Quit,
+        "l" => Key::List,
+        "z" => Key::ToggleShuffle,
+        "x" => Key::CycleRepeat,
         "?" | "h" => Key::Help,
-        _ => line
-            .strip_prefix('s')
-            .and_then(|seconds| seconds.trim().parse::<f64>().ok())
-            .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
-            .map_or_else(|| Key::Unknown(line.to_string()), Key::SeekTo),
+        _ => parse_argument_key(line).unwrap_or_else(|| Key::Unknown(line.to_string())),
     }
+}
+
+/// The keys that take an argument: `s <seconds>`, `d <n>` and `j <n>`.
+fn parse_argument_key(line: &str) -> Option<Key> {
+    let entry = |rest: &str| rest.trim().parse::<usize>().ok().filter(|n| *n >= 1);
+    if let Some(rest) = line.strip_prefix('s') {
+        let seconds = rest.trim().parse::<f64>().ok()?;
+        return Duration::try_from_secs_f64(seconds).ok().map(Key::SeekTo);
+    }
+    if let Some(rest) = line.strip_prefix('d') {
+        return entry(rest).map(Key::Remove);
+    }
+    line.strip_prefix('j').and_then(entry).map(Key::Jump)
 }
 
 /// The engine command a key stands for, if it stands for one.
@@ -61,8 +82,53 @@ fn command_for(key: &Key) -> Option<Command> {
         Key::Forward => Command::Seek(SeekTarget::Forward(SEEK_STEP)),
         Key::Rewind => Command::Seek(SeekTarget::Backward(SEEK_STEP)),
         Key::SeekTo(at) => Command::Seek(SeekTarget::Absolute(*at)),
-        Key::Help | Key::Quit | Key::Unknown(_) => return None,
+        Key::List
+        | Key::ToggleShuffle
+        | Key::CycleRepeat
+        | Key::Remove(_)
+        | Key::Jump(_)
+        | Key::Help
+        | Key::Quit
+        | Key::Unknown(_) => return None,
     })
+}
+
+fn repeat_name(repeat: Repeat) -> &'static str {
+    match repeat {
+        Repeat::Off => "off",
+        Repeat::All => "all",
+        Repeat::One => "one",
+    }
+}
+
+/// `off` -> `all` -> `one` -> `off`, the order most players cycle in.
+fn next_repeat(repeat: Repeat) -> Repeat {
+    match repeat {
+        Repeat::Off => Repeat::All,
+        Repeat::All => Repeat::One,
+        Repeat::One => Repeat::Off,
+    }
+}
+
+/// The queue as `l` shows it, entries numbered from 1 and the current one marked.
+fn format_queue(queue: &QueueSnapshot) -> String {
+    let mut text = format!(
+        "Queue ({} entries, shuffle {}, repeat {}):",
+        queue.items.len(),
+        if queue.shuffle { "on" } else { "off" },
+        repeat_name(queue.repeat)
+    );
+    for (index, item) in queue.items.iter().enumerate() {
+        let marker = if queue.current == Some(item.id) { '>' } else { ' ' };
+        let name = item.track.title.as_deref().unwrap_or(&item.track.source.0);
+        text.push_str(&format!("\n {marker} {:>3}. {name}", index + 1));
+    }
+    text
+}
+
+/// The entry a key's number refers to.
+fn entry_at(queue: &QueueSnapshot, number: usize) -> Option<ItemId> {
+    queue.items.get(number.checked_sub(1)?).map(|item| item.id)
 }
 
 fn format_progress(elapsed_secs: f64, total_secs: Option<f64>) -> String {
@@ -122,10 +188,11 @@ impl Console {
     }
 }
 
-/// Plays whatever `supplier` offers, starting with `start`, until it is over or interrupted.
-/// Ctrl+C stops playback and releases the device; a second one exits at once.
-pub async fn run(supplier: Arc<dyn TrackSupplier>, device: &str, start: Command, interactive: bool) -> Result<()> {
+/// Plays the queue from its start until it is exhausted or the user quits. Ctrl+C stops
+/// playback and releases the device; a second one exits at once.
+pub async fn run(queue: Arc<Queue>, device: &str, interactive: bool) -> Result<()> {
     let sinks = Arc::new(AlsaSinkFactory::new(device).print_diagnostics());
+    let supplier: Arc<dyn TrackSupplier> = queue.clone();
     let engine = Engine::spawn(tokio::runtime::Handle::current(), sinks, supplier)?;
     let mut events = engine.subscribe();
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -134,7 +201,7 @@ pub async fn run(supplier: Arc<dyn TrackSupplier>, device: &str, start: Command,
     if interactive {
         println!("{HELP}");
     }
-    engine.send(start)?;
+    engine.send(Command::Play(None))?;
 
     let mut console = Console::default();
     let mut error = None;
@@ -159,6 +226,24 @@ pub async fn run(supplier: Arc<dyn TrackSupplier>, device: &str, start: Command,
                     }
                     Key::Help => console.line(HELP),
                     Key::Unknown(text) => console.line(format!("Unknown command '{text}' (? for help)")),
+                    Key::List => console.line(format_queue(&queue.snapshot())),
+                    Key::ToggleShuffle => {
+                        let shuffle = !queue.snapshot().shuffle;
+                        queue.set_shuffle(shuffle);
+                        console.line(format!("Shuffle {}", if shuffle { "on" } else { "off" }));
+                    }
+                    Key::CycleRepeat => {
+                        let repeat = next_repeat(queue.snapshot().repeat);
+                        queue.set_repeat(repeat);
+                        console.line(format!("Repeat {}", repeat_name(repeat)));
+                    }
+                    Key::Remove(number) => remove_entry(&queue, &engine, number, &mut console),
+                    Key::Jump(number) => match entry_at(&queue.snapshot(), number) {
+                        Some(id) => {
+                            let _ = engine.send(Command::Play(Some(id.track_ref())));
+                        }
+                        None => console.line(format!("There is no entry {number}")),
+                    },
                     key => {
                         if let Some(command) = command_for(&key) {
                             let _ = engine.send(command);
@@ -182,6 +267,22 @@ pub async fn run(supplier: Arc<dyn TrackSupplier>, device: &str, start: Command,
     error.map_or(Ok(()), |message| Err(anyhow!(message)))
 }
 
+/// Takes entry `number` out of the queue. The queue leaves a playing track alone, so if that was
+/// the one playing, skip to the next.
+fn remove_entry(queue: &Queue, engine: &Engine, number: usize, console: &mut Console) {
+    let snapshot = queue.snapshot();
+    let Some(id) = entry_at(&snapshot, number) else {
+        console.line(format!("There is no entry {number}"));
+        return;
+    };
+    let was_playing = snapshot.current == Some(id);
+    queue.remove(&[id]);
+    console.line(format!("Removed entry {number}"));
+    if was_playing {
+        let _ = engine.send(Command::Next);
+    }
+}
+
 /// Reacts to one engine event. Returns `true` once the engine has stopped, which is how every
 /// run ends: the queue ran out, the user quit, or something failed.
 fn handle_event(event: Event, interactive: bool, console: &mut Console, error: &mut Option<String>) -> bool {
@@ -195,6 +296,7 @@ fn handle_event(event: Event, interactive: bool, console: &mut Console, error: &
         Event::StateChanged(state) if interactive => console.line(format!("[{state:?}]")),
         Event::Seeked { position } if interactive => console.line(format!("Seeked to {:.1}s", position.as_secs_f64())),
         Event::SeekRejected { reason } => console.line(format!("Seek rejected: {reason}")),
+        Event::QueueExhausted => console.line("End of the queue."),
         Event::Error { message } => {
             error.get_or_insert(message);
         }
@@ -227,8 +329,18 @@ mod tests {
     }
 
     #[test]
+    fn queue_keys() {
+        assert_eq!(parse_key("l"), Key::List);
+        assert_eq!(parse_key("z"), Key::ToggleShuffle);
+        assert_eq!(parse_key("x"), Key::CycleRepeat);
+        assert_eq!(parse_key("d 3"), Key::Remove(3));
+        assert_eq!(parse_key("d3"), Key::Remove(3));
+        assert_eq!(parse_key("j 12"), Key::Jump(12));
+    }
+
+    #[test]
     fn nonsense_is_reported_not_guessed() {
-        for bad in ["s", "s abc", "s -5", "x", "pp", "seek 10"] {
+        for bad in ["s", "s abc", "s -5", "y", "pp", "seek 10", "d", "d 0", "d -1", "d x", "j", "j 0", "j 1.5"] {
             assert_eq!(parse_key(bad), Key::Unknown(bad.to_string()), "{bad:?}");
         }
     }
@@ -244,6 +356,64 @@ mod tests {
         );
         assert_eq!(command_for(&Key::Quit), None);
         assert_eq!(command_for(&Key::Help), None);
+    }
+
+    fn snapshot(titles: &[&str], current: Option<usize>, shuffle: bool, repeat: Repeat) -> QueueSnapshot {
+        use phonia_core::engine::TrackRef;
+        use phonia_core::queue::{QueueItem, QueueTrack};
+        let items: Vec<QueueItem> = titles
+            .iter()
+            .enumerate()
+            .map(|(index, title)| QueueItem {
+                id: ItemId(index as u64 + 1),
+                track: QueueTrack { source: TrackRef(format!("/music/{title}.flac")), title: Some(title.to_string()), duration: None },
+            })
+            .collect();
+        QueueSnapshot {
+            version: 1,
+            order: items.iter().map(|item| item.id).collect(),
+            current: current.map(|index| items[index].id),
+            items,
+            shuffle,
+            repeat,
+        }
+    }
+
+    #[test]
+    fn the_queue_listing_numbers_entries_and_marks_the_current_one() {
+        let text = format_queue(&snapshot(&["one", "two", "three"], Some(1), true, Repeat::All));
+        assert_eq!(
+            text,
+            "Queue (3 entries, shuffle on, repeat all):\n     1. one\n >   2. two\n     3. three"
+        );
+    }
+
+    #[test]
+    fn an_empty_queue_lists_only_its_header() {
+        assert_eq!(format_queue(&snapshot(&[], None, false, Repeat::Off)), "Queue (0 entries, shuffle off, repeat off):");
+    }
+
+    #[test]
+    fn an_entry_without_a_title_is_listed_by_its_source() {
+        let mut queue = snapshot(&["x"], None, false, Repeat::Off);
+        queue.items[0].track.title = None;
+        assert!(format_queue(&queue).ends_with("1. /music/x.flac"));
+    }
+
+    #[test]
+    fn entries_are_numbered_from_one() {
+        let queue = snapshot(&["a", "b"], None, false, Repeat::Off);
+        assert_eq!(entry_at(&queue, 1), Some(ItemId(1)));
+        assert_eq!(entry_at(&queue, 2), Some(ItemId(2)));
+        assert_eq!(entry_at(&queue, 3), None);
+        assert_eq!(entry_at(&queue, 0), None);
+    }
+
+    #[test]
+    fn repeat_cycles_off_all_one() {
+        assert_eq!(next_repeat(Repeat::Off), Repeat::All);
+        assert_eq!(next_repeat(Repeat::All), Repeat::One);
+        assert_eq!(next_repeat(Repeat::One), Repeat::Off);
     }
 
     #[test]

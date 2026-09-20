@@ -1061,6 +1061,7 @@ dependencies = [
  "futures-util",
  "libc",
  "quick-xml",
+ "rand",
  "reqwest",
  "serde",
  "serde_json",
