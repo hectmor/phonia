@@ -1,7 +1,9 @@
 pub mod auth;
 pub mod tidal;
+pub mod control;
 pub mod dash;
 pub mod decode;
+pub mod diag;
 pub mod engine;
 pub mod output;
 pub mod queue;

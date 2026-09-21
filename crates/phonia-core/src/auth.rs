@@ -57,7 +57,8 @@ fn write_secret_file(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-fn save_session(client: &TidalClient) -> Result<()> {
+/// Writes the session (tokens included) to `session.json`, readable only by the owner.
+pub fn save_session(client: &TidalClient) -> Result<()> {
     let path = session_path()?;
     write_secret_file(&path, &client.get_json()).context("saving the session")
 }

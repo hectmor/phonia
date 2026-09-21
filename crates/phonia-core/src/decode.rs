@@ -235,11 +235,11 @@ impl Decoder {
             let decoded = match self.decoder.decode(&packet) {
                 Ok(decoded) => decoded,
                 Err(SymphoniaError::IoError(e)) => {
-                    eprintln!("Warning: packet dropped due to an I/O error: {e}");
+                    crate::warn!("Warning: packet dropped due to an I/O error: {e}");
                     continue;
                 }
                 Err(SymphoniaError::DecodeError(e)) => {
-                    eprintln!("Warning: packet dropped due to a decode error: {e}");
+                    crate::warn!("Warning: packet dropped due to a decode error: {e}");
                     continue;
                 }
                 Err(e) => return Err(e).context("unrecoverable decoder error"),

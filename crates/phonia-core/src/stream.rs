@@ -208,8 +208,8 @@ async fn run_dash_download(
     // complete line up front and never touches stdout again; only the ALSA sink owns a `\r`
     // progress line for the rest of playback.
     match dash.segment_count {
-        Some(total) => println!("Buffering {PREFETCH_DEPTH} segments ahead (track has {total} segments)..."),
-        None => println!("Buffering {PREFETCH_DEPTH} segments ahead..."),
+        Some(total) => crate::note!("Buffering {PREFETCH_DEPTH} segments ahead (track has {total} segments)..."),
+        None => crate::note!("Buffering {PREFETCH_DEPTH} segments ahead..."),
     }
 
     let init = match download_segment(&http, &dash.init_url).await {
@@ -315,7 +315,7 @@ pub fn open_url(http: &reqwest::Client, url: &str, tee: Option<std::fs::File>) -
     let url = url.to_string();
     tokio::spawn(async move {
         // See the comment in `run_dash_download`: one complete line up front, nothing else.
-        println!("Buffering...");
+        crate::note!("Buffering...");
 
         let response = match http.get(&url).send().await {
             Ok(r) => r,

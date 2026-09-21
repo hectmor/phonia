@@ -9,6 +9,7 @@ use alsa::pcm::{Access, Format, HwParams, PCM, State};
 use alsa::{Direction, ValueOr};
 use anyhow::{Context, Result, anyhow, bail};
 use std::ffi::CString;
+use std::sync::Arc;
 
 use super::{AudioSink, SinkFactory};
 use crate::decode::SourceSpec;
@@ -44,8 +45,8 @@ pub struct AlsaSink {
     /// queued. Needed to replay what a drop-based pause threw away.
     tail: TailBuffer,
     pause: PauseState,
-    /// Print the bit-perfect verdict after the first successful write.
-    diagnostics_pending: bool,
+    /// Told the bit-perfect verdict after the first successful write.
+    on_report: Option<ReportHandler>,
 }
 
 impl AlsaSink {
@@ -136,14 +137,15 @@ impl AlsaSink {
             scratch: Vec::new(),
             tail: TailBuffer::new(buffer_frames * bytes_per_frame),
             pause: PauseState::Running,
-            diagnostics_pending: false,
+            on_report: None,
         })
     }
 
-    /// Prints the bit-perfect verdict (see [`AlsaSink::print_diagnostics`]) once the first audio
-    /// has been written, which is when the device reports the parameters it actually runs with.
-    pub fn with_diagnostics(mut self) -> Self {
-        self.diagnostics_pending = true;
+    /// Reports the bit-perfect verdict (see [`AlsaSink::report`]) to `handler` once the first
+    /// audio has been written, which is when the device reports the parameters it actually runs
+    /// with.
+    pub fn with_report_handler(mut self, handler: ReportHandler) -> Self {
+        self.on_report = Some(handler);
         self
     }
 
@@ -158,72 +160,129 @@ impl AlsaSink {
     }
 
     /// Reads back `/proc/asound/card<N>/pcm<D>p/sub0/hw_params` (only meaningful for `hw:N,D`
-    /// devices) and prints the bit-perfect verdict for this playback session.
-    pub fn print_diagnostics(&self) {
-        println!();
-        let Some((card, device)) = parse_hw_device(&self.device) else {
-            println!(
-                "Device '{}' is not in hw:N,D form; skipping the /proc/asound check.",
-                self.device
-            );
-            self.print_verdict(None, None, false);
-            return;
+    /// devices), which is what the kernel says the running stream really uses, and reports it
+    /// against what was asked for.
+    pub fn report(&self) -> SinkReport {
+        let proc = match parse_hw_device(&self.device) {
+            None => ProcReading::NotHw,
+            Some((card, device)) => {
+                let path = format!("/proc/asound/card{card}/pcm{device}p/sub0/hw_params");
+                match std::fs::read_to_string(&path) {
+                    Ok(contents) => ProcReading::Read { path, contents },
+                    Err(error) => ProcReading::Unreadable { path, error: error.to_string() },
+                }
+            }
         };
+        SinkReport::new(self.device.clone(), self.source, self.format.to_string(), proc)
+    }
+}
 
-        let path = format!("/proc/asound/card{card}/pcm{device}p/sub0/hw_params");
-        match std::fs::read_to_string(&path) {
-            Ok(contents) => {
-                println!("--- {path} ---");
-                print!("{contents}");
-                let proc_rate = extract_proc_rate(&contents);
-                let proc_format = extract_proc_field(&contents, "format");
-                self.print_verdict(proc_rate, proc_format, true);
-            }
-            Err(e) => {
-                println!("Warning: could not read {path}: {e}");
-                self.print_verdict(None, None, true);
-            }
+/// What the kernel says about a running stream.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProcReading {
+    /// The device is not a raw `hw:N,D` one, so there is nothing to check (and a plug layer such
+    /// as dmix or PipeWire may be resampling).
+    NotHw,
+    Unreadable { path: String, error: String },
+    Read { path: String, contents: String },
+}
+
+/// Whether playback is bit-perfect, and the evidence: the device's own account of the format and
+/// rate it runs at, compared with the source's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SinkReport {
+    pub device: String,
+    /// The format of the audio being played.
+    pub source: SourceSpec,
+    /// The ALSA sample format negotiated with the device, e.g. `S24_3LE`.
+    pub negotiated_format: String,
+    pub proc: ProcReading,
+}
+
+impl SinkReport {
+    pub fn new(device: String, source: SourceSpec, negotiated_format: String, proc: ProcReading) -> Self {
+        Self { device, source, negotiated_format, proc }
+    }
+
+    /// The sample rate the kernel reports for the running stream.
+    pub fn device_rate(&self) -> Option<u32> {
+        match &self.proc {
+            ProcReading::Read { contents, .. } => extract_proc_rate(contents),
+            _ => None,
         }
     }
 
-    fn print_verdict(&self, proc_rate: Option<u32>, proc_format: Option<String>, is_hw: bool) {
+    /// The sample format the kernel reports for the running stream.
+    pub fn device_format(&self) -> Option<String> {
+        match &self.proc {
+            ProcReading::Read { contents, .. } => extract_proc_field(contents, "format"),
+            _ => None,
+        }
+    }
+
+    /// True only when the kernel confirms the device runs at exactly the source's rate and the
+    /// format that was negotiated. Anything less (including not being able to check) is not.
+    pub fn bit_perfect(&self) -> bool {
+        self.device_rate() == Some(self.source.sample_rate)
+            && self.device_format().as_deref() == Some(self.negotiated_format.as_str())
+    }
+
+    /// Why playback is not known to be bit-perfect; `None` when it is.
+    pub fn problem(&self) -> Option<String> {
+        if self.bit_perfect() {
+            return None;
+        }
+        Some(match (&self.proc, self.device_rate(), self.device_format()) {
+            (ProcReading::NotHw, _, _) => {
+                "the device is not hw:N,D (possible resampling/mixing via dmix/PipeWire)".to_string()
+            }
+            (_, None, _) | (_, _, None) => "could not read /proc/asound to confirm it".to_string(),
+            (_, Some(rate), _) if rate != self.source.sample_rate => {
+                format!("the card reports {rate} Hz instead of {} Hz", self.source.sample_rate)
+            }
+            (_, _, Some(format)) => {
+                format!("the card reports format {format} instead of {}", self.negotiated_format)
+            }
+        })
+    }
+
+    /// The report as the terminal player shows it: the kernel's own account, then the verdict.
+    pub fn to_text(&self) -> String {
+        let mut text = String::new();
+        match &self.proc {
+            ProcReading::NotHw => text.push_str(&format!(
+                "Device '{}' is not in hw:N,D form; skipping the /proc/asound check.\n",
+                self.device
+            )),
+            ProcReading::Unreadable { path, error } => {
+                text.push_str(&format!("Warning: could not read {path}: {error}\n"));
+            }
+            ProcReading::Read { path, contents } => text.push_str(&format!("--- {path} ---\n{contents}")),
+        }
+
         let source = format!(
             "FLAC {}-bit/{} Hz {}ch",
             self.source.bits_per_sample, self.source.sample_rate, self.source.channels
         );
-        let negotiated_format = self.format.to_string();
-
-        let bit_perfect = is_hw
-            && proc_rate == Some(self.source.sample_rate)
-            && proc_format.as_deref() == Some(negotiated_format.as_str());
-
-        if bit_perfect {
-            println!(
+        match self.problem() {
+            None => text.push_str(&format!(
                 "{source} → {} {} {} Hz  \u{2714} BIT-PERFECT",
                 self.device,
-                negotiated_format,
-                proc_rate.unwrap()
-            );
-        } else {
-            let reason = if !is_hw {
-                "the device is not hw:N,D (possible resampling/mixing via dmix/PipeWire)".to_string()
-            } else {
-                match (proc_rate, &proc_format) {
-                    (None, _) | (_, None) => {
-                        "could not read /proc/asound to confirm it".to_string()
-                    }
-                    (Some(r), Some(f)) if r != self.source.sample_rate => {
-                        format!("the card reports {r} Hz instead of {} Hz", self.source.sample_rate)
-                    }
-                    (Some(_), Some(f)) => {
-                        format!("the card reports format {f} instead of {negotiated_format}")
-                    }
-                }
-            };
-            println!("{source} → {} {}  \u{2716} CONVERTED ({reason})", self.device, negotiated_format);
+                self.negotiated_format,
+                self.source.sample_rate
+            )),
+            Some(reason) => text.push_str(&format!(
+                "{source} → {} {}  \u{2716} CONVERTED ({reason})",
+                self.device, self.negotiated_format
+            )),
         }
+        text
     }
 }
+
+/// Called on the audio thread with the report of a sink that has just started playing, so it
+/// must not block.
+pub type ReportHandler = Arc<dyn Fn(SinkReport) + Send + Sync>;
 
 /// Writes all of `bytes` (whole frames of `bytes_per_frame` each) to `pcm`, blocking as needed.
 fn write_all(pcm: &PCM, device: &str, bytes_per_frame: usize, bytes: &[u8]) -> Result<()> {
@@ -251,7 +310,7 @@ fn write_all(pcm: &PCM, device: &str, bytes_per_frame: usize, bytes: &[u8]) -> R
                 offset += frames * bytes_per_frame;
             }
             Err(e) if e.errno() == libc::EPIPE => {
-                eprintln!("\nWarning: underrun (EPIPE) on '{device}', recovering...");
+                crate::warn!("\nWarning: underrun (EPIPE) on '{device}', recovering...");
                 drop(io);
                 pcm.try_recover(e, true).context("could not recover from an underrun")?;
             }
@@ -282,10 +341,8 @@ impl AudioSink for AlsaSink {
         write_all(&self.pcm, &self.device, self.bytes_per_frame(), &self.scratch)?;
         self.tail.push(&self.scratch);
 
-        if self.diagnostics_pending {
-            self.diagnostics_pending = false;
-            println!();
-            self.print_diagnostics();
+        if let Some(handler) = self.on_report.take() {
+            handler(self.report());
         }
         Ok(frames)
     }
@@ -369,17 +426,17 @@ impl AudioSink for AlsaSink {
 /// Opens [`AlsaSink`]s on one device, for the playback engine.
 pub struct AlsaSinkFactory {
     device: String,
-    print_diagnostics: bool,
+    on_report: Option<ReportHandler>,
 }
 
 impl AlsaSinkFactory {
     pub fn new(device: impl Into<String>) -> Self {
-        Self { device: device.into(), print_diagnostics: false }
+        Self { device: device.into(), on_report: None }
     }
 
-    /// Have every sink print the bit-perfect verdict when it starts playing.
-    pub fn print_diagnostics(mut self) -> Self {
-        self.print_diagnostics = true;
+    /// Have every sink hand its bit-perfect verdict to `handler` when it starts playing.
+    pub fn on_report(mut self, handler: ReportHandler) -> Self {
+        self.on_report = Some(handler);
         self
     }
 }
@@ -387,7 +444,10 @@ impl AlsaSinkFactory {
 impl SinkFactory for AlsaSinkFactory {
     fn open(&self, spec: SourceSpec) -> Result<Box<dyn AudioSink>> {
         let sink = AlsaSink::open(&self.device, spec)?;
-        Ok(Box::new(if self.print_diagnostics { sink.with_diagnostics() } else { sink }))
+        Ok(Box::new(match &self.on_report {
+            Some(handler) => sink.with_report_handler(handler.clone()),
+            None => sink,
+        }))
     }
 }
 
@@ -721,4 +781,75 @@ mod tests {
         assert!(sink.write(&silence).unwrap() > 0, "the sink must accept audio after a drain");
         sink.drain().unwrap();
     }
+
+    const HW_PARAMS_96K: &str = "access: RW_INTERLEAVED\nformat: S24_3LE\nsubformat: STD\nchannels: 2\nrate: 96000 (96000/1)\nperiod_size: 9600\nbuffer_size: 48000\n";
+    const PROC_PATH: &str = "/proc/asound/card1/pcm0p/sub0/hw_params";
+
+    fn report(device: &str, proc: ProcReading) -> SinkReport {
+        let source = SourceSpec { sample_rate: 96_000, channels: 2, bits_per_sample: 24 };
+        SinkReport::new(device.to_string(), source, "S24_3LE".to_string(), proc)
+    }
+
+    fn read(contents: &str) -> ProcReading {
+        ProcReading::Read { path: PROC_PATH.to_string(), contents: contents.to_string() }
+    }
+
+    #[test]
+    fn a_matching_device_is_bit_perfect_and_the_text_is_pinned() {
+        let report = report("hw:1,0", read(HW_PARAMS_96K));
+        assert!(report.bit_perfect());
+        assert_eq!(report.problem(), None);
+        assert_eq!(
+            report.to_text(),
+            format!("--- {PROC_PATH} ---\n{HW_PARAMS_96K}FLAC 24-bit/96000 Hz 2ch → hw:1,0 S24_3LE 96000 Hz  \u{2714} BIT-PERFECT")
+        );
+    }
+
+    #[test]
+    fn a_different_rate_is_converted() {
+        let contents = HW_PARAMS_96K.replace("96000 (96000/1)", "48000 (48000/1)");
+        let report = report("hw:1,0", read(&contents));
+        assert!(!report.bit_perfect());
+        assert_eq!(report.problem().as_deref(), Some("the card reports 48000 Hz instead of 96000 Hz"));
+        assert!(report.to_text().ends_with(
+            "FLAC 24-bit/96000 Hz 2ch → hw:1,0 S24_3LE  \u{2716} CONVERTED (the card reports 48000 Hz instead of 96000 Hz)"
+        ));
+    }
+
+    #[test]
+    fn a_different_format_is_converted() {
+        let contents = HW_PARAMS_96K.replace("S24_3LE", "S32_LE");
+        let report = report("hw:1,0", read(&contents));
+        assert!(!report.bit_perfect());
+        assert_eq!(report.problem().as_deref(), Some("the card reports format S32_LE instead of S24_3LE"));
+    }
+
+    #[test]
+    fn a_device_that_is_not_hw_cannot_be_confirmed() {
+        let report = report("default", ProcReading::NotHw);
+        assert!(!report.bit_perfect());
+        assert_eq!(
+            report.to_text(),
+            "Device 'default' is not in hw:N,D form; skipping the /proc/asound check.\n\
+             FLAC 24-bit/96000 Hz 2ch → default S24_3LE  \u{2716} CONVERTED (the device is not hw:N,D (possible resampling/mixing via dmix/PipeWire))"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_proc_file_is_reported_and_not_assumed_fine() {
+        let report = report("hw:1,0", ProcReading::Unreadable { path: PROC_PATH.to_string(), error: "No such file".to_string() });
+        assert!(!report.bit_perfect());
+        assert_eq!(
+            report.to_text(),
+            format!("Warning: could not read {PROC_PATH}: No such file\nFLAC 24-bit/96000 Hz 2ch → hw:1,0 S24_3LE  ✖ CONVERTED (could not read /proc/asound to confirm it)")
+        );
+    }
+
+    #[test]
+    fn a_proc_file_missing_the_rate_line_cannot_confirm_either() {
+        let report = report("hw:1,0", read("format: S24_3LE\n"));
+        assert!(!report.bit_perfect());
+        assert_eq!(report.problem().as_deref(), Some("could not read /proc/asound to confirm it"));
+    }
 }
+

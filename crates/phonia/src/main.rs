@@ -3,7 +3,7 @@ mod player;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use phonia_core::engine::TrackRef;
-use phonia_core::openers::{FileOpener, TidalOpener};
+use phonia_core::openers::{DispatchOpener, Source, TidalOpener};
 use phonia_core::output::alsa;
 use phonia_core::queue::{Queue, QueueTrack, Repeat};
 use phonia_core::{auth, tidal};
@@ -130,15 +130,7 @@ async fn main() -> ExitCode {
             run_play(&track_ids, &device, quality.into(), save_mp4.as_deref(), interactive, shuffle, repeat.into()).await
         }
         Command::PlayFile { paths, device, interactive, shuffle, repeat } => {
-            let queue = Queue::new(Arc::new(FileOpener));
-            queue.add(paths.iter().map(|path| QueueTrack {
-                source: TrackRef(path.to_string_lossy().into_owned()),
-                title: path.file_name().map(|name| name.to_string_lossy().into_owned()),
-                duration: None,
-            }));
-            queue.set_shuffle(shuffle);
-            queue.set_repeat(repeat.into());
-            player::run(queue, &device, interactive).await
+            run_play_file(&paths, &device, interactive, shuffle, repeat.into()).await
         }
         Command::ProbeDevice { device } => alsa::probe_device(&device),
     };
@@ -150,6 +142,28 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+async fn run_play_file(
+    paths: &[PathBuf],
+    device: &str,
+    interactive: bool,
+    shuffle: bool,
+    repeat: Repeat,
+) -> Result<()> {
+    let queue = Queue::new(Arc::new(DispatchOpener::new(None)));
+    for path in paths {
+        // Sources are absolute, so a file means the same thing wherever it is opened.
+        let path = std::fs::canonicalize(path).with_context(|| format!("opening {path:?}"))?;
+        queue.add([QueueTrack {
+            source: TrackRef(Source::file(&path)?.to_wire()),
+            title: path.file_name().map(|name| name.to_string_lossy().into_owned()),
+            duration: None,
+        }]);
+    }
+    queue.set_shuffle(shuffle);
+    queue.set_repeat(repeat);
+    player::run(queue, device, interactive).await
 }
 
 async fn run_play(
@@ -164,19 +178,21 @@ async fn run_play(
     let client = auth::load_client().await?;
     let http = tidal::build_http_client()?;
 
-    let mut opener = TidalOpener::new(http, Arc::new(client), quality).print_info();
+    let mut opener = TidalOpener::new(http, client, quality).print_info();
     if let Some(path) = save_mp4 {
         let file = std::fs::File::create(path).with_context(|| format!("creating {path:?}"))?;
         println!("Saving audio to {path:?} as it streams (the first track opened)...");
         opener = opener.saving_to(file);
     }
 
-    let queue = Queue::new(Arc::new(opener));
-    queue.add(track_ids.iter().map(|id| QueueTrack {
-        source: TrackRef(id.clone()),
-        title: Some(id.clone()),
-        duration: None,
-    }));
+    let queue = Queue::new(Arc::new(DispatchOpener::new(Some(opener))));
+    for id in track_ids {
+        queue.add([QueueTrack {
+            source: TrackRef(Source::parse(&format!("tidal:{id}"))?.to_wire()),
+            title: Some(id.clone()),
+            duration: None,
+        }]);
+    }
     queue.set_shuffle(shuffle);
     queue.set_repeat(repeat);
     player::run(queue, device, interactive).await

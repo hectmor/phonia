@@ -2,6 +2,7 @@
 //! optionally, reads commands from the keyboard.
 
 use anyhow::{Result, anyhow};
+use phonia_core::control::Controller;
 use phonia_core::engine::{Command, Engine, EndReason, Event, SeekTarget, State, TrackSupplier};
 use phonia_core::output::alsa::AlsaSinkFactory;
 use phonia_core::queue::{ItemId, Queue, QueueSnapshot, Repeat};
@@ -191,17 +192,21 @@ impl Console {
 /// Plays the queue from its start until it is exhausted or the user quits. Ctrl+C stops
 /// playback and releases the device; a second one exits at once.
 pub async fn run(queue: Arc<Queue>, device: &str, interactive: bool) -> Result<()> {
-    let sinks = Arc::new(AlsaSinkFactory::new(device).print_diagnostics());
+    let sinks = Arc::new(AlsaSinkFactory::new(device).on_report(Arc::new(|report| {
+        println!();
+        println!("{}", report.to_text());
+    })));
     let supplier: Arc<dyn TrackSupplier> = queue.clone();
     let engine = Engine::spawn(tokio::runtime::Handle::current(), sinks, supplier)?;
-    let mut events = engine.subscribe();
+    let controller = Controller::new(engine, queue.clone());
+    let mut events = controller.subscribe_events();
     let mut sigint = signal(SignalKind::interrupt())?;
     let mut keys = interactive.then(read_keys);
 
     if interactive {
         println!("{HELP}");
     }
-    engine.send(Command::Play(None))?;
+    controller.send(Command::Play(None))?;
 
     let mut console = Console::default();
     let mut error = None;
@@ -222,7 +227,7 @@ pub async fn run(queue: Arc<Queue>, device: &str, interactive: bool) -> Result<(
                 Some(line) => match parse_key(&line) {
                     Key::Quit => {
                         stopping = true;
-                        let _ = engine.send(Command::Stop);
+                        let _ = controller.send(Command::Stop);
                     }
                     Key::Help => console.line(HELP),
                     Key::Unknown(text) => console.line(format!("Unknown command '{text}' (? for help)")),
@@ -237,16 +242,16 @@ pub async fn run(queue: Arc<Queue>, device: &str, interactive: bool) -> Result<(
                         queue.set_repeat(repeat);
                         console.line(format!("Repeat {}", repeat_name(repeat)));
                     }
-                    Key::Remove(number) => remove_entry(&queue, &engine, number, &mut console),
+                    Key::Remove(number) => remove_entry(&controller, number, &mut console),
                     Key::Jump(number) => match entry_at(&queue.snapshot(), number) {
                         Some(id) => {
-                            let _ = engine.send(Command::Play(Some(id.track_ref())));
+                            let _ = controller.play_item(id);
                         }
                         None => console.line(format!("There is no entry {number}")),
                     },
                     key => {
                         if let Some(command) = command_for(&key) {
-                            let _ = engine.send(command);
+                            let _ = controller.send(command);
                         }
                     }
                 },
@@ -257,29 +262,24 @@ pub async fn run(queue: Arc<Queue>, device: &str, interactive: bool) -> Result<(
                 }
                 console.line("Interrupt received, stopping playback...");
                 stopping = true;
-                let _ = engine.send(Command::Stop);
+                let _ = controller.send(Command::Stop);
             }
         }
     }
 
     console.finish();
-    engine.shutdown();
+    controller.shutdown();
     error.map_or(Ok(()), |message| Err(anyhow!(message)))
 }
 
-/// Takes entry `number` out of the queue. The queue leaves a playing track alone, so if that was
-/// the one playing, skip to the next.
-fn remove_entry(queue: &Queue, engine: &Engine, number: usize, console: &mut Console) {
-    let snapshot = queue.snapshot();
-    let Some(id) = entry_at(&snapshot, number) else {
-        console.line(format!("There is no entry {number}"));
-        return;
-    };
-    let was_playing = snapshot.current == Some(id);
-    queue.remove(&[id]);
-    console.line(format!("Removed entry {number}"));
-    if was_playing {
-        let _ = engine.send(Command::Next);
+/// Takes entry `number` out of the queue (the controller skips ahead if it was the one playing).
+fn remove_entry(controller: &Controller, number: usize, console: &mut Console) {
+    match entry_at(&controller.snapshot(), number) {
+        Some(id) => {
+            controller.remove(&[id]);
+            console.line(format!("Removed entry {number}"));
+        }
+        None => console.line(format!("There is no entry {number}")),
     }
 }
 
