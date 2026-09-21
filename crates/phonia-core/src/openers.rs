@@ -1,10 +1,11 @@
-//! Where the playback engine's tracks come from: local files and TIDAL.
+//! How to get the audio of one track: from a local file or from TIDAL.
 //!
-//! Each supplier decides how its tracks can be sought (see [`SeekMode`]), because that depends
-//! on where the audio comes from and the engine can't know it.
+//! Each opener decides how its tracks can be sought (see [`SeekMode`]), because that depends on
+//! where the audio comes from and the engine can't know it. Which track plays next is not their
+//! business: that is the queue's.
 
 use crate::dash::{DashSegments, SegmentTiming};
-use crate::engine::{Advance, LoadedTrack, SeekMode, TrackMedia, TrackMeta, TrackRef, TrackSupplier};
+use crate::engine::{LoadedTrack, SeekMode, TrackMedia, TrackMeta, TrackOpener, TrackRef};
 use crate::tidal::{self, ManifestKind};
 use crate::stream;
 use anyhow::{Context, Result};
@@ -15,40 +16,14 @@ use std::time::Duration;
 use tidlers::TidalClient;
 use tidlers::client::models::playback::AudioQuality;
 
-/// Local audio files, played in the order given. A file can be repositioned freely, so seeking
-/// is done in place.
-pub struct FileSupplier {
-    paths: Vec<PathBuf>,
-    cursor: Mutex<Option<usize>>,
-}
+/// Opens local audio files, which a track's reference names by path. A file can be repositioned
+/// freely, so seeking is done in place.
+pub struct FileOpener;
 
-impl FileSupplier {
-    pub fn new(paths: Vec<PathBuf>) -> Arc<Self> {
-        Arc::new(Self { paths, cursor: Mutex::new(None) })
-    }
-
-    fn track_ref(path: &std::path::Path) -> TrackRef {
-        TrackRef(path.to_string_lossy().into_owned())
-    }
-}
-
-impl TrackSupplier for FileSupplier {
-    fn advance(&self, how: Advance) -> Option<TrackRef> {
-        let cursor = *self.cursor.lock().unwrap();
-        let target = match how {
-            Advance::Auto | Advance::Next => Some(cursor.map_or(0, |index| index + 1)),
-            Advance::Previous => cursor.and_then(|index| index.checked_sub(1)),
-            Advance::Restart => cursor,
-        };
-        target.and_then(|index| self.paths.get(index)).map(|path| Self::track_ref(path))
-    }
-
+impl TrackOpener for FileOpener {
     fn open(&self, track: TrackRef, _at: Duration) -> BoxFuture<'static, Result<LoadedTrack>> {
-        let path = PathBuf::from(&track.0);
-        if let Some(index) = self.paths.iter().position(|candidate| *candidate == path) {
-            *self.cursor.lock().unwrap() = Some(index);
-        }
         Box::pin(async move {
+            let path = PathBuf::from(&track.0);
             let file = std::fs::File::open(&path).with_context(|| format!("opening {path:?}"))?;
             let meta = TrackMeta {
                 track,
@@ -62,8 +37,8 @@ impl TrackSupplier for FileSupplier {
     }
 }
 
-/// A single TIDAL track, streamed. `advance` never offers another one: a queue supplies those.
-pub struct TidalSupplier {
+/// Opens TIDAL tracks, which a track's reference names by TIDAL track id, and streams them.
+pub struct TidalOpener {
     http: reqwest::Client,
     client: Arc<TidalClient>,
     quality: AudioQuality,
@@ -72,7 +47,7 @@ pub struct TidalSupplier {
     save_to: Mutex<Option<std::fs::File>>,
 }
 
-impl TidalSupplier {
+impl TidalOpener {
     pub fn new(http: reqwest::Client, client: Arc<TidalClient>, quality: AudioQuality) -> Self {
         Self { http, client, quality, print_info: false, save_to: Mutex::new(None) }
     }
@@ -91,11 +66,7 @@ impl TidalSupplier {
     }
 }
 
-impl TrackSupplier for TidalSupplier {
-    fn advance(&self, _how: Advance) -> Option<TrackRef> {
-        None
-    }
-
+impl TrackOpener for TidalOpener {
     fn open(&self, track: TrackRef, at: Duration) -> BoxFuture<'static, Result<LoadedTrack>> {
         let http = self.http.clone();
         let client = self.client.clone();
@@ -159,10 +130,7 @@ fn dash_opening(dash: &DashSegments, at: Duration) -> DashOpening {
 mod tests {
     use super::*;
     use crate::dash::parse_mpd;
-    use crate::engine::{Command, Engine, Event, SeekTarget, State};
-    use crate::output::fake::FakeSinkFactory;
-    use crate::testutil::{expected, wav};
-    use std::time::Instant;
+    use crate::testutil::wav;
 
     const TIDAL_LIKE: &str = r#"
         <MPD mediaPresentationDuration="PT5M48.68S">
@@ -206,7 +174,7 @@ mod tests {
     }
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("phonia-suppliers-test-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("phonia-openers-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -218,84 +186,24 @@ mod tests {
         path
     }
 
-    #[test]
-    fn file_supplier_walks_its_list_in_both_directions() {
-        let supplier = FileSupplier::new(vec!["a.wav".into(), "b.wav".into(), "c.wav".into()]);
-        let name = |track: Option<TrackRef>| track.map(|t| t.0);
-        assert_eq!(name(supplier.advance(Advance::Auto)), Some("a.wav".into()));
-
-        // The cursor moves when a track is opened, not when it is asked for. (These files don't
-        // exist, so opening fails; the cursor has moved all the same.)
-        let open = |name: &str| block_on(supplier.open(TrackRef(name.into()), Duration::ZERO)).err();
-        assert!(open("b.wav").is_some());
-        assert_eq!(name(supplier.advance(Advance::Next)), Some("c.wav".into()));
-        assert_eq!(name(supplier.advance(Advance::Previous)), Some("a.wav".into()));
-        assert_eq!(name(supplier.advance(Advance::Restart)), Some("b.wav".into()));
-
-        assert!(open("c.wav").is_some());
-        assert_eq!(supplier.advance(Advance::Auto), None, "nothing after the last file");
-        assert!(open("a.wav").is_some());
-        assert_eq!(supplier.advance(Advance::Previous), None, "nothing before the first");
-    }
-
-    #[test]
-    fn file_supplier_reports_a_missing_file_clearly() {
-        let supplier = FileSupplier::new(vec![]);
-        let error = block_on(supplier.open(TrackRef("/no/such/file.flac".into()), Duration::ZERO))
-            .err()
-            .unwrap();
-        assert!(error.to_string().contains("opening"), "{error}");
-    }
-
     /// Runs a future to completion on a throwaway runtime.
     fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
         tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(future)
     }
 
-    /// Two real files on disk played through the whole engine: opened from disk, decoded,
-    /// sought in place and handed on to the next one, all bit for bit.
     #[test]
-    fn files_play_and_seek_through_the_engine() {
-        let (first, second) = (40_000, 20_000);
-        let dir = temp_dir("engine");
-        let paths = vec![write_wav(&dir, "one.wav", first), write_wav(&dir, "two.wav", second)];
+    fn file_opener_reports_a_missing_file_clearly() {
+        let error = block_on(FileOpener.open(TrackRef("/no/such/file.flac".into()), Duration::ZERO)).err().unwrap();
+        assert!(error.to_string().contains("opening"), "{error}");
+    }
 
-        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
-        let sinks = FakeSinkFactory::blocking();
-        let engine = Engine::spawn(rt.handle().clone(), sinks.clone(), FileSupplier::new(paths)).unwrap();
-        let mut events = engine.subscribe();
-
-        engine.send(Command::Play(None)).unwrap();
-        let sink = loop {
-            if let Some(handle) = sinks.handles().first() {
-                break handle.clone();
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        };
-        // Seek 0.5 s into the first file (22_050 frames) while the engine is blocked on the DAC.
-        engine.send(Command::Seek(SeekTarget::Absolute(Duration::from_millis(500)))).unwrap();
-        sink.advance(1024);
-        sink.set_blocking(false);
-
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut titles = Vec::new();
-        loop {
-            match events.try_recv() {
-                Ok(Event::TrackStarted { meta, .. }) => titles.push(meta.title.unwrap()),
-                Ok(Event::StateChanged(State::Stopped)) => break,
-                Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
-                Err(_) => {
-                    assert!(Instant::now() < deadline, "timed out; titles so far: {titles:?}");
-                    std::thread::sleep(Duration::from_millis(2));
-                }
-            }
-        }
-        assert_eq!(titles, ["one.wav", "two.wav"]);
-
-        let played = sink.played();
-        let mut tail = expected(22_050 * 2, first * 2);
-        tail.extend(expected(0, second * 2));
-        assert!(played.len() >= tail.len() && played[played.len() - tail.len()..] == tail[..],
-            "after the seek: the rest of the first file from 0.5 s, then all of the second");
+    #[test]
+    fn file_opener_opens_a_file_that_can_be_repositioned_and_names_it() {
+        let dir = temp_dir("open");
+        let path = write_wav(&dir, "one.wav", 100);
+        let loaded = block_on(FileOpener.open(TrackRef(path.to_string_lossy().into_owned()), Duration::ZERO)).unwrap();
+        assert_eq!(loaded.seek, SeekMode::InPlace);
+        assert_eq!(loaded.meta.title.as_deref(), Some("one.wav"));
+        assert_eq!(loaded.start, Duration::ZERO);
     }
 }

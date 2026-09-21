@@ -79,6 +79,14 @@ impl LoadedTrack {
     }
 }
 
+/// Gets the audio of one track: a file, a TIDAL stream. It knows nothing about ordering; a queue
+/// decides what plays next and asks an opener to open it.
+pub trait TrackOpener: Send + Sync + 'static {
+    /// Resolves and opens `track`, from `at` if the opener can (see [`LoadedTrack::start`] for
+    /// what it reports back). `at` is zero for an ordinary start.
+    fn open(&self, track: TrackRef, at: Duration) -> BoxFuture<'static, Result<LoadedTrack>>;
+}
+
 /// Runs on the async runtime, never on the audio thread, so it may take as long as a TIDAL
 /// request needs without ever interrupting playback that is already going.
 pub trait TrackSupplier: Send + Sync + 'static {

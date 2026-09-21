@@ -356,7 +356,13 @@ impl AudioSink for AlsaSink {
     fn drain(&mut self) -> Result<()> {
         // A paused device would never finish draining.
         self.resume()?;
-        self.pcm.drain().context("could not drain() the ALSA device")
+        self.pcm.drain().context("could not drain() the ALSA device")?;
+        // Draining leaves the device in the setup state, where it refuses writes (EBADFD) until
+        // it is prepared. The engine reuses the sink for the next track of the same format, so
+        // hand it back ready for more audio.
+        self.pcm.prepare().context("could not prepare() the ALSA device after draining")?;
+        self.tail.clear();
+        Ok(())
     }
 }
 
@@ -709,6 +715,10 @@ mod tests {
         assert_eq!(sink.delay_frames().unwrap(), 0);
         assert!(sink.write(&silence).unwrap() > 0, "the sink must accept audio after a flush");
 
+        sink.drain().unwrap();
+        // A track that ends by itself drains the sink, and the next track of the same format
+        // reuses it: writing after a drain has to work (it failed with EBADFD before).
+        assert!(sink.write(&silence).unwrap() > 0, "the sink must accept audio after a drain");
         sink.drain().unwrap();
     }
 }

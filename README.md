@@ -16,19 +16,26 @@ chain works with real hardware (a Fosi Audio DS2 at `hw:1,0` during development)
   address bar and paste it into the terminal. Saves the session to
   `~/.config/phonia/session.json` (`0600` permissions).
 
-- **`phonia play <TRACK_ID> [--device hw:1,0] [--quality hires|lossless] [--save-mp4 <path>] [--interactive]`**
-  -- Streams and plays a track by its ID. Queries `playbackinfo`, streams the DASH manifest
-  (HiRes) or the direct file (Lossless/High/Low), decodes it and outputs it via ALSA.
-  `--save-mp4` additionally saves the streamed bytes to disk (useful for inspecting the fMP4).
+- **`phonia play <TRACK_ID>... [--device hw:1,0] [--quality hires|lossless] [--save-mp4 <path>] [--interactive] [--shuffle] [--repeat off|one|all]`**
+  -- Streams and plays tracks by their IDs, one after another. Queries `playbackinfo`, streams
+  the DASH manifest (HiRes) or the direct file (Lossless/High/Low), decodes it and outputs it via
+  ALSA. `--save-mp4` additionally saves the streamed bytes of the first track to disk (useful for
+  inspecting the fMP4).
 
-- **`phonia play-file <path>... [--device hw:1,0] [--interactive]`** -- Decodes and plays local
-  files (FLAC or fMP4), one after another, through the same playback engine and ALSA output,
-  without touching TIDAL. Useful for testing the DAC in isolation.
+- **`phonia play-file <path>... [--device hw:1,0] [--interactive] [--shuffle] [--repeat off|one|all]`**
+  -- Decodes and plays local files (FLAC or fMP4), one after another, through the same playback
+  engine and ALSA output, without touching TIDAL. Useful for testing the DAC in isolation.
+
+- **`--shuffle` / `--repeat`** (on `play` and `play-file`): the tracks form a queue. `--shuffle`
+  plays them in a random order, each once per cycle; `--repeat one` repeats the track that ends
+  (skipping with `n` still moves on) and `--repeat all` starts over after the last one.
 
 - **`--interactive`** (on `play` and `play-file`) reads playback commands from the keyboard; type
   one and press Enter: `p` (or just Enter) pauses/resumes, `f` / `r` seek 10 s forward / back,
   `s <seconds>` seeks to a position, `n` / `b` go to the next / previous track (`b` restarts the
-  current track after 3 s), `q` quits, `?` lists them. Seeking works on every source: local
+  current track after 3 s), `l` lists the queue, `z` toggles shuffle, `x` cycles repeat
+  (off, all, one), `d <n>` removes entry `n` (skipping ahead if it is the one playing), `j <n>`
+  jumps to entry `n`, `q` quits, `?` lists them. Seeking works on every source: local
   files are repositioned in place, and a TIDAL HiRes stream is reopened at the right segment and
   trimmed to the exact frame. Ctrl+C stops playback and releases the DAC.
 
@@ -82,8 +89,9 @@ muting/disabling its profile for that card while using `phonia`).
 ## Phase 0 status
 
 - `cargo build` and `cargo test` pass cleanly; `cargo clippy` has no warnings.
-- Since then: DASH segments are streamed on demand, and playback runs through an engine with
-  pause, seek, next/previous and a heard-position report (issue #10).
+- Since then: DASH segments are streamed on demand, playback runs through an engine with pause,
+  seek, next/previous and a heard-position report (issue #10), and tracks are played from an
+  in-memory queue with shuffle and repeat (issue #11).
 - What's still out of scope (coming in later phases): TUI, daemon, gapless playback, `%0Nd` in
   DASH segment templates, manifest encryption support.
 
@@ -139,6 +147,13 @@ more importantly, *why* it was chosen.
   `<BaseURL>` text have to be explicitly unescaped/reassembled, or pre-signed CDN URLs (which
   routinely contain `&`-separated query parameters escaped as `&amp;`) come out corrupted and get
   rejected by the CDN with a 404/403.
+
+- **[`rand`](https://docs.rs/rand)** -- the shuffle of the playback queue. A shuffle has to be
+  unbiased (every order equally likely) and each entry has to play once per cycle, which is a
+  Fisher-Yates shuffle over a permutation, not "pick a random track each time". Using the
+  well-tested implementation instead of a hand-rolled generator avoids subtle bias, and its
+  seedable `StdRng` lets the queue's tests assert an exact play order from a fixed seed while
+  playback itself is seeded from the operating system.
 
 - **[`symphonia`](https://docs.rs/symphonia)** -- the pure-Rust audio decoder (FLAC standalone
   and FLAC-in-fMP4/DASH, both of which TIDAL uses depending on quality tier). Chosen because it's
