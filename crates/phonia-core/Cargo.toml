@@ -20,3 +20,4 @@ serde_json.workspace = true
 symphonia.workspace = true
 tidlers.workspace = true
 tokio.workspace = true
+toml.workspace = true

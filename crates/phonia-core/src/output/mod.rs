@@ -6,6 +6,7 @@ use crate::decode::SourceSpec;
 use anyhow::Result;
 
 pub mod alsa;
+pub mod device;
 pub mod fake;
 
 /// A destination for decoded audio. Samples are interleaved, left-justified `i32` (see

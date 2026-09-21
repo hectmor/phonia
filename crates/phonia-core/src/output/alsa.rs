@@ -9,8 +9,10 @@ use alsa::pcm::{Access, Format, HwParams, PCM, State};
 use alsa::{Direction, ValueOr};
 use anyhow::{Context, Result, anyhow, bail};
 use std::ffi::CString;
+use std::path::Path;
 use std::sync::Arc;
 
+use super::device;
 use super::{AudioSink, SinkFactory};
 use crate::decode::SourceSpec;
 
@@ -443,7 +445,10 @@ impl AlsaSinkFactory {
 
 impl SinkFactory for AlsaSinkFactory {
     fn open(&self, spec: SourceSpec) -> Result<Box<dyn AudioSink>> {
-        let sink = AlsaSink::open(&self.device, spec)?;
+        // Resolved on every open, not once: a card that was unplugged and plugged back in has
+        // another number, and a daemon that has been running for days must find it.
+        let device = device::resolve(&self.device, Path::new(device::ASOUND))?.alsa_name();
+        let sink = AlsaSink::open(&device, spec)?;
         Ok(Box::new(match &self.on_report {
             Some(handler) => sink.with_report_handler(handler.clone()),
             None => sink,
@@ -491,7 +496,9 @@ impl TailBuffer {
 /// `test_rate`. This opens the device in playback mode (without ever writing to it) purely to
 /// query its capabilities -- meant to be run by the user on their own hardware.
 pub fn probe_device(device: &str) -> Result<()> {
-    let c_device = CString::new(device).context("invalid ALSA device name")?;
+    let resolved = device::resolve(device, Path::new(device::ASOUND))?;
+    let (name, device) = (resolved.alsa_name(), resolved.describe());
+    let c_device = CString::new(name).context("invalid ALSA device name")?;
     let pcm = PCM::open(&c_device, Direction::Playback, false)
         .with_context(|| format!("opening device {device}"))?;
     let hwp = HwParams::any(&pcm).context("could not get the default hw_params")?;
@@ -737,11 +744,13 @@ mod tests {
 
     /// Needs a real DAC that nothing else (e.g. PipeWire) has open. Writes silence only, so
     /// nothing is audible. Run with:
-    /// `PHONIA_TEST_DEVICE=hw:1,0 cargo test -p phonia-core hardware -- --ignored --nocapture`
+    /// `PHONIA_TEST_DEVICE=hw:DS2,0 cargo test -p phonia-core hardware -- --ignored --nocapture`
+    /// (the device may be named by card id, or be `auto`)
     #[test]
     #[ignore = "needs a real, free ALSA device"]
     fn hardware_pause_resume_flush_accounting() {
-        let device = std::env::var("PHONIA_TEST_DEVICE").unwrap_or_else(|_| "hw:1,0".into());
+        let wanted = std::env::var("PHONIA_TEST_DEVICE").unwrap_or_else(|_| "auto".into());
+        let device = device::resolve(&wanted, Path::new(device::ASOUND)).expect("finding the device").alsa_name();
         let spec = SourceSpec { sample_rate: 48_000, channels: 2, bits_per_sample: 24 };
         let mut sink = AlsaSink::open(&device, spec).expect("opening the device");
         println!("{device}: hw pause supported = {}", sink.supports_hw_pause());

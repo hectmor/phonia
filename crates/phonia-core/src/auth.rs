@@ -21,9 +21,7 @@ use tidlers::auth::TidalAuth;
 const PENDING_LOGIN_MAX_AGE_SECS: u64 = 5 * 60;
 
 fn config_dir() -> Result<PathBuf> {
-    let dir = dirs::config_dir()
-        .ok_or_else(|| anyhow!("could not determine the user's config directory"))?
-        .join("phonia");
+    let dir = crate::config::dir().ok_or_else(|| anyhow!("could not determine the user's config directory"))?;
     fs::create_dir_all(&dir).with_context(|| format!("creating config directory {dir:?}"))?;
     Ok(dir)
 }

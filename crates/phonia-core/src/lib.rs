@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod tidal;
+pub mod config;
 pub mod control;
 pub mod dash;
 pub mod decode;

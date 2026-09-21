@@ -5,7 +5,7 @@ with TUI + daemon): PKCE login -> HiRes `playbackinfo` -> DASH segment download 
 decoding -> *bit-perfect* ALSA output to a USB DAC.
 
 There's no TUI or daemon yet: this is a single-pass CLI to prove that every link in the
-chain works with real hardware (a Fosi Audio DS2 at `hw:1,0` during development).
+chain works with real hardware (a Fosi Audio DS2 during development).
 
 ## Commands
 
@@ -16,13 +16,13 @@ chain works with real hardware (a Fosi Audio DS2 at `hw:1,0` during development)
   address bar and paste it into the terminal. Saves the session to
   `~/.config/phonia/session.json` (`0600` permissions).
 
-- **`phonia play <TRACK_ID>... [--device hw:1,0] [--quality hires|lossless] [--save-mp4 <path>] [--interactive] [--shuffle] [--repeat off|one|all]`**
+- **`phonia play <TRACK_ID>... [--device <device>] [--quality hires|lossless] [--save-mp4 <path>] [--interactive] [--shuffle] [--repeat off|one|all]`**
   -- Streams and plays tracks by their IDs, one after another. Queries `playbackinfo`, streams
   the DASH manifest (HiRes) or the direct file (Lossless/High/Low), decodes it and outputs it via
   ALSA. `--save-mp4` additionally saves the streamed bytes of the first track to disk (useful for
   inspecting the fMP4).
 
-- **`phonia play-file <path>... [--device hw:1,0] [--interactive] [--shuffle] [--repeat off|one|all]`**
+- **`phonia play-file <path>... [--device <device>] [--interactive] [--shuffle] [--repeat off|one|all]`**
   -- Decodes and plays local files (FLAC or fMP4), one after another, through the same playback
   engine and ALSA output, without touching TIDAL. Useful for testing the DAC in isolation.
 
@@ -39,7 +39,7 @@ chain works with real hardware (a Fosi Audio DS2 at `hw:1,0` during development)
   files are repositioned in place, and a TIDAL HiRes stream is reopened at the right segment and
   trimmed to the exact frame. Ctrl+C stops playback and releases the DAC.
 
-- **`phonia probe-device [--device hw:1,0]`** -- Opens the given ALSA device in playback mode
+- **`phonia probe-device [--device <device>]`** -- Opens the given ALSA device in playback mode
   (without writing anything) and lists which formats (`S16_LE`, `S24_3LE`, `S24_LE`, `S32_LE`)
   and which rates (44.1 kHz .. 384 kHz) it accepts natively.
 
@@ -47,10 +47,48 @@ All commands are run with `cargo run -p phonia -- <command>`, for example:
 
 ```sh
 cargo run -p phonia -- login
-cargo run -p phonia -- play 12345678 --device hw:1,0 --quality hires
-cargo run -p phonia -- play-file one.flac two.flac --device hw:1,0 --interactive
-cargo run -p phonia -- probe-device --device hw:1,0
+cargo run -p phonia -- play 12345678 --device hw:DS2,0 --quality hires
+cargo run -p phonia -- play-file one.flac two.flac --interactive     # the device comes from the config file
+cargo run -p phonia -- devices
+cargo run -p phonia -- probe-device
 ```
+
+## Configuration
+
+The settings live in `~/.config/phonia/config.toml` (`$XDG_CONFIG_HOME/phonia/`). Nothing is
+required to exist except the audio device:
+
+```toml
+[output]
+device = "hw:DS2,0"     # a sound card: `phonia devices` lists them. "auto" = the first USB card.
+mode = "exclusive"      # phonia owns the card, nothing mixes or resamples: bit-perfect (the only mode so far)
+
+[tidal]
+max_quality = "hires"   # hires | lossless
+
+[daemon]
+socket = "/run/user/1000/phonia/phoniad.sock"   # default: $XDG_RUNTIME_DIR/phonia/phoniad.sock
+verbose = false
+```
+
+- **Name the card, not its number.** ALSA numbers cards in the order the kernel finds them, so a USB
+  DAC that was `hw:2,0` yesterday is `hw:1,0` today. Its *id* doesn't change: write `hw:DS2,0`
+  (or `hw:CARD=DS2,DEV=0`) and phonia turns it into the current number every time it opens the
+  device, so a daemon that has been running for days still finds a DAC that was unplugged and
+  plugged back in. `phonia devices` lists the cards and the exact text to put in the file; a card
+  that isn't there is an error that says which ones are.
+- **Precedence** is command line, then the file, then the built-in default. There is no default
+  device: with none configured (and no `--device`) phonia refuses to start and says how to set
+  one, rather than guess a card and play on the wrong one.
+- **Mistakes are errors.** A key it doesn't know (`devise = ...`), a value of the wrong type or a
+  word that isn't an option stops it with the file, the line and what was expected, instead of
+  being ignored and playing on the wrong card. A missing file just means the defaults; a file you
+  named with `--config` (or `PHONIA_CONFIG`) that doesn't exist is an error.
+- `phonia config path` prints which file is used, and `phonia config show` prints every setting
+  with where its value comes from (the file or the default). `--config <file>` (or the
+  `PHONIA_CONFIG` environment variable) selects another file, also for `phoniad`.
+- The daemon reads the file once, at startup: restart it to apply a change. The file holds no
+  secrets (the TIDAL session is kept apart, in `session.json`).
 
 ## The daemon: `phoniad` and `phonia ctl`
 
@@ -59,7 +97,7 @@ queue, TIDAL) running in the background, driven over a Unix socket, which is wha
 key handler will talk to.
 
 ```sh
-phoniad --device hw:1,0                      # runs in the foreground; Ctrl+C or SIGTERM stops it cleanly
+phoniad                                      # runs in the foreground; Ctrl+C or SIGTERM stops it cleanly
 
 phonia ctl queue add song.flac 233059491     # a file, or a TIDAL track id (or tidal:<id> / file:/abs/path)
 phonia ctl queue list
@@ -79,8 +117,8 @@ phonia ctl shutdown
   unreachable) is added without them.
 - `stop` releases the audio device but keeps the queue, so other applications (PipeWire) can use
   the DAC while the daemon is idle.
-- The socket is `$XDG_RUNTIME_DIR/phonia/phoniad.sock` (override with `--socket` on both
-  programs), in a directory only you can enter, mode `0600`, and only connections from your own
+- The socket is `$XDG_RUNTIME_DIR/phonia/phoniad.sock` (override with `[daemon] socket` in the config
+  file, or `--socket`; `phoniad` and `phonia ctl` read the same file), in a directory only you can enter, mode `0600`, and only connections from your own
   user are served. A second `phoniad` refuses to start while one answers; a socket left by a
   daemon that was killed is replaced.
 - `phoniad --verbose` prints the library's own notes and warnings; by default it prints nothing to
@@ -135,7 +173,7 @@ If you see `closed`, nothing has the device open at that moment.
 
 ## Important: PipeWire must not have the DAC open
 
-`phonia` opens the ALSA device (`hw:1,0` by default) directly, without going through
+`phonia` opens the ALSA device you configured directly, without going through
 `plughw`/`default`/`dmix`, because any of those layers can resample or mix the audio and
 break the bit-perfect guarantee. If PipeWire (or another application) already has the DAC
 open, `phonia` will fail to open the device with an EBUSY error explaining that it needs to
@@ -166,6 +204,11 @@ more importantly, *why* it was chosen.
 - **[`clap`](https://docs.rs/clap)** -- parses the CLI's subcommands and flags (`login`, `play`,
   `play-file`, `probe-device`). Declarative, well-tested, and there was no reason to hand-roll
   argument parsing for a project this size.
+
+- **[`toml`](https://docs.rs/toml)** -- reads `config.toml` into `serde` structs. Chosen over
+  `basic-toml` because its errors carry the line, the column and the offending key, which is what
+  makes "you wrote `devise`" a useful message; and over `toml_edit`, which is for programs that
+  rewrite the file (this one only reads it).
 
 - **`phonia-ipc`** (a crate of this workspace) -- the wire protocol and a client for the daemon. It
   depends only on `serde` and `tokio`, not on `phonia-core`, so a terminal UI, an MPRIS bridge or
