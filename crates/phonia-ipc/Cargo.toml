@@ -1,0 +1,11 @@
+[package]
+name = "phonia-ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Wire protocol and client for talking to the phonia daemon"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

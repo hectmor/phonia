@@ -1,3 +1,4 @@
+mod ctl;
 mod player;
 
 use anyhow::{Context, Result};
@@ -74,6 +75,8 @@ enum Command {
         #[arg(long, value_enum, default_value_t = RepeatMode::Off)]
         repeat: RepeatMode,
     },
+    /// Controls a running `phoniad` (the daemon): playback, queue and events.
+    Ctl(ctl::CtlArgs),
     /// Lists which formats and rates the given ALSA device accepts, without playing anything.
     ProbeDevice {
         #[arg(long, default_value = "hw:1,0")]
@@ -132,6 +135,7 @@ async fn main() -> ExitCode {
         Command::PlayFile { paths, device, interactive, shuffle, repeat } => {
             run_play_file(&paths, &device, interactive, shuffle, repeat.into()).await
         }
+        Command::Ctl(args) => ctl::run(args).await,
         Command::ProbeDevice { device } => alsa::probe_device(&device),
     };
 

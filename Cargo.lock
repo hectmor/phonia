@@ -1044,6 +1044,8 @@ dependencies = [
  "anyhow",
  "clap",
  "phonia-core",
+ "phonia-ipc",
+ "serde_json",
  "symphonia",
  "tidlers",
  "tokio",
@@ -1071,11 +1073,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "phonia-ipc"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "phoniad"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
+ "futures-util",
  "phonia-core",
+ "phonia-ipc",
+ "serde_json",
+ "tidlers",
  "tokio",
 ]
 

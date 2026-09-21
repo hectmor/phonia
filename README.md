@@ -52,6 +52,62 @@ cargo run -p phonia -- play-file one.flac two.flac --device hw:1,0 --interactive
 cargo run -p phonia -- probe-device --device hw:1,0
 ```
 
+## The daemon: `phoniad` and `phonia ctl`
+
+`phonia play` plays in the terminal that started it. `phoniad` is the same playback stack (engine,
+queue, TIDAL) running in the background, driven over a Unix socket, which is what a TUI or a media
+key handler will talk to.
+
+```sh
+phoniad --device hw:1,0                      # runs in the foreground; Ctrl+C or SIGTERM stops it cleanly
+
+phonia ctl queue add song.flac 233059491     # a file, or a TIDAL track id (or tidal:<id> / file:/abs/path)
+phonia ctl queue list
+phonia ctl play                              # or `play 3` for entry 3
+phonia ctl pause | resume | toggle | next | prev | stop
+phonia ctl seek 90                           # 1:30; `+10` / `-10` are relative
+phonia ctl shuffle on   /   phonia ctl repeat all
+phonia ctl queue rm 2 | clear | move 3 1
+phonia ctl watch                             # events as they happen: state, position, bit-perfect report...
+phonia ctl status --json                     # any command can print the raw protocol JSON
+phonia ctl shutdown
+```
+
+- The titles and lengths of the tracks are looked up **when they are added** (several at once), so
+  `queue list` is meaningful straight away. A track that is wrong (a missing file, a TIDAL id that
+  doesn't exist) is refused and named; one whose details couldn't be fetched right now (TIDAL
+  unreachable) is added without them.
+- `stop` releases the audio device but keeps the queue, so other applications (PipeWire) can use
+  the DAC while the daemon is idle.
+- The socket is `$XDG_RUNTIME_DIR/phonia/phoniad.sock` (override with `--socket` on both
+  programs), in a directory only you can enter, mode `0600`, and only connections from your own
+  user are served. A second `phoniad` refuses to start while one answers; a socket left by a
+  daemon that was killed is replaced.
+- `phoniad --verbose` prints the library's own notes and warnings; by default it prints nothing to
+  stdout.
+
+### The protocol
+
+One connection carries requests, their responses and, once subscribed, events, as newline-delimited
+JSON, so `socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/phonia/phoniad.sock` is a working client:
+
+```
+< {"type":"hello","protocol":{"major":1,"minor":0},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":[]}
+> {"id":1,"request":{"type":"hello","protocol":{"major":1,"minor":0},"client":{"name":"me","version":"0"}}}
+< {"type":"response","id":1,"ok":{"type":"ack"}}
+> {"id":2,"request":{"type":"subscribe"}}
+< {"type":"response","id":2,"ok":{"type":"snapshot","seq":41,"status":{...},"queue":{...}}}
+< {"type":"event","seq":42,"event":{"type":"position","position_ms":1234,"duration_ms":300000}}
+```
+
+The server speaks first; `hello` must be the first request. `subscribe` answers with the whole
+state and then pushes events, numbered consecutively and in the same order for every client; a
+client that falls too far behind is sent a `resync` with the current state instead of the events
+it missed. The major version must match; minor versions only add things, and unknown fields and
+variants are ignored. The exact format of every message is pinned by the golden tests in
+`crates/phonia-ipc/tests/golden.rs`, and the `phonia-ipc` crate is a ready-made client
+(`Client::connect`, `request`, `subscribe`).
+
 ## How to verify the output is bit-perfect
 
 When playing with `phonia play` or `phonia play-file` against a `hw:N,D` device, after the
@@ -110,6 +166,13 @@ more importantly, *why* it was chosen.
 - **[`clap`](https://docs.rs/clap)** -- parses the CLI's subcommands and flags (`login`, `play`,
   `play-file`, `probe-device`). Declarative, well-tested, and there was no reason to hand-roll
   argument parsing for a project this size.
+
+- **`phonia-ipc`** (a crate of this workspace) -- the wire protocol and a client for the daemon. It
+  depends only on `serde` and `tokio`, not on `phonia-core`, so a terminal UI, an MPRIS bridge or
+  an agent server can talk to the daemon without building ALSA or the decoders. The wire types are
+  its own (durations in milliseconds, no internal references leaking out) instead of `serde` derives
+  on the engine's types, so the format can outlive refactors. The framing is a few lines over
+  `tokio` rather than a codec crate.
 
 - **[`tokio`](https://docs.rs/tokio)** -- the async runtime. Needed because talking to TIDAL
   (`reqwest`, `tidlers`) is inherently async I/O. The decode+ALSA-write loop, by contrast, is
