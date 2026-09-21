@@ -157,7 +157,7 @@ pub async fn fetch_playback_info(
         .with_context(|| format!("parsing the playbackinfopostpaywall JSON response:\n{body}"))?;
 
     if matches!(quality, AudioQuality::HiRes) && raw.audio_quality != "HI_RES_LOSSLESS" {
-        eprintln!(
+        crate::warn!(
             "Warning: TIDAL downgraded the quality to {}: the track doesn't exist in HiRes, or \
              the token doesn't have that entitlement. If you used an old login, re-run `phonia login`.",
             raw.audio_quality
