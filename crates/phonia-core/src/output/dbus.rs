@@ -240,7 +240,7 @@ impl Reserve {
 }
 
 /// The name of the program behind a bus connection, for the messages.
-async fn process_name(connection: &Connection, peer: BusName<'static>) -> Option<String> {
+pub(crate) async fn process_name(connection: &Connection, peer: BusName<'static>) -> Option<String> {
     let bus = DBusProxy::new(connection).await.ok()?;
     let pid = bus.get_connection_unix_process_id(peer).await.ok()?;
     let name = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
@@ -254,33 +254,8 @@ async fn process_name(connection: &Connection, peer: BusName<'static>) -> Option
 mod tests {
     use super::*;
     use crate::output::reserve::PRIORITY;
-    use std::io::{BufRead, BufReader};
-    use std::process::{Child, Command, Stdio};
 
-    struct Bus {
-        child: Child,
-        address: String,
-    }
-
-    impl Bus {
-        fn start() -> Self {
-            let mut child = Command::new("dbus-daemon")
-                .args(["--session", "--nofork", "--print-address"])
-                .stdout(Stdio::piped())
-                .spawn()
-                .expect("dbus-daemon is needed for these tests");
-            let mut address = String::new();
-            BufReader::new(child.stdout.take().unwrap()).read_line(&mut address).unwrap();
-            Bus { child, address: address.trim().to_string() }
-        }
-    }
-
-    impl Drop for Bus {
-        fn drop(&mut self) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
-    }
+    use crate::testutil::Bus;
 
     /// What WirePlumber does: owns the card's name, allows it to be replaced, and answers
     /// `RequestRelease` by letting go (or not).

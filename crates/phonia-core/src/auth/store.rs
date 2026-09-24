@@ -107,6 +107,11 @@ pub trait SessionStore: Send + Sync {
 
     /// Forgets the session. Whether there was one.
     fn delete(&self) -> BoxFuture<'_, Result<bool, StoreError>>;
+
+    /// The program that keeps the session for us, when there is one (the keyring's daemon).
+    fn provider(&self) -> BoxFuture<'_, Option<String>> {
+        Box::pin(async { None })
+    }
 }
 
 /// The session in a file only its owner can read.

@@ -106,7 +106,7 @@ mod tests {
              \x20 output.reserve              true                                (default)\n\
              \x20 output.release_after_pause  10 s                                (default)\n\
              \x20 tidal.max_quality           hires                               (default)\n\
-             \x20 tidal.session_store         file                                (default)\n\
+             \x20 tidal.session_store         keyring                             (default)\n\
              \x20 daemon.socket               /run/user/1000/phonia/phoniad.sock  (default)\n\
              \x20 daemon.verbose              false                               (default)"
         );
