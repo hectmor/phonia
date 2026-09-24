@@ -67,3 +67,48 @@ impl<R: std::io::Read + Send + Sync> symphonia::core::io::MediaSource for NonSee
         None
     }
 }
+
+/// A private `dbus-daemon`, so tests can pretend to be WirePlumber or a keyring without ever
+/// touching the user's bus. Needs the `dbus-daemon` binary; the tests that use it are ignored by
+/// default.
+pub struct Bus {
+    child: std::process::Child,
+    config: std::path::PathBuf,
+    pub address: String,
+}
+
+impl Bus {
+    pub fn start() -> Self {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+        // A bus of its own, with no service activation: the session bus's config would start the
+        // user's real services (a keyring, say) on demand, and tests must never reach those.
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let config = std::env::temp_dir().join(format!("phonia-test-bus-{}-{n}.conf", std::process::id()));
+        std::fs::write(
+            &config,
+            "<busconfig><type>session</type><listen>unix:tmpdir=/tmp</listen>\
+             <policy context=\"default\"><allow send_destination=\"*\" eavesdrop=\"true\"/>\
+             <allow eavesdrop=\"true\"/><allow own=\"*\"/></policy></busconfig>",
+        )
+        .unwrap();
+        let mut child = Command::new("dbus-daemon")
+            .arg(format!("--config-file={}", config.display()))
+            .args(["--nofork", "--print-address"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("dbus-daemon is needed for these tests");
+        let mut address = String::new();
+        BufReader::new(child.stdout.take().unwrap()).read_line(&mut address).unwrap();
+        Bus { child, config, address: address.trim().to_string() }
+    }
+}
+
+impl Drop for Bus {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_file(&self.config);
+    }
+}

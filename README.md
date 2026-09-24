@@ -16,6 +16,9 @@ chain works with real hardware (a Fosi Audio DS2 during development).
   address bar and paste it into the terminal. Saves the session as described in
   "Where the TIDAL session is kept" below.
 
+- **`phonia logout`** / **`phonia whoami [--check]`** -- forget the TIDAL login / show where it is kept
+  and whether there is one (see "Where the TIDAL session is kept").
+
 - **`phonia play <TRACK_ID>... [--device <device>] [--quality hires|lossless] [--save-mp4 <path>] [--interactive] [--shuffle] [--repeat off|one|all]`**
   -- Streams and plays tracks by their IDs, one after another. Queries `playbackinfo`, streams
   the DASH manifest (HiRes) or the direct file (Lossless/High/Low), decodes it and outputs it via
@@ -67,7 +70,7 @@ release_after_pause = 10   # seconds a pause lasts before the card is handed bac
 
 [tidal]
 max_quality = "hires"   # hires | lossless
-session_store = "file"  # where the TIDAL login is kept (only "file" so far)
+session_store = "keyring"  # where the TIDAL login is kept: keyring | file (see below)
 
 [daemon]
 socket = "/run/user/1000/phonia/phoniad.sock"   # default: $XDG_RUNTIME_DIR/phonia/phoniad.sock
@@ -97,16 +100,44 @@ verbose = false
 
 What has to survive between runs is small: the **refresh token** (TIDAL never rotates it, so it is
 the only long-lived credential) and the client id and secret it was issued to. That is all phonia
-stores, in `~/.config/phonia/session.json` with `0600` permissions, replaced in one step so a crash
-never leaves half a file. The access token (it lasts four hours) and your profile (email, birthday,
-user id...) are not kept: the first use of TIDAL in each process fetches a new access token, which
-takes a fraction of a second. A `session.json` written by an earlier version, which held all of
-that, is read and rewritten in the new format the first time.
+stores. The access token (it lasts four hours) and your profile (email, birthday, user id...) are
+not kept: the first use of TIDAL in each process fetches a new access token, which takes a fraction
+of a second.
+
+- **`session_store = "keyring"`** (the default) keeps it in the desktop keyring, through the
+  freedesktop Secret Service that GNOME Keyring, KWallet and KeePassXC all provide. phonia speaks
+  that D-Bus API itself with the `zbus` it already has for the sound card, so it costs no extra
+  crate. If the keyring is locked, `phonia login`, `whoami` and `logout` show its unlock prompt; a
+  daemon does not at startup (there is nobody to answer) but does the first time TIDAL is used.
+  Look at it with `secret-tool search application phonia` or in Seahorse / KDE Wallet Manager.
+- **`session_store = "file"`** keeps it in `~/.config/phonia/session.json`, mode `0600`, replaced in
+  one step so a crash never leaves half a file. This is what to use where there is no keyring: over
+  SSH, in a system service, on a machine with no desktop. phonia does not guess: with `keyring`
+  and no Secret Service it stops and tells you to choose `file`.
+- **Moving an old `session.json`.** If you logged in before the keyring existed, the first run copies
+  the session into the keyring, reads it back to be sure it is there, then overwrites the file with
+  zeros and removes it. If any step fails the file stays and is used, with a warning: the session is
+  never lost. (Overwriting is best effort: a journaling filesystem or an SSD may keep old blocks.
+  If that matters, `phonia logout` and log in again, and revoke the old one in your TIDAL account
+  settings.)
+- `phonia whoami` says where the login is kept, which program provides the keyring, and whether
+  there is a session; `--check` also asks TIDAL whose it is. It never prints a token.
+  `phonia logout` removes the stored session, any old `session.json` and an unfinished login. It
+  cannot revoke the token on TIDAL's side (the library has no such call).
+
+What the keyring does and does not protect: the Secret Service does not check which program asks,
+so any process running as you can read an unlocked keyring, and it could watch your session bus as
+well; that is why the secret goes across it unencrypted (`plain`), which costs nothing. What you
+gain over a file is that it is encrypted on disk behind your login password, it doesn't end up in
+backups or synced dotfiles, and it is locked while you are logged out. Note that on a machine with
+two keyring programs (KDE with both `gnome-keyring` and `ksecretd`, say) whichever owns
+`org.freedesktop.secrets` at that moment is the one phonia sees: if it changes, the session seems
+to vanish and you log in again.
 
 The login is read when TIDAL is first used, not when the program starts, so a `phoniad` that came
-up before the network (or before you ran `phonia login`) works as soon as they are there, without a
-restart. Refreshing the access token changes nothing on disk, so `phonia` and `phoniad` no longer
-write the file over each other.
+up before the network (or before `phonia login`) works as soon as they are there, without a
+restart. Refreshing the access token changes nothing in the store, so `phonia` and `phoniad` never
+write over each other.
 
 ## The daemon: `phoniad` and `phonia ctl`
 
@@ -262,7 +293,9 @@ more importantly, *why* it was chosen.
   peer and not a one-off call, so shelling out to `busctl` can't do it (a child process can't
   hold the name for us, and the card would go straight back to WirePlumber). Pure Rust, so no
   system library or `pkg-config`; only its `tokio` feature is on, so it runs on the runtime the
-  daemon already has. It brings about thirty small crates (`zvariant`, `enumflags2`, ...), the
+  daemon already has, and it also speaks the Secret Service that keeps the TIDAL login (no extra
+  crate for that: `keyring`, `secret-service` and `oo7` would each add a dozen or more, for
+  something a few hundred lines over `zbus` do). It brings about thirty small crates (`zvariant`, `enumflags2`, ...), the
   price of not writing the D-Bus wire protocol by hand. The alternative, `dbus`, has fewer crates
   but links the C `libdbus` and needs a thread of its own for every reservation.
 

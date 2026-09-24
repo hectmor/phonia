@@ -6,8 +6,12 @@
 //! backend, even for subscribers whose account has it. PKCE is the only flow that returns tokens
 //! usable for HiRes streaming, which is the whole point of this player.
 
+mod migrate;
+mod secret_service;
 mod store;
 
+pub use migrate::MigratingStore;
+pub use secret_service::{Interaction, SecretServiceStore};
 pub use store::{FileStore, MemoryStore, SessionStore, StoreError, StoredSession, client_from, stored_from};
 
 use crate::config::SessionStoreKind;
@@ -62,10 +66,29 @@ fn write_secret_file(path: &Path, contents: &str) -> Result<()> {
 }
 
 /// The store the settings ask for.
-pub fn open_store(kind: SessionStoreKind) -> Result<Arc<dyn SessionStore>> {
+///
+/// `interaction` says whether a locked keyring may ask the user to unlock it; a daemon starting up
+/// says no, and asks again later when TIDAL is actually used.
+pub fn open_store(kind: SessionStoreKind, interaction: Interaction) -> Result<Arc<dyn SessionStore>> {
     match kind {
         SessionStoreKind::File => Ok(Arc::new(FileStore::new(session_path()?))),
+        SessionStoreKind::Keyring => Ok(Arc::new(MigratingStore::new(
+            Arc::new(SecretServiceStore::new(interaction)),
+            FileStore::new(session_path()?),
+        ))),
     }
+}
+
+/// The old `session.json`, which is where a session lived before there was a keyring.
+pub fn legacy_session_file() -> Result<PathBuf> {
+    session_path()
+}
+
+/// Forgets the login: the stored session, the old file if there is one, and a login that was
+/// started but not finished. Whether there was a session.
+pub async fn logout(store: &dyn SessionStore) -> Result<bool> {
+    delete_pending_login(&pending_login_path()?);
+    store.delete().await.with_context(|| format!("removing the session from {}", store.describe()))
 }
 
 /// A PKCE login that has been started but not finished. The PKCE `code_verifier` only exists in

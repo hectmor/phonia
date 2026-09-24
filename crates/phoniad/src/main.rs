@@ -74,11 +74,14 @@ async fn run(args: Args) -> Result<()> {
 
     // The login is read when TIDAL is first used, not now: the daemon may start before the network
     // is up, or before `phonia login`, and should then work without a restart.
-    let store = auth::open_store(settings.session_store.value)?;
-    match auth::load_client(&*store).await {
+    // The startup check must not open a keyring prompt with nobody there; the store that TIDAL
+    // uses later may, since by then someone asked for a TIDAL track.
+    let quiet = auth::open_store(settings.session_store.value, auth::Interaction::Never)?;
+    match auth::load_client(&*quiet).await {
         Ok(_) => {}
         Err(error) => eprintln!("phoniad: no TIDAL session yet ({error:#}); local files play, TIDAL will once you log in"),
     }
+    let store = auth::open_store(settings.session_store.value, auth::Interaction::Allow)?;
     let tidal_opener =
         TidalOpener::from_store(tidal::build_http_client()?, store, settings.max_quality.value.into());
     let opener = Arc::new(DispatchOpener::new(Some(tidal_opener)));

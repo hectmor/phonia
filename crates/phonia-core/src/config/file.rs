@@ -142,14 +142,17 @@ pub struct Output {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionStoreKind {
-    /// A file only you can read (`session.json` in the config directory).
+    /// The desktop keyring (Secret Service: GNOME Keyring, KWallet, KeePassXC).
     #[default]
+    Keyring,
+    /// A file only you can read (`session.json` in the config directory).
     File,
 }
 
 impl fmt::Display for SessionStoreKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            SessionStoreKind::Keyring => "keyring",
             SessionStoreKind::File => "file",
         })
     }

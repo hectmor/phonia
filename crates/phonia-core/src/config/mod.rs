@@ -266,7 +266,7 @@ mod tests {
             Sourced { value: ReleaseAfterPause::After(std::time::Duration::from_secs(10)), origin: Origin::Default }
         );
         assert_eq!(settings.max_quality, Sourced { value: Quality::Hires, origin: Origin::Default });
-        assert_eq!(settings.session_store, Sourced { value: SessionStoreKind::File, origin: Origin::Default });
+        assert_eq!(settings.session_store, Sourced { value: SessionStoreKind::Keyring, origin: Origin::Default });
         assert_eq!(settings.socket, Sourced { value: None, origin: Origin::Default });
         assert_eq!(settings.verbose, Sourced { value: false, origin: Origin::Default });
     }

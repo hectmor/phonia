@@ -1,6 +1,7 @@
 mod config_cmd;
 mod ctl;
 mod player;
+mod session_cmd;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -44,6 +45,14 @@ enum Command {
         /// Finish a login started with `--no-wait`, using the URL the browser ended up on.
         #[arg(long, value_name = "REDIRECT_URL")]
         finish: Option<String>,
+    },
+    /// Forgets the TIDAL login: removes the stored session (and any old `session.json`).
+    Logout,
+    /// Shows where the TIDAL login is kept and whether there is one. Never prints a token.
+    Whoami {
+        /// Also ask TIDAL which account the login belongs to.
+        #[arg(long)]
+        check: bool,
     },
     /// Streams and plays TIDAL tracks by their IDs, one after another.
     Play {
@@ -132,7 +141,7 @@ fn settings(config_flag: Option<&Path>, overrides: Overrides) -> Result<Settings
 
 /// Where the TIDAL login is kept, according to the settings.
 fn session_store(config_flag: Option<&Path>) -> Result<Arc<dyn auth::SessionStore>> {
-    auth::open_store(settings(config_flag, Overrides::default())?.session_store.value)
+    auth::open_store(settings(config_flag, Overrides::default())?.session_store.value, auth::Interaction::Allow)
 }
 
 #[tokio::main]
@@ -146,6 +155,14 @@ async fn main() -> ExitCode {
                 None if no_wait || !std::io::stdin().is_terminal() => auth::login_begin(),
                 None => auth::login(&*store).await,
             },
+            Err(error) => Err(error),
+        },
+        Command::Logout => match settings(cli.config.as_deref(), Overrides::default()) {
+            Ok(settings) => session_cmd::logout(settings.session_store.value).await,
+            Err(error) => Err(error),
+        },
+        Command::Whoami { check } => match settings(cli.config.as_deref(), Overrides::default()) {
+            Ok(settings) => session_cmd::whoami(settings.session_store.value, check).await,
             Err(error) => Err(error),
         },
         Command::Play { track_ids, device, quality, save_mp4, interactive, shuffle, repeat } => {
@@ -222,7 +239,7 @@ async fn run_play(
     repeat: Repeat,
 ) -> Result<()> {
     let device = settings.require_device()?;
-    let store = auth::open_store(settings.session_store.value)?;
+    let store = auth::open_store(settings.session_store.value, auth::Interaction::Allow)?;
     let mut client = auth::load_client(&*store).await?;
     // Only to fail now, with a clear message, if the login no longer works.
     client.refresh_access_token(false).await.context("refreshing the access token")?;
