@@ -197,11 +197,33 @@ pub struct SinkReport {
     /// The ALSA sample format negotiated with the device, e.g. `S24_3LE`.
     pub negotiated_format: String,
     pub proc: ProcReading,
+    /// Set when the audio goes through the sound server (shared mode) instead of a card of its own.
+    pub shared: Option<SharedRoute>,
+}
+
+/// Where audio went when it was played through the sound server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedRoute {
+    /// The output's own name (`Fosi Audio DS2 Analog Stereo`).
+    pub sink: String,
+    /// The rate the output runs at; the server resamples to it if it differs from the source's.
+    pub sink_rate: u32,
+    /// What kind of output it is (`USB`, `Bluetooth`...).
+    pub kind: String,
+    /// The Bluetooth codec, when there is one.
+    pub codec: Option<String>,
+    /// Whether the way to the speaker loses information (a Bluetooth codec does).
+    pub lossy: bool,
 }
 
 impl SinkReport {
     pub fn new(device: String, source: SourceSpec, negotiated_format: String, proc: ProcReading) -> Self {
-        Self { device, source, negotiated_format, proc }
+        Self { device, source, negotiated_format, proc, shared: None }
+    }
+
+    /// The report of audio played through the sound server: never bit-perfect.
+    pub fn shared(source: SourceSpec, negotiated_format: String, route: SharedRoute) -> Self {
+        Self { device: route.sink.clone(), source, negotiated_format, proc: ProcReading::NotHw, shared: Some(route) }
     }
 
     /// The sample rate the kernel reports for the running stream.
@@ -223,7 +245,8 @@ impl SinkReport {
     /// True only when the kernel confirms the device runs at exactly the source's rate and the
     /// format that was negotiated. Anything less (including not being able to check) is not.
     pub fn bit_perfect(&self) -> bool {
-        self.device_rate() == Some(self.source.sample_rate)
+        self.shared.is_none()
+            && self.device_rate() == Some(self.source.sample_rate)
             && self.device_format().as_deref() == Some(self.negotiated_format.as_str())
     }
 
@@ -231,6 +254,13 @@ impl SinkReport {
     pub fn problem(&self) -> Option<String> {
         if self.bit_perfect() {
             return None;
+        }
+        if let Some(route) = &self.shared {
+            return Some(match (&route.codec, route.lossy) {
+                (Some(codec), true) => format!("shared through the sound server, and the {codec} codec loses information"),
+                (None, true) => "shared through the sound server, over a lossy link".to_string(),
+                _ => "shared through the sound server, which mixes it with other audio".to_string(),
+            });
         }
         Some(match (&self.proc, self.device_rate(), self.device_format()) {
             (ProcReading::NotHw, _, _) => {
@@ -248,6 +278,9 @@ impl SinkReport {
 
     /// The report as the terminal player shows it: the kernel's own account, then the verdict.
     pub fn to_text(&self) -> String {
+        if let Some(route) = &self.shared {
+            return self.shared_text(route);
+        }
         let mut text = String::new();
         match &self.proc {
             ProcReading::NotHw => text.push_str(&format!(
@@ -277,6 +310,30 @@ impl SinkReport {
             )),
         }
         text
+    }
+}
+
+impl SinkReport {
+    fn shared_text(&self, route: &SharedRoute) -> String {
+        let source = format!(
+            "FLAC {}-bit/{} Hz {}ch",
+            self.source.bits_per_sample, self.source.sample_rate, self.source.channels
+        );
+        let via = match &route.codec {
+            Some(codec) => format!("{}, {codec}", route.kind),
+            None => format!("{}, shared, PipeWire", route.kind),
+        };
+        let resampled = if route.sink_rate != self.source.sample_rate {
+            format!(" resampled to {} Hz", route.sink_rate)
+        } else {
+            String::new()
+        };
+        let verdict = match (&route.codec, route.lossy) {
+            (Some(codec), true) => format!("SHARED, LOSSY CODEC ({codec})"),
+            (None, true) => "SHARED, LOSSY".to_string(),
+            _ => "SHARED (not bit-perfect)".to_string(),
+        };
+        format!("{source} \u{2192} {} ({via}){resampled}  \u{2716} {verdict}", route.sink)
     }
 }
 
@@ -717,6 +774,48 @@ mod tests {
     fn pick_format_for_16_bit_prefers_s16le() {
         let format = pick_format(16, |_f| true).unwrap();
         assert_eq!(format, Format::S16LE);
+    }
+
+    fn route(sink: &str, kind: &str, codec: Option<&str>, lossy: bool, rate: u32) -> SharedRoute {
+        SharedRoute { sink: sink.into(), sink_rate: rate, kind: kind.into(), codec: codec.map(str::to_string), lossy }
+    }
+
+    const SOURCE_96K: SourceSpec = SourceSpec { sample_rate: 96_000, channels: 2, bits_per_sample: 24 };
+
+    #[test]
+    fn a_shared_report_is_never_bit_perfect_and_says_it_was_resampled() {
+        let report = SinkReport::shared(
+            SOURCE_96K,
+            "S32LE".into(),
+            route("Fosi Audio DS2 Analog Stereo", "USB", None, false, 48_000),
+        );
+        assert!(!report.bit_perfect());
+        assert_eq!(
+            report.to_text(),
+            "FLAC 24-bit/96000 Hz 2ch \u{2192} Fosi Audio DS2 Analog Stereo (USB, shared, PipeWire) resampled to 48000 Hz  \u{2716} SHARED (not bit-perfect)"
+        );
+        assert!(report.problem().unwrap().contains("shared"), "{:?}", report.problem());
+    }
+
+    #[test]
+    fn a_shared_report_at_the_sinks_own_rate_says_nothing_about_resampling() {
+        let report = SinkReport::shared(SOURCE_96K, "S32LE".into(), route("Speakers", "built-in", None, false, 96_000));
+        assert!(!report.to_text().contains("resampled"), "{}", report.to_text());
+    }
+
+    #[test]
+    fn a_bluetooth_report_names_the_codec_and_says_it_is_lossy() {
+        let report = SinkReport::shared(
+            SOURCE_96K,
+            "S32LE".into(),
+            route("Soundcore Life P2", "Bluetooth", Some("SBC"), true, 48_000),
+        );
+        assert_eq!(
+            report.to_text(),
+            "FLAC 24-bit/96000 Hz 2ch \u{2192} Soundcore Life P2 (Bluetooth, SBC) resampled to 48000 Hz  \u{2716} SHARED, LOSSY CODEC (SBC)"
+        );
+        assert!(report.problem().unwrap().contains("SBC codec loses information"));
+        assert_eq!(report.device, "Soundcore Life P2");
     }
 
     #[test]

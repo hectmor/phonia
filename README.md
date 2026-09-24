@@ -59,12 +59,13 @@ cargo run -p phonia -- probe-device
 ## Configuration
 
 The settings live in `~/.config/phonia/config.toml` (`$XDG_CONFIG_HOME/phonia/`). Nothing is
-required to exist except the audio device:
+required to exist except the audio device (in exclusive mode):
 
 ```toml
 [output]
 device = "hw:DS2,0"     # a sound card: `phonia devices` lists them. "auto" = the first USB card.
-mode = "exclusive"      # phonia owns the card, nothing mixes or resamples: bit-perfect (the only mode so far)
+mode = "exclusive"      # exclusive: phonia owns the card, bit-perfect. shared: through PipeWire, any output
+sink = "default"        # shared mode only: "default" (the desktop's) or an output's name from `phonia devices`
 reserve = true          # ask WirePlumber/PulseAudio to release the card first, and give it back after
 release_after_pause = 10   # seconds a pause lasts before the card is handed back; 0 = on every pause, "never" = keep it
 
@@ -262,6 +263,39 @@ run.
   the card as it always did, so the desktop must not be using it (mute the card's profile in
   PipeWire while using phonia).
 
+## Shared mode: any output, not bit-perfect
+
+Exclusive mode is the point of phonia, but it only works on a sound card that phonia can have for
+itself. **`mode = "shared"`** plays through the desktop's sound server instead (PipeWire, through
+its PulseAudio-compatible interface, or PulseAudio itself), so any output the desktop has works:
+Bluetooth speakers, HDMI, the laptop's speakers, or the DAC while other programs also use it.
+
+```toml
+[output]
+mode = "shared"
+sink = "bluez_output.AA_BB_CC_DD_EE_FF.1"   # from `phonia devices`; or "default" for the desktop's
+```
+
+- **It is not bit-perfect, and phonia says so** each time a track starts: `✖ SHARED (not
+  bit-perfect)`, and for Bluetooth `✖ SHARED, LOSSY CODEC (SBC)`. The server mixes phonia with
+  everything else and converts the audio; the decoding is still full quality, and phonia hands
+  the server the exact samples it decoded (24 bits, at the track's own rate), so PipeWire's only
+  job is one resampling to the rate the output runs at (48 kHz by default) and the Bluetooth
+  codec, if any, which is lossy whatever TIDAL sent.
+- `phonia devices` lists both worlds: the sound cards for exclusive mode and the server's
+  outputs for shared mode, with Bluetooth ones marked and the codec named.
+- **`sink = "default"` follows the desktop** when you change its default output. **A named output
+  is never swapped**: if that Bluetooth speaker switches off, playback stops with an error instead
+  of quietly moving to the laptop's speakers.
+- `--device` on the command line means exclusive mode for that run, whatever the file says.
+- To make PipeWire follow the track's sample rate instead of resampling to 48 kHz on an idle
+  output, allow the rates in its configuration (`default.clock.allowed-rates`). phonia doesn't
+  change anything in the system.
+- Shared mode never reserves the card and never touches D-Bus for it. It also does not hand the
+  card back after a pause (`release_after_pause` is for exclusive mode): a paused stream blocks
+  nobody.
+- Volume, and switching between outputs while playing, come in the next steps of this feature.
+
 ## Phase 0 status
 
 - `cargo build` and `cargo test` pass cleanly; `cargo clippy` has no warnings.
@@ -364,10 +398,22 @@ more importantly, *why* it was chosen.
   the guarantee would be silently broken.
 
 - **[`alsa`](https://docs.rs/alsa) (Rust bindings for `libasound`)** -- the only way to talk to
-  Linux audio hardware directly without hand-writing FFI. Used to open `hw:N,D` devices directly
-  (never `default`/`plughw`/`dmix`, all of which can resample or mix and would break
+  Linux audio hardware directly without hand-writing FFI. Used to open `hw:N,D` devices directly in
+  exclusive mode (never `default`/`plughw`/`dmix`, all of which can resample or mix and would break
   bit-perfectness by definition), negotiate a lossless integer hardware format, and pack the
   decoder's left-justified `i32` samples into that format with pure bit shifts.
+
+- **[`pulseaudio`](https://docs.rs/pulseaudio)** -- a pure-Rust client of the PulseAudio protocol,
+  which PipeWire serves (`pipewire-pulse`) and PulseAudio speaks natively. It is what shared mode
+  plays through. Chosen against the alternatives by trying them: the `pipewire` crate wraps
+  `libpipewire` (25 to 35 crates, `bindgen` and `libclang` at build time, a C library at run time,
+  and an API that changed three times in a year), and `libpulse-binding` links the C `libpulse`
+  and has no way to pause in its simple API; this one needs no system library and adds five small
+  crates (`byteorder`, `enum-primitive-derive`, `futures`, `futures-executor` and itself). It gives
+  the stream what phonia needs: pause without losing audio, flush, how much the server holds (for
+  the exact position), the list of outputs, a notice when one disappears, and the properties that
+  tell PipeWire this is music and to resample well. Its futures need no particular runtime, so
+  the audio thread drives them with **`futures-executor`**'s `block_on`.
 
 - **[`anyhow`](https://docs.rs/anyhow)** -- error handling with contextual, human-readable
   messages at every fallible step, from "no saved session, run `phonia login`" to "the device

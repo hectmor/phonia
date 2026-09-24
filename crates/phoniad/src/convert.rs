@@ -277,6 +277,27 @@ mod tests {
     }
 
     #[test]
+    fn a_shared_report_reaches_clients_as_not_bit_perfect_with_the_reason() {
+        use phonia_core::output::alsa::SharedRoute;
+        let report = SinkReport::shared(
+            SourceSpec { sample_rate: 96_000, channels: 2, bits_per_sample: 24 },
+            "S32LE".into(),
+            SharedRoute {
+                sink: "Soundcore Life P2".into(),
+                sink_rate: 48_000,
+                kind: "Bluetooth".into(),
+                codec: Some("SBC".into()),
+                lossy: true,
+            },
+        );
+        let dto = sink_report(&report);
+        assert!(!dto.bit_perfect);
+        assert_eq!(dto.device, "Soundcore Life P2");
+        assert!(dto.problem.unwrap().contains("SBC"));
+        assert_eq!(dto.hw_params, None, "there is no /proc/asound for a stream through the sound server");
+    }
+
+    #[test]
     fn milliseconds_saturate_instead_of_overflowing() {
         assert_eq!(ms(Duration::MAX), u64::MAX);
         assert_eq!(ms(Duration::from_micros(1_999)), 1);

@@ -56,6 +56,7 @@ fn format_settings(settings: &Settings, source: Option<&ConfigSource>, read: boo
             settings.device.origin,
         ),
         ("output.mode", settings.mode.value.to_string(), settings.mode.origin),
+        ("output.sink", settings.sink.value.clone(), settings.sink.origin),
         ("output.reserve", settings.reserve.value.to_string(), settings.reserve.origin),
         (
             "output.release_after_pause",
@@ -103,6 +104,7 @@ mod tests {
             "Config file: /home/u/.config/phonia/config.toml (not found: all defaults)\n\
              \x20 output.device               (not set)                           (default)\n\
              \x20 output.mode                 exclusive                           (default)\n\
+             \x20 output.sink                 default                             (default)\n\
              \x20 output.reserve              true                                (default)\n\
              \x20 output.release_after_pause  10 s                                (default)\n\
              \x20 tidal.max_quality           hires                               (default)\n\
@@ -128,7 +130,7 @@ mod tests {
         assert!(text.starts_with("Config file: /tmp/c.toml\n"), "{text}");
         assert!(text.contains("hw:DS2,0") && text.contains("(config file)"), "{text}");
         assert!(text.contains("lossless"), "{text}");
-        assert_eq!(text.matches("(default)").count(), 6, "mode, reserve, release_after_pause, session_store, socket and verbose were not written");
+        assert_eq!(text.matches("(default)").count(), 7, "mode, sink, reserve, release_after_pause, session_store, socket and verbose were not written");
     }
 
     #[test]

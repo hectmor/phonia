@@ -42,19 +42,23 @@ impl FromStr for Quality {
     }
 }
 
-/// How phonia gets at the sound card.
+/// How phonia gets at the sound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputMode {
     /// phonia opens the card itself, with nothing mixing or resampling in between: bit-perfect.
     #[default]
     Exclusive,
+    /// phonia plays through the desktop's sound server (PipeWire, PulseAudio), which mixes and
+    /// resamples: not bit-perfect, but any output works, Bluetooth included.
+    Shared,
 }
 
 impl fmt::Display for OutputMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             OutputMode::Exclusive => "exclusive",
+            OutputMode::Shared => "shared",
         })
     }
 }
@@ -133,6 +137,9 @@ pub struct Output {
     /// The ALSA device: `hw:N,D`, a card id such as `hw:DS2,0`, or `auto`.
     pub device: Option<String>,
     pub mode: Option<OutputMode>,
+    /// In shared mode, the output to play on: `"default"` (the desktop's, following it) or the name
+    /// of one, as `phonia devices` lists it.
+    pub sink: Option<String>,
     /// Ask the desktop (WirePlumber, PulseAudio) to release the card before opening it.
     pub reserve: Option<bool>,
     pub release_after_pause: Option<ReleaseAfterPause>,
@@ -194,6 +201,7 @@ mod tests {
 [output]
 device = "hw:DS2,0"
 mode = "exclusive"
+sink = "default"
 reserve = false
 release_after_pause = 30
 
@@ -214,6 +222,7 @@ verbose = true
                 output: Output {
                     device: Some("hw:DS2,0".into()),
                     mode: Some(OutputMode::Exclusive),
+                    sink: Some("default".into()),
                     reserve: Some(false),
                     release_after_pause: Some(ReleaseAfterPause::After(Duration::from_secs(30))),
                 },
@@ -280,8 +289,18 @@ verbose = true
         let quality = parse("[tidal]\nmax_quality = \"mqa\"\n").unwrap_err().to_string();
         assert!(quality.contains("unknown variant") && quality.contains("hires") && quality.contains("lossless"), "{quality}");
 
-        let mode = parse("[output]\nmode = \"shared\"\n").unwrap_err().to_string();
-        assert!(mode.contains("unknown variant") && mode.contains("exclusive"), "{mode}");
+        let mode = parse("[output]\nmode = \"cloud\"\n").unwrap_err().to_string();
+        assert!(
+            mode.contains("unknown variant") && mode.contains("exclusive") && mode.contains("shared"),
+            "{mode}"
+        );
+    }
+
+    #[test]
+    fn shared_mode_and_its_output_are_read() {
+        let file = parse("[output]\nmode = \"shared\"\nsink = \"bluez_output.AA\"\n").unwrap();
+        assert_eq!(file.output.mode, Some(OutputMode::Shared));
+        assert_eq!(file.output.sink.as_deref(), Some("bluez_output.AA"));
     }
 
     #[test]

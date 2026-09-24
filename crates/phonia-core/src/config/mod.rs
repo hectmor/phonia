@@ -132,6 +132,8 @@ pub struct Settings {
     /// `None` when neither the command line nor the file names a device.
     pub device: Sourced<Option<String>>,
     pub mode: Sourced<OutputMode>,
+    /// The output in shared mode.
+    pub sink: Sourced<String>,
     pub reserve: Sourced<bool>,
     pub release_after_pause: Sourced<ReleaseAfterPause>,
     pub max_quality: Sourced<Quality>,
@@ -143,9 +145,12 @@ pub struct Settings {
 
 /// Decides every setting: command line over file over default.
 pub fn resolve(overrides: Overrides, file: &ConfigFile) -> Settings {
+    let device_flag = overrides.device.is_some();
     Settings {
         device: Sourced::pick(overrides.device.map(Some), file.output.device.clone().map(Some), None),
-        mode: Sourced::pick(None, file.output.mode, OutputMode::default()),
+        // Naming a card on the command line is asking for exclusive mode, whatever the file says.
+        mode: Sourced::pick(device_flag.then_some(OutputMode::Exclusive), file.output.mode, OutputMode::default()),
+        sink: Sourced::pick(None, file.output.sink.clone(), "default".to_string()),
         reserve: Sourced::pick(None, file.output.reserve, true),
         release_after_pause: Sourced::pick(None, file.output.release_after_pause, ReleaseAfterPause::default()),
         max_quality: Sourced::pick(overrides.max_quality, file.tidal.max_quality, Quality::default()),
@@ -155,7 +160,38 @@ pub fn resolve(overrides: Overrides, file: &ConfigFile) -> Settings {
     }
 }
 
+/// Where the sound goes, as the settings decide.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutputSpec {
+    /// A sound card of phonia's own.
+    Exclusive { device: String },
+    /// An output of the sound server: `None` is the desktop's default.
+    Shared { sink: Option<String> },
+}
+
+impl OutputSpec {
+    /// For messages.
+    pub fn describe(&self) -> String {
+        match self {
+            OutputSpec::Exclusive { device } => format!("device {device}"),
+            OutputSpec::Shared { sink: None } => "shared, the desktop's default output".to_string(),
+            OutputSpec::Shared { sink: Some(sink) } => format!("shared, output {sink}"),
+        }
+    }
+}
+
 impl Settings {
+    /// Where to play: the card in exclusive mode (which must be named), the sound server's output
+    /// in shared mode.
+    pub fn output(&self) -> Result<OutputSpec> {
+        Ok(match self.mode.value {
+            OutputMode::Exclusive => OutputSpec::Exclusive { device: self.require_device()?.to_string() },
+            OutputMode::Shared => {
+                OutputSpec::Shared { sink: (self.sink.value != "default").then(|| self.sink.value.clone()) }
+            }
+        })
+    }
+
     /// The device to play on, or an explanation of how to name one.
     pub fn require_device(&self) -> Result<&str> {
         match self.device.value.as_deref() {
@@ -260,6 +296,7 @@ mod tests {
         let settings = resolve(Overrides::default(), &ConfigFile::default());
         assert_eq!(settings.device, Sourced { value: None, origin: Origin::Default });
         assert_eq!(settings.mode, Sourced { value: OutputMode::Exclusive, origin: Origin::Default });
+        assert_eq!(settings.sink, Sourced { value: "default".to_string(), origin: Origin::Default });
         assert_eq!(settings.reserve, Sourced { value: true, origin: Origin::Default });
         assert_eq!(
             settings.release_after_pause,
@@ -332,5 +369,48 @@ mod tests {
         use tidlers::client::models::playback::AudioQuality;
         assert!(matches!(AudioQuality::from(Quality::Hires), AudioQuality::HiRes));
         assert!(matches!(AudioQuality::from(Quality::Lossless), AudioQuality::Lossless));
+    }
+
+    #[test]
+    fn exclusive_mode_needs_a_device_and_shared_mode_does_not() {
+        let mut file = ConfigFile::default();
+        assert!(resolve(Overrides::default(), &file).output().is_err());
+
+        file.output.device = Some("hw:DS2,0".into());
+        assert_eq!(
+            resolve(Overrides::default(), &file).output().unwrap(),
+            OutputSpec::Exclusive { device: "hw:DS2,0".into() }
+        );
+
+        let shared = ConfigFile {
+            output: Output { mode: Some(OutputMode::Shared), ..Output::default() },
+            ..ConfigFile::default()
+        };
+        assert_eq!(resolve(Overrides::default(), &shared).output().unwrap(), OutputSpec::Shared { sink: None });
+    }
+
+    #[test]
+    fn shared_mode_names_its_output_or_uses_the_default() {
+        let mut file = ConfigFile {
+            output: Output { mode: Some(OutputMode::Shared), sink: Some("bluez_output.AA".into()), ..Output::default() },
+            ..ConfigFile::default()
+        };
+        assert_eq!(
+            resolve(Overrides::default(), &file).output().unwrap(),
+            OutputSpec::Shared { sink: Some("bluez_output.AA".into()) }
+        );
+        file.output.sink = Some("default".into());
+        assert_eq!(resolve(Overrides::default(), &file).output().unwrap(), OutputSpec::Shared { sink: None });
+    }
+
+    #[test]
+    fn naming_a_card_on_the_command_line_means_exclusive_mode_even_if_the_file_says_shared() {
+        let file = ConfigFile {
+            output: Output { mode: Some(OutputMode::Shared), ..Output::default() },
+            ..ConfigFile::default()
+        };
+        let settings = resolve(Overrides { device: Some("hw:1,0".into()), ..Overrides::default() }, &file);
+        assert_eq!(settings.mode, Sourced { value: OutputMode::Exclusive, origin: Origin::Flag });
+        assert_eq!(settings.output().unwrap(), OutputSpec::Exclusive { device: "hw:1,0".into() });
     }
 }
