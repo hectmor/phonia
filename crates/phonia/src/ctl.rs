@@ -3,10 +3,15 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use phonia_ipc::{
-    AddAt, Client, ClientError, ClientInfo, Event, ItemId, NewTrack, Payload, Queue, Repeat, Request, SeekTarget, State,
-    Status,
+    AddAt, CAP_OUTPUT_RELEASE, Client, ClientError, ClientInfo, Event, ItemId, NewTrack, Output, Payload, Queue,
+    ReleaseReason, Repeat, Request, SeekTarget, State, Status,
 };
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// How long `resume` waits to hear that playback is back, which after a release includes taking
+/// the DAC from whoever has it.
+const RESUME_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Args)]
 pub struct CtlArgs {
@@ -28,7 +33,12 @@ pub enum CtlCommand {
     /// Plays entry N of the queue (as `queue list` numbers them), or starts the queue.
     Play { entry: Option<usize> },
     Pause,
+    /// Continues after a pause. If the DAC was handed back, takes it again first, and says so if
+    /// someone else has it and won't let go.
     Resume,
+    /// Pauses and hands the DAC back to the desktop, so another program can use it. `resume`
+    /// takes it again and carries on from the same place.
+    Release,
     /// Pauses if playing, resumes if paused.
     Toggle,
     Next,
@@ -114,7 +124,13 @@ pub async fn run(args: CtlArgs, config_flag: Option<&Path>) -> Result<()> {
             ack(&client, json, Request::Play { item }).await
         }
         CtlCommand::Pause => ack(&client, json, Request::Pause).await,
-        CtlCommand::Resume => ack(&client, json, Request::Resume).await,
+        CtlCommand::Resume => resume(&client, json).await,
+        CtlCommand::Release => {
+            if !client.server().capabilities.iter().any(|capability| capability == CAP_OUTPUT_RELEASE) {
+                bail!("this phoniad is too old to hand the DAC back (protocol 1.0): restart it after updating");
+            }
+            ack(&client, json, Request::Release).await
+        }
         CtlCommand::Toggle => ack(&client, json, Request::TogglePause).await,
         CtlCommand::Next => ack(&client, json, Request::Next).await,
         CtlCommand::Prev => ack(&client, json, Request::Previous).await,
@@ -147,6 +163,35 @@ fn explain_connection_error(error: ClientError) -> anyhow::Error {
 async fn ack(client: &Client, json: bool, request: Request) -> Result<()> {
     let payload = client.request(request).await?;
     print_payload(json, &payload, || "ok".to_string())
+}
+
+/// `resume`, waiting to hear that playback is back: taking the DAC again can be refused, and that
+/// is worth saying instead of a bare "ok".
+async fn resume(client: &Client, json: bool) -> Result<()> {
+    if json {
+        return ack(client, json, Request::Resume).await;
+    }
+    let (snapshot, mut events) = client.subscribe().await?;
+    if snapshot.status.state != State::Paused {
+        return ack(client, json, Request::Resume).await;
+    }
+    client.request(Request::Resume).await?;
+    let outcome = tokio::time::timeout(RESUME_WAIT, async {
+        loop {
+            match events.next().await {
+                Some(Event::StateChanged { state: State::Playing }) | None => return Ok(()),
+                Some(Event::Error { message }) => return Err(anyhow!(message)),
+                Some(_) => {}
+            }
+        }
+    })
+    .await;
+    match outcome {
+        Ok(result) => result?,
+        Err(_) => bail!("resume was sent, but playback has not started after {} s", RESUME_WAIT.as_secs()),
+    }
+    println!("ok");
+    Ok(())
 }
 
 fn print_payload(json: bool, payload: &Payload, text: impl FnOnce() -> String) -> Result<()> {
@@ -287,6 +332,12 @@ fn state_name(state: State) -> &'static str {
 
 fn format_status(status: &Status) -> String {
     let mut text = format!("State:    {}", state_name(status.state));
+    if let Output::Released { by } = &status.output {
+        match by {
+            Some(by) => text.push_str(&format!(" (DAC released to {by})")),
+            None => text.push_str(" (DAC released)"),
+        }
+    }
     if let Some(track) = &status.track {
         let name = track.title.as_deref().or(track.source.as_deref()).unwrap_or("?");
         text.push_str(&format!("\nTrack:    {name}"));
@@ -355,6 +406,19 @@ fn format_event(event: &Event) -> String {
             report.negotiated_format,
             if report.bit_perfect { "BIT-PERFECT".to_string() } else { format!("CONVERTED ({})", report.problem.as_deref().unwrap_or("?")) }
         ),
+        Event::OutputReleased { by, reason } => {
+            let why = match reason {
+                ReleaseReason::Idle => "paused for a while",
+                ReleaseReason::Command => "asked to",
+                ReleaseReason::Requested => "another program asked for it",
+                ReleaseReason::Unknown => "?",
+            };
+            match by {
+                Some(by) => format!("DAC released to {by} ({why})"),
+                None => format!("DAC released ({why})"),
+            }
+        }
+        Event::OutputAcquired => "DAC taken again".to_string(),
         Event::Error { message } => format!("error: {message}"),
         Event::ShuttingDown => "the daemon is shutting down".to_string(),
         Event::Resync { skipped, .. } => format!("resynced (missed {skipped} events)"),
@@ -452,10 +516,17 @@ mod tests {
             spec: Some(Spec { sample_rate: 192_000, channels: 2, bits_per_sample: 24 }),
             position_ms: 83_000,
             duration_ms: Some(348_680),
+            output: Output::Open,
         };
         assert_eq!(format_status(&status), "State:    playing\nTrack:    Song\nPosition: 1:23 / 5:48\nFormat:   24-bit / 192000 Hz / 2 ch");
-        let idle = Status { state: State::Stopped, track: None, spec: None, position_ms: 0, duration_ms: None };
+        let idle =
+            Status { state: State::Stopped, track: None, spec: None, position_ms: 0, duration_ms: None, output: Output::Closed };
         assert_eq!(format_status(&idle), "State:    stopped");
+
+        let released = Status { state: State::Paused, output: Output::Released { by: Some("jackd".into()) }, ..idle.clone() };
+        assert_eq!(format_status(&released), "State:    paused (DAC released to jackd)");
+        let released = Status { output: Output::Released { by: None }, ..released };
+        assert_eq!(format_status(&released), "State:    paused (DAC released)");
     }
 
     #[test]
@@ -476,6 +547,15 @@ mod tests {
         assert_eq!(format_event(&Event::StateChanged { state: State::Paused }), "state paused");
         assert_eq!(format_event(&Event::Position { position_ms: 61_000, duration_ms: Some(120_000) }), "position 1:01 / 2:00");
         assert_eq!(format_event(&Event::QueueExhausted), "end of the queue");
+        assert_eq!(
+            format_event(&Event::OutputReleased { by: Some("jackd".into()), reason: ReleaseReason::Requested }),
+            "DAC released to jackd (another program asked for it)"
+        );
+        assert_eq!(
+            format_event(&Event::OutputReleased { by: None, reason: ReleaseReason::Idle }),
+            "DAC released (paused for a while)"
+        );
+        assert_eq!(format_event(&Event::OutputAcquired), "DAC taken again");
         assert_eq!(format_event(&Event::Unknown), "(an event this client does not know)");
     }
 }

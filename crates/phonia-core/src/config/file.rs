@@ -9,6 +9,7 @@ use serde::Deserialize;
 use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::Duration;
 
 /// The highest quality to ask TIDAL for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -58,12 +59,81 @@ impl fmt::Display for OutputMode {
     }
 }
 
+/// How long a pause lasts before the sound card is handed back to the desktop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseAfterPause {
+    /// Keep the card for as long as there is a track.
+    Never,
+    /// Hand it back after this long; zero hands it back on every pause.
+    After(Duration),
+}
+
+impl Default for ReleaseAfterPause {
+    fn default() -> Self {
+        ReleaseAfterPause::After(Duration::from_secs(10))
+    }
+}
+
+impl ReleaseAfterPause {
+    /// The wait, or `None` for never.
+    pub fn duration(self) -> Option<Duration> {
+        match self {
+            ReleaseAfterPause::Never => None,
+            ReleaseAfterPause::After(wait) => Some(wait),
+        }
+    }
+}
+
+impl fmt::Display for ReleaseAfterPause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReleaseAfterPause::Never => f.write_str("never"),
+            ReleaseAfterPause::After(wait) => write!(f, "{} s", wait.as_secs()),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ReleaseAfterPause {
+    /// A number of seconds, or the word `never`.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = ReleaseAfterPause;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a number of seconds (0 or more) or \"never\"")
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, seconds: i64) -> Result<Self::Value, E> {
+                u64::try_from(seconds)
+                    .map(|seconds| ReleaseAfterPause::After(Duration::from_secs(seconds)))
+                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Signed(seconds), &self))
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, seconds: u64) -> Result<Self::Value, E> {
+                Ok(ReleaseAfterPause::After(Duration::from_secs(seconds)))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, word: &str) -> Result<Self::Value, E> {
+                match word {
+                    "never" => Ok(ReleaseAfterPause::Never),
+                    other => Err(E::invalid_value(serde::de::Unexpected::Str(other), &self)),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Output {
     /// The ALSA device: `hw:N,D`, a card id such as `hw:DS2,0`, or `auto`.
     pub device: Option<String>,
     pub mode: Option<OutputMode>,
+    pub release_after_pause: Option<ReleaseAfterPause>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -101,6 +171,7 @@ mod tests {
 [output]
 device = "hw:DS2,0"
 mode = "exclusive"
+release_after_pause = 30
 
 [tidal]
 max_quality = "lossless"
@@ -115,11 +186,26 @@ verbose = true
         assert_eq!(
             parse(FULL).unwrap(),
             ConfigFile {
-                output: Output { device: Some("hw:DS2,0".into()), mode: Some(OutputMode::Exclusive) },
+                output: Output {
+                    device: Some("hw:DS2,0".into()),
+                    mode: Some(OutputMode::Exclusive),
+                    release_after_pause: Some(ReleaseAfterPause::After(Duration::from_secs(30))),
+                },
                 tidal: Tidal { max_quality: Some(Quality::Lossless) },
                 daemon: Daemon { socket: Some("/run/user/1000/phonia/phoniad.sock".into()), verbose: Some(true) },
             }
         );
+    }
+
+    #[test]
+    fn the_time_before_a_pause_gives_the_card_back() {
+        let read = |text: &str| parse(&format!("[output]\nrelease_after_pause = {text}\n"));
+        assert_eq!(read("0").unwrap().output.release_after_pause, Some(ReleaseAfterPause::After(Duration::ZERO)));
+        assert_eq!(read("\"never\"").unwrap().output.release_after_pause, Some(ReleaseAfterPause::Never));
+        for bad in ["-1", "\"soon\"", "true", "1.5"] {
+            let error = read(bad).unwrap_err().to_string();
+            assert!(error.contains("release_after_pause") || error.contains("never"), "{bad}: {error}");
+        }
     }
 
     #[test]

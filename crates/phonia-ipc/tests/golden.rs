@@ -33,10 +33,11 @@ fn status() -> Status {
         spec: Some(spec()),
         position_ms: 1_234,
         duration_ms: Some(215_000),
+        output: Output::Open,
     }
 }
 
-const STATUS_JSON: &str = r#"{"state":"playing","track":{"item_id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000},"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"position_ms":1234,"duration_ms":215000}"#;
+const STATUS_JSON: &str = r#"{"state":"playing","track":{"item_id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000},"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"position_ms":1234,"duration_ms":215000,"output":{"state":"open"}}"#;
 
 fn queue() -> Queue {
     Queue {
@@ -117,6 +118,11 @@ fn message(m: ServerMessage, json: &str) {
     round_trip(&m, json);
 }
 
+#[test]
+fn the_release_request() {
+    request(1, Request::Release, r#"{"id":1,"request":{"type":"release"}}"#);
+}
+
 fn response(id: u64, reply: Reply, json: &str) {
     message(ServerMessage::Response { id: RequestId(id), reply }, json);
 }
@@ -125,18 +131,18 @@ fn response(id: u64, reply: Reply, json: &str) {
 fn the_server_banner() {
     message(
         ServerMessage::Hello(ServerHello {
-            protocol: Version { major: 1, minor: 0 },
+            protocol: PROTOCOL,
             server: ServerInfo { name: "phoniad".into(), version: "0.1.0".into(), pid: 1234 },
-            capabilities: vec![],
+            capabilities: vec![CAP_OUTPUT_RELEASE.into()],
         }),
-        r#"{"type":"hello","protocol":{"major":1,"minor":0},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":[]}"#,
+        r#"{"type":"hello","protocol":{"major":1,"minor":1},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release"]}"#,
     );
 }
 
 #[test]
 fn successful_responses() {
     response(1, Reply::Ok(Payload::Ack), r#"{"type":"response","id":1,"ok":{"type":"ack"}}"#);
-    response(2, Reply::Ok(Payload::Status(status())), &format!(r#"{{"type":"response","id":2,"ok":{{"type":"status","state":"playing","track":{},"spec":{},"position_ms":1234,"duration_ms":215000}}}}"#,
+    response(2, Reply::Ok(Payload::Status(status())), &format!(r#"{{"type":"response","id":2,"ok":{{"type":"status","state":"playing","track":{},"spec":{},"position_ms":1234,"duration_ms":215000,"output":{{"state":"open"}}}}}}"#,
         r#"{"item_id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000}"#, r#"{"sample_rate":96000,"channels":2,"bits_per_sample":24}"#));
     response(3, Reply::Ok(Payload::Removed { count: 2 }), r#"{"type":"response","id":3,"ok":{"type":"removed","count":2}}"#);
     response(
@@ -221,6 +227,26 @@ fn events() {
     );
 }
 
+#[test]
+fn output_events_and_the_state_of_the_device() {
+    event(
+        13,
+        Event::OutputReleased { by: Some("jackd".into()), reason: ReleaseReason::Requested },
+        r#"{"type":"event","seq":13,"event":{"type":"output_released","by":"jackd","reason":"requested"}}"#,
+    );
+    event(
+        14,
+        Event::OutputReleased { by: None, reason: ReleaseReason::Idle },
+        r#"{"type":"event","seq":14,"event":{"type":"output_released","by":null,"reason":"idle"}}"#,
+    );
+    event(15, Event::OutputAcquired, r#"{"type":"event","seq":15,"event":{"type":"output_acquired"}}"#);
+
+    round_trip(&Output::Closed, r#"{"state":"closed"}"#);
+    round_trip(&Output::Open, r#"{"state":"open"}"#);
+    round_trip(&Output::Released { by: Some("jackd".into()) }, r#"{"state":"released","by":"jackd"}"#);
+    round_trip(&Output::Released { by: None }, r#"{"state":"released","by":null}"#);
+}
+
 // ---- compatibility -------------------------------------------------------------------------
 
 #[test]
@@ -265,12 +291,29 @@ fn optional_parts_may_be_left_out() {
 }
 
 #[test]
+fn a_status_from_a_daemon_older_than_1_1_has_no_output() {
+    let old = r#"{"state":"paused","track":null,"spec":null,"position_ms":0,"duration_ms":null}"#;
+    let parsed: Status = serde_json::from_str(old).unwrap();
+    assert_eq!(parsed.output, Output::Closed);
+}
+
+#[test]
+fn a_release_reason_from_the_future_does_not_break_a_client() {
+    let parsed: ServerMessage =
+        serde_json::from_str(r#"{"type":"event","seq":1,"event":{"type":"output_released","by":null,"reason":"thermal"}}"#).unwrap();
+    assert_eq!(
+        parsed,
+        ServerMessage::Event { seq: 1, event: Event::OutputReleased { by: None, reason: ReleaseReason::Unknown } }
+    );
+}
+
+#[test]
 fn versions_are_compatible_across_minors_but_not_majors() {
     let v = |major, minor| Version { major, minor };
     assert!(v(1, 0).compatible_with(v(1, 7)));
     assert!(v(1, 7).compatible_with(v(1, 0)));
     assert!(!v(1, 0).compatible_with(v(2, 0)));
-    assert_eq!(PROTOCOL, v(1, 0));
+    assert_eq!(PROTOCOL, v(1, 1));
 }
 
 #[test]

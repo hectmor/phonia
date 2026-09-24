@@ -7,7 +7,7 @@ use crate::convert;
 use futures_util::StreamExt;
 use futures_util::stream;
 use phonia_core::control::Controller;
-use phonia_core::engine::{Command, Engine, TrackOpener};
+use phonia_core::engine::{self, Command, Engine, TrackOpener};
 use phonia_core::openers::{DescribeError, DispatchOpener, Source};
 use phonia_core::output::SinkFactory;
 use phonia_core::output::alsa::SinkReport;
@@ -38,6 +38,7 @@ pub struct DaemonParts {
     pub opener: Arc<DispatchOpener>,
     /// Bit-perfect reports from the sinks, to be announced to clients.
     pub reports: mpsc::UnboundedReceiver<SinkReport>,
+    pub engine: engine::Options,
 }
 
 pub struct Daemon {
@@ -60,7 +61,7 @@ impl Daemon {
     /// Must be called inside a tokio runtime.
     pub fn start(parts: DaemonParts) -> Result<Arc<Daemon>> {
         let queue = Queue::new(parts.opener.clone() as Arc<dyn TrackOpener>);
-        let engine = Engine::spawn(tokio::runtime::Handle::current(), parts.sinks, queue.clone())?;
+        let engine = Engine::spawn_with_options(tokio::runtime::Handle::current(), parts.sinks, queue.clone(), parts.engine)?;
         let controller = Controller::new(engine, queue);
 
         let (events, _) = broadcast::channel(EVENT_BACKLOG);
@@ -145,7 +146,7 @@ impl Daemon {
     }
 
     pub fn hello(&self) -> ipc::ServerHello {
-        ipc::ServerHello { protocol: ipc::PROTOCOL, server: self.info.clone(), capabilities: Vec::new() }
+        ipc::ServerHello { protocol: ipc::PROTOCOL, server: self.info.clone(), capabilities: vec![ipc::CAP_OUTPUT_RELEASE.to_string()] }
     }
 
     /// Flips to true when the daemon should stop.
@@ -203,6 +204,7 @@ impl Daemon {
             Request::TogglePause => send(Command::TogglePause),
             Request::Next => send(Command::Next),
             Request::Previous => send(Command::Previous),
+            Request::Release => send(Command::Release),
             Request::Seek { target } => send(Command::Seek(convert::seek_target(target))),
             Request::QueueRemove { ids } => {
                 let ids: Vec<ItemId> = ids.iter().map(|id| ItemId(id.0)).collect();

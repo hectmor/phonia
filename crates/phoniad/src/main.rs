@@ -9,6 +9,7 @@ use phoniad::daemon::{Daemon, DaemonParts, wait_for_shutdown};
 use phoniad::{server, socket};
 use phonia_core::config::{self, Overrides, Quality};
 use phonia_core::diag::{self, Level};
+use phonia_core::engine;
 use phonia_core::openers::{DispatchOpener, TidalOpener};
 use phonia_core::output::alsa::AlsaSinkFactory;
 use phonia_core::{auth, tidal};
@@ -83,7 +84,15 @@ async fn run(args: Args) -> Result<()> {
         // Called on the audio thread: an unbounded send never blocks.
         let _ = report_tx.send(report);
     })));
-    let daemon = Daemon::start(DaemonParts { sinks, opener, reports })?;
+    let daemon = Daemon::start(DaemonParts {
+        sinks,
+        opener,
+        reports,
+        engine: engine::Options {
+            release_after_pause: settings.release_after_pause.value.duration(),
+            ..engine::Options::default()
+        },
+    })?;
 
     let path = settings.socket_path(phonia_ipc::socket::default_socket_path);
     let (listener, _guard) = socket::bind(&path).await?;

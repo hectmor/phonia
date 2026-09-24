@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::device;
+use super::reserve::{DeviceBusy, DeviceReserver, ReservationSlot, open_reserved};
 use super::{AudioSink, SinkFactory};
 use crate::decode::SourceSpec;
 
@@ -41,6 +42,7 @@ pub struct AlsaSink {
     format: Format,
     source: SourceSpec,
     period_frames: usize,
+    buffer_frames: usize,
     can_pause: bool,
     scratch: Vec<u8>,
     /// The most recently written device-format bytes, at least as many as the device can hold
@@ -60,12 +62,7 @@ impl AlsaSink {
 
         let pcm = PCM::open(&c_device, Direction::Playback, false).map_err(|e| {
             if e.errno() == libc::EBUSY {
-                anyhow!(
-                    "device '{device}' is busy (EBUSY): PipeWire (or some other application) \
-                     most likely has it open. Pause/disconnect playback to that DAC (e.g. \
-                     `wpctl status`, or mute the card's profile in PipeWire) and try again.\n\
-                     Original ALSA error: {e}"
-                )
+                anyhow::Error::new(DeviceBusy { device: device.to_string(), detail: e.to_string() })
             } else {
                 anyhow!("could not open ALSA device '{device}': {e}")
             }
@@ -135,6 +132,7 @@ impl AlsaSink {
             format,
             source,
             period_frames,
+            buffer_frames,
             can_pause,
             scratch: Vec::new(),
             tail: TailBuffer::new(buffer_frames * bytes_per_frame),
@@ -327,6 +325,10 @@ impl AudioSink for AlsaSink {
         self.source
     }
 
+    fn capacity_frames(&self) -> u64 {
+        self.buffer_frames as u64
+    }
+
     fn write(&mut self, samples: &[i32]) -> Result<usize> {
         if !matches!(self.pause, PauseState::Running) {
             bail!("write() called on a paused ALSA sink");
@@ -429,11 +431,19 @@ impl AudioSink for AlsaSink {
 pub struct AlsaSinkFactory {
     device: String,
     on_report: Option<ReportHandler>,
+    reservation: Option<ReservationSlot>,
 }
 
 impl AlsaSinkFactory {
     pub fn new(device: impl Into<String>) -> Self {
-        Self { device: device.into(), on_report: None }
+        Self { device: device.into(), on_report: None, reservation: None }
+    }
+
+    /// Reserve the sound card through `reserver` before opening it, and keep it reserved until
+    /// [`SinkFactory::release`].
+    pub fn reserve(mut self, reserver: Arc<dyn DeviceReserver>) -> Self {
+        self.reservation = Some(ReservationSlot::new(reserver));
+        self
     }
 
     /// Have every sink hand its bit-perfect verdict to `handler` when it starts playing.
@@ -447,12 +457,25 @@ impl SinkFactory for AlsaSinkFactory {
     fn open(&self, spec: SourceSpec) -> Result<Box<dyn AudioSink>> {
         // Resolved on every open, not once: a card that was unplugged and plugged back in has
         // another number, and a daemon that has been running for days must find it.
-        let device = device::resolve(&self.device, Path::new(device::ASOUND))?.alsa_name();
-        let sink = AlsaSink::open(&device, spec)?;
+        let resolved = device::resolve(&self.device, Path::new(device::ASOUND))?;
+        let name = resolved.alsa_name();
+        // Only a numbered card can be reserved; `default`, `plughw:` and friends go through the
+        // desktop's own plugins.
+        let card = match &resolved {
+            device::Device::Hw { card, .. } => Some((*card, self.device.as_str())),
+            device::Device::Other(_) => None,
+        };
+        let sink = open_reserved(self.reservation.as_ref(), card, || AlsaSink::open(&name, spec))?;
         Ok(Box::new(match &self.on_report {
             Some(handler) => sink.with_report_handler(handler.clone()),
             None => sink,
         }))
+    }
+
+    fn release(&self) {
+        if let Some(slot) = &self.reservation {
+            slot.release();
+        }
     }
 }
 
