@@ -48,6 +48,10 @@ pub enum Command {
     /// [`Event::SeekRejected`] if the track can't do it. Pausing is unaffected: a seek while
     /// paused stays paused.
     Seek(SeekTarget),
+    /// Pauses (if playing) and gives the audio device back to the desktop, so another program can
+    /// use it. The track and the exact position are kept; [`Command::Resume`] takes the device
+    /// again and carries on. Does nothing while stopped.
+    Release,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +79,29 @@ pub struct Status {
     /// What the listener has heard of the current track, as of the last [`Event::Position`].
     pub position: Duration,
     pub duration: Option<Duration>,
+    pub output: OutputState,
+}
+
+/// What the engine is doing with the audio device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutputState {
+    /// Not holding the device: nothing has been played yet, or playback stopped.
+    Closed,
+    Open,
+    /// A track is loaded but the device was handed back (see [`Command::Release`]); `by` is the
+    /// program that asked for it, if one did. Resuming takes the device again.
+    Released { by: Option<String> },
+}
+
+/// Why the engine gave the audio device back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseReason {
+    /// It had been paused for longer than the configured time.
+    Idle,
+    /// [`Command::Release`].
+    Command,
+    /// Another program asked for the device.
+    Requested,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +132,10 @@ pub enum Event {
     SeekRejected { reason: String },
     /// The supplier has no further track to offer.
     QueueExhausted,
+    /// The engine paused and gave the audio device back; the track and position are kept.
+    OutputReleased { by: Option<String>, reason: ReleaseReason },
+    /// It took the device again, on resume or for a new track.
+    OutputAcquired,
     /// Something went wrong; the engine has stopped, but stays usable.
     Error { message: String },
 }

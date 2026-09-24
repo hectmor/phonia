@@ -10,7 +10,8 @@
 //! calls [`FakeSinkHandle::advance`], like a real `writei`. That holds the audio thread at a known
 //! point, which is what makes "stop/next in the middle of a track" deterministic to test.
 
-use super::{AudioSink, SinkFactory};
+use super::reserve::{DeviceReserver, Reservation, ReserveError};
+use super::{AudioSink, ReleaseHandler, ReleaseRequest, SinkFactory};
 use crate::decode::SourceSpec;
 use anyhow::{Result, bail};
 use std::collections::VecDeque;
@@ -139,6 +140,10 @@ impl AudioSink for FakeSink {
         self.spec
     }
 
+    fn capacity_frames(&self) -> u64 {
+        self.capacity_frames as u64
+    }
+
     fn write(&mut self, samples: &[i32]) -> Result<usize> {
         let channels = self.spec.channels as usize;
         let frames = (samples.len() / channels).min(self.period_frames);
@@ -222,27 +227,62 @@ enum Mode {
 pub struct FakeSinkFactory {
     mode: Mode,
     handles: Mutex<Vec<FakeSinkHandle>>,
+    releases: Mutex<u32>,
+    /// Errors the next opens fail with, oldest first.
+    open_failures: Mutex<VecDeque<String>>,
+    handler: Mutex<Option<ReleaseHandler>>,
 }
 
 impl FakeSinkFactory {
     /// Sinks that play every write immediately.
     pub fn autoplay() -> Arc<Self> {
-        Arc::new(Self { mode: Mode::Autoplay, handles: Mutex::new(Vec::new()) })
+        Arc::new(Self::with_mode(Mode::Autoplay))
     }
 
     /// Sinks that block on a full queue until the test advances them.
     pub fn blocking() -> Arc<Self> {
-        Arc::new(Self { mode: Mode::Blocking, handles: Mutex::new(Vec::new()) })
+        Arc::new(Self::with_mode(Mode::Blocking))
+    }
+
+    fn with_mode(mode: Mode) -> Self {
+        Self {
+            mode,
+            handles: Mutex::new(Vec::new()),
+            releases: Mutex::new(0),
+            open_failures: Mutex::new(VecDeque::new()),
+            handler: Mutex::new(None),
+        }
     }
 
     /// One handle per sink opened so far, oldest first.
     pub fn handles(&self) -> Vec<FakeSinkHandle> {
         self.handles.lock().unwrap().clone()
     }
+
+    /// How many times the engine gave the card back.
+    pub fn release_count(&self) -> u32 {
+        *self.releases.lock().unwrap()
+    }
+
+    /// Makes the next open fail with `message`, as a refused reservation would.
+    pub fn fail_next_open(&self, message: &str) {
+        self.open_failures.lock().unwrap().push_back(message.to_string());
+    }
+
+    /// Another program asking for the card, as the D-Bus side would relay it. Blocks until the
+    /// engine answers, and returns whether it gave the card up. `false` too if no engine is
+    /// listening.
+    pub fn request_release(&self, by: Option<&str>, priority: i32) -> bool {
+        let handler = self.handler.lock().unwrap().clone();
+        handler.is_some_and(|handler| handler(ReleaseRequest { by: by.map(str::to_string), priority }))
+    }
 }
 
 impl SinkFactory for FakeSinkFactory {
     fn open(&self, spec: SourceSpec) -> Result<Box<dyn AudioSink>> {
+        if let Some(message) = self.open_failures.lock().unwrap().pop_front() {
+            bail!("{message}");
+        }
         let (sink, handle) = FakeSink::new(spec);
         match self.mode {
             Mode::Autoplay => handle.set_autoplay(true),
@@ -250,6 +290,64 @@ impl SinkFactory for FakeSinkFactory {
         }
         self.handles.lock().unwrap().push(handle);
         Ok(Box::new(sink))
+    }
+
+    fn release(&self) {
+        *self.releases.lock().unwrap() += 1;
+    }
+
+    fn on_release_request(&self, handler: ReleaseHandler) {
+        *self.handler.lock().unwrap() = Some(handler);
+    }
+}
+
+/// A [`DeviceReserver`] that records what was reserved and released, with scripted outcomes.
+pub struct FakeReserver {
+    log: Arc<Mutex<Vec<String>>>,
+    /// Outcomes of the next acquires, oldest first; once empty, acquires are granted (`took_over`
+    /// false). `Ok(took_over)` grants the card.
+    script: Mutex<VecDeque<Result<bool, ReserveError>>>,
+}
+
+impl FakeReserver {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self { log: Arc::new(Mutex::new(Vec::new())), script: Mutex::new(VecDeque::new()) })
+    }
+
+    pub fn script(&self, outcome: Result<bool, ReserveError>) {
+        self.script.lock().unwrap().push_back(outcome);
+    }
+
+    /// `acquire N` / `release N`, in order.
+    pub fn log(&self) -> Vec<String> {
+        self.log.lock().unwrap().clone()
+    }
+}
+
+struct FakeReservation {
+    card: u32,
+    took_over: bool,
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+impl Reservation for FakeReservation {
+    fn took_over(&self) -> bool {
+        self.took_over
+    }
+}
+
+impl Drop for FakeReservation {
+    fn drop(&mut self) {
+        self.log.lock().unwrap().push(format!("release {}", self.card));
+    }
+}
+
+impl DeviceReserver for FakeReserver {
+    fn acquire(&self, card: u32, _device_name: &str) -> std::result::Result<Box<dyn Reservation>, ReserveError> {
+        let outcome = self.script.lock().unwrap().pop_front().unwrap_or(Ok(false));
+        let took_over = outcome?;
+        self.log.lock().unwrap().push(format!("acquire {card}"));
+        Ok(Box::new(FakeReservation { card, took_over, log: self.log.clone() }))
     }
 }
 

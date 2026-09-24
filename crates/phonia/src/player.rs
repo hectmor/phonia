@@ -3,7 +3,7 @@
 
 use anyhow::{Result, anyhow};
 use phonia_core::control::Controller;
-use phonia_core::engine::{Command, Engine, EndReason, Event, SeekTarget, State, TrackSupplier};
+use phonia_core::engine::{self, Command, Engine, EndReason, Event, SeekTarget, State, TrackSupplier};
 use phonia_core::output::alsa::AlsaSinkFactory;
 use phonia_core::queue::{ItemId, Queue, QueueSnapshot, Repeat};
 use std::io::Write;
@@ -22,6 +22,7 @@ Commands (type one and press Enter):
   f  forward 10 s                r  back 10 s       s <seconds>  seek to a position
   l  list the queue              z  shuffle on/off  x  repeat off/all/one
   d <n>  remove entry n          j <n>  jump to entry n
+  o  pause and give the DAC back (p takes it again)
   q  quit                        ?  this help";
 
 /// What the user asked for on the keyboard.
@@ -32,6 +33,8 @@ enum Key {
     Previous,
     Forward,
     Rewind,
+    /// Pause and hand the sound card back to the desktop.
+    Release,
     SeekTo(Duration),
     List,
     ToggleShuffle,
@@ -52,6 +55,7 @@ fn parse_key(line: &str) -> Key {
         "b" => Key::Previous,
         "f" => Key::Forward,
         "r" => Key::Rewind,
+        "o" => Key::Release,
         "q" => Key::Quit,
         "l" => Key::List,
         "z" => Key::ToggleShuffle,
@@ -82,6 +86,7 @@ fn command_for(key: &Key) -> Option<Command> {
         Key::Previous => Command::Previous,
         Key::Forward => Command::Seek(SeekTarget::Forward(SEEK_STEP)),
         Key::Rewind => Command::Seek(SeekTarget::Backward(SEEK_STEP)),
+        Key::Release => Command::Release,
         Key::SeekTo(at) => Command::Seek(SeekTarget::Absolute(*at)),
         Key::List
         | Key::ToggleShuffle
@@ -191,13 +196,13 @@ impl Console {
 
 /// Plays the queue from its start until it is exhausted or the user quits. Ctrl+C stops
 /// playback and releases the device; a second one exits at once.
-pub async fn run(queue: Arc<Queue>, device: &str, interactive: bool) -> Result<()> {
+pub async fn run(queue: Arc<Queue>, device: &str, interactive: bool, options: engine::Options) -> Result<()> {
     let sinks = Arc::new(AlsaSinkFactory::new(device).on_report(Arc::new(|report| {
         println!();
         println!("{}", report.to_text());
     })));
     let supplier: Arc<dyn TrackSupplier> = queue.clone();
-    let engine = Engine::spawn(tokio::runtime::Handle::current(), sinks, supplier)?;
+    let engine = Engine::spawn_with_options(tokio::runtime::Handle::current(), sinks, supplier, options)?;
     let controller = Controller::new(engine, queue.clone());
     let mut events = controller.subscribe_events();
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -296,6 +301,9 @@ fn handle_event(event: Event, interactive: bool, console: &mut Console, error: &
         Event::StateChanged(state) if interactive => console.line(format!("[{state:?}]")),
         Event::Seeked { position } if interactive => console.line(format!("Seeked to {:.1}s", position.as_secs_f64())),
         Event::SeekRejected { reason } => console.line(format!("Seek rejected: {reason}")),
+        Event::OutputReleased { by: Some(by), .. } => console.line(format!("DAC released to {by}")),
+        Event::OutputReleased { by: None, .. } => console.line("DAC released"),
+        Event::OutputAcquired => console.line("DAC taken again"),
         Event::QueueExhausted => console.line("End of the queue."),
         Event::Error { message } => {
             error.get_or_insert(message);
@@ -313,6 +321,7 @@ mod tests {
     fn simple_keys() {
         assert_eq!(parse_key("p"), Key::TogglePause);
         assert_eq!(parse_key(""), Key::TogglePause, "Enter alone toggles pause");
+        assert_eq!(parse_key("o"), Key::Release);
         assert_eq!(parse_key("  n \n"), Key::Next);
         assert_eq!(parse_key("b"), Key::Previous);
         assert_eq!(parse_key("f"), Key::Forward);

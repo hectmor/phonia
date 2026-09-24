@@ -196,7 +196,7 @@ async fn run_play_file(
     }
     queue.set_shuffle(shuffle);
     queue.set_repeat(repeat);
-    player::run(queue, device, interactive).await
+    player::run(queue, device, interactive, player_options(settings)).await
 }
 
 async fn run_play(
@@ -228,5 +228,13 @@ async fn run_play(
     }
     queue.set_shuffle(shuffle);
     queue.set_repeat(repeat);
-    player::run(queue, device, interactive).await
+    player::run(queue, device, interactive, player_options(settings)).await
+}
+
+/// What the settings say about how the engine treats the sound card.
+fn player_options(settings: &phonia_core::config::Settings) -> phonia_core::engine::Options {
+    phonia_core::engine::Options {
+        release_after_pause: settings.release_after_pause.value.duration(),
+        ..phonia_core::engine::Options::default()
+    }
 }

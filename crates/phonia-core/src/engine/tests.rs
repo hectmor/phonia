@@ -168,10 +168,13 @@ impl Harness {
     }
 
     fn with_position_interval(tracks: Vec<TestTrack>, sinks: Arc<FakeSinkFactory>, interval: Duration) -> Self {
+        Self::with_options(tracks, sinks, Options { position_interval: interval, ..Options::default() })
+    }
+
+    fn with_options(tracks: Vec<TestTrack>, sinks: Arc<FakeSinkFactory>, options: Options) -> Self {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
         let engine =
-            Engine::spawn_with_position_interval(rt.handle().clone(), sinks.clone(), TestSupplier::new(tracks), interval)
-                .unwrap();
+            Engine::spawn_with_options(rt.handle().clone(), sinks.clone(), TestSupplier::new(tracks), options).unwrap();
         let (events, raw_events) = (engine.subscribe(), engine.subscribe());
         Self { engine, sinks, events, raw_events, _rt: rt }
     }
@@ -261,7 +264,14 @@ impl Harness {
 }
 
 fn stopped_status() -> Status {
-    Status { state: State::Stopped, track: None, spec: None, position: Duration::ZERO, duration: None }
+    Status {
+        state: State::Stopped,
+        track: None,
+        spec: None,
+        position: Duration::ZERO,
+        duration: None,
+        output: OutputState::Closed,
+    }
 }
 
 fn label(event: &Event) -> String {
@@ -272,6 +282,8 @@ fn label(event: &Event) -> String {
         Event::Seeked { position } => format!("seeked:{position:?}"),
         Event::SeekRejected { reason } => format!("seek-rejected:{reason}"),
         Event::QueueExhausted => "exhausted".to_string(),
+        Event::OutputReleased { by, reason } => format!("released:{}:{reason:?}", by.as_deref().unwrap_or("-")),
+        Event::OutputAcquired => "acquired".to_string(),
         Event::Error { message } => format!("error:{message}"),
         Event::Position { .. } => unreachable!("positions are filtered out before labelling"),
     }
@@ -1135,4 +1147,351 @@ fn a_seek_whose_reopening_fails_stops_the_engine_with_an_error() {
         ]
     );
     assert_eq!(h.engine.status().state, State::Stopped);
+}
+
+// ---- handing the audio device back ---------------------------------------------------------
+
+fn is_released(event: &Event) -> bool {
+    matches!(event, Event::OutputReleased { .. })
+}
+
+fn is_paused(event: &Event) -> bool {
+    matches!(event, Event::StateChanged(State::Paused))
+}
+
+/// Everything the DAC played on every sink so far, in order.
+fn played_on_all(h: &Harness) -> Vec<i32> {
+    h.sinks.handles().iter().flat_map(FakeSinkHandle::played).collect()
+}
+
+/// Plays `id` until the writer is stuck, then releases the device and waits for the report.
+fn release_mid_track(h: &mut Harness, id: &str) -> FakeSinkHandle {
+    let sink = play_until_queue_is_full(h, id);
+    send_and_unblock(h, &sink, Command::Release);
+    h.events_until(is_released);
+    sink
+}
+
+#[test]
+fn releasing_pauses_closes_the_device_and_gives_the_card_back() {
+    let mut h = Harness::new(vec![TestTrack::pcm("a", 30_000)], FakeSinkFactory::blocking());
+    let sink = play_until_queue_is_full(&mut h, "a");
+    assert_eq!(h.engine.status().output, OutputState::Open);
+
+    send_and_unblock(&h, &sink, Command::Release);
+    assert_eq!(
+        h.labels_until(is_released),
+        ["state:Playing", "state:Paused", "released:-:Command"],
+        "paused first, then the device is handed back"
+    );
+    assert_eq!(h.sinks.release_count(), 1);
+    let status = h.engine.status();
+    assert_eq!((status.state, status.output), (State::Paused, OutputState::Released { by: None }));
+    assert!(status.track.is_some(), "the track is kept");
+    assert_eq!(h.sinks.handles().len(), 1, "nothing was reopened");
+}
+
+#[test]
+fn what_was_heard_is_the_position_after_releasing_and_nothing_is_lost_on_resuming() {
+    let frames = 30_000;
+    let mut h = Harness::new(vec![TestTrack::pcm("a", frames)], FakeSinkFactory::blocking());
+    let sink = release_mid_track(&mut h, "a");
+
+    let heard_frames = sink.played().len() / 2;
+    assert!(sink.queued_frames() > 0, "the test needs audio in the device that was not heard");
+    assert_eq!(h.engine.status().position, frames_to_duration(heard_frames as u64, 48_000));
+
+    h.send(Command::Resume);
+    assert_eq!(h.labels_until(|e| matches!(e, Event::StateChanged(State::Playing))), ["acquired", "state:Playing"]);
+    assert_eq!(h.sinks.handles().len(), 2, "the device was opened again");
+    assert_eq!(h.engine.status().output, OutputState::Open);
+
+    h.sink(1).set_blocking(false);
+    h.labels_until(is_stopped);
+    assert_eq!(played_on_all(&h), ramp(frames), "no sample lost or repeated across the release");
+}
+
+#[test]
+fn a_pause_that_was_already_in_place_can_be_released_too() {
+    let frames = 30_000;
+    let mut h = Harness::new(vec![TestTrack::pcm("a", frames)], FakeSinkFactory::blocking());
+    let sink = play_until_queue_is_full(&mut h, "a");
+    send_and_unblock(&h, &sink, Command::Pause);
+    h.events_until(is_paused);
+
+    h.send(Command::Release);
+    h.events_until(is_released);
+    h.send(Command::Resume);
+    h.events_until(|e| matches!(e, Event::StateChanged(State::Playing)));
+
+    h.sink(1).set_blocking(false);
+    h.labels_until(is_stopped);
+    assert_eq!(played_on_all(&h), ramp(frames));
+}
+
+#[test]
+fn a_stream_that_cannot_rewind_continues_exactly_too() {
+    let frames = 60_000;
+    let mut h = Harness::new(
+        vec![TestTrack::wav("a", frames).seekable(SeekMode::ForwardOnly)],
+        FakeSinkFactory::blocking(),
+    );
+    release_mid_track(&mut h, "a");
+
+    h.send(Command::Resume);
+    h.events_until(|e| matches!(e, Event::StateChanged(State::Playing)));
+    h.sink(1).set_blocking(false);
+    h.labels_until(is_stopped);
+    assert_eq!(played_on_all(&h), wav_from(0, frames), "the unheard audio came from memory, not from the stream");
+}
+
+#[test]
+fn a_release_before_the_track_is_ready_starts_it_paused_and_lets_go() {
+    let mut h = Harness::new(
+        vec![TestTrack::pcm("a", 10_000).slow(Duration::from_millis(150))],
+        FakeSinkFactory::blocking(),
+    );
+    h.play("a");
+    h.send(Command::Release);
+
+    assert_eq!(
+        h.labels_until(is_released),
+        ["state:Loading", "started:a", "state:Paused", "released:-:Command"]
+    );
+    assert_eq!(h.sinks.release_count(), 1);
+    assert_eq!(h.engine.status().position, Duration::ZERO);
+}
+
+#[test]
+fn releasing_with_nothing_loaded_does_nothing() {
+    let mut h = Harness::new(vec![TestTrack::pcm("a", 1_000)], FakeSinkFactory::autoplay());
+    h.send(Command::Release);
+    h.assert_quiet_for(Duration::from_millis(100));
+    assert_eq!(h.engine.status(), stopped_status());
+}
+
+#[test]
+fn stopping_while_released_clears_the_output_state() {
+    let mut h = Harness::new(vec![TestTrack::pcm("a", 30_000)], FakeSinkFactory::blocking());
+    release_mid_track(&mut h, "a");
+
+    h.send(Command::Stop);
+    h.events_until(is_stopped);
+    assert_eq!(h.engine.status().output, OutputState::Closed);
+}
+
+#[test]
+fn a_new_track_while_released_takes_the_device_again() {
+    let mut h = Harness::new(
+        vec![TestTrack::pcm("a", 30_000), TestTrack::pcm("b", 30_000)],
+        FakeSinkFactory::blocking(),
+    );
+    release_mid_track(&mut h, "a");
+
+    h.send(Command::Next);
+    assert_eq!(
+        h.labels_until(|e| matches!(e, Event::StateChanged(State::Playing))),
+        ["ended:a:Interrupted", "state:Loading", "acquired", "started:b", "state:Playing"]
+    );
+    assert_eq!(h.engine.status().output, OutputState::Open);
+    h.sink(1).set_blocking(false);
+}
+
+#[test]
+fn shutting_down_while_released_does_not_hang() {
+    let mut h = Harness::new(vec![TestTrack::pcm("a", 30_000)], FakeSinkFactory::blocking());
+    release_mid_track(&mut h, "a");
+    h.engine.shutdown();
+}
+
+#[test]
+fn a_seek_while_released_moves_the_position_and_resumes_from_there() {
+    let frames = 100_000;
+    let mut h = Harness::new(
+        vec![TestTrack::pcm("a", frames).seekable(SeekMode::InPlace)],
+        FakeSinkFactory::blocking(),
+    );
+    release_mid_track(&mut h, "a");
+
+    h.send(Command::Seek(SeekTarget::Absolute(secs(1))));
+    h.events_until(|e| matches!(e, Event::Seeked { .. }));
+    let status = h.engine.status();
+    assert_eq!((status.state, status.output, status.position), (State::Paused, OutputState::Released { by: None }, secs(1)));
+
+    h.send(Command::Resume);
+    h.events_until(|e| matches!(e, Event::StateChanged(State::Playing)));
+    h.sink(1).set_blocking(false);
+    h.labels_until(is_stopped);
+    assert_eq!(h.sink(1).played(), ramp(frames)[48_000 * 2..], "playback resumes exactly at the target");
+}
+
+#[test]
+fn a_resume_the_holder_refuses_stays_paused_and_can_be_retried() {
+    let frames = 30_000;
+    let mut h = Harness::new(vec![TestTrack::pcm("a", frames)], FakeSinkFactory::blocking());
+    release_mid_track(&mut h, "a");
+
+    h.sinks.fail_next_open("the DAC hw:2,0 is held by jackd, which refused to release it");
+    h.send(Command::Resume);
+    let Event::Error { message } = h.next_event() else { panic!("expected the refusal to be reported") };
+    assert!(message.contains("jackd"), "{message}");
+    h.assert_quiet_for(Duration::from_millis(100));
+    let status = h.engine.status();
+    assert_eq!((status.state, status.output), (State::Paused, OutputState::Released { by: None }));
+    assert!(status.track.is_some(), "the track and position survive a refusal");
+
+    h.send(Command::Resume);
+    h.events_until(|e| matches!(e, Event::StateChanged(State::Playing)));
+    h.sink(1).set_blocking(false);
+    h.labels_until(is_stopped);
+    assert_eq!(played_on_all(&h), ramp(frames), "the retry continues exactly where the listener was");
+}
+
+// ---- when the pause lasts -----------------------------------------------------------------
+
+fn with_release_after(delay: Option<Duration>) -> Options {
+    Options { release_after_pause: delay, ..Options::default() }
+}
+
+#[test]
+fn a_long_enough_pause_gives_the_device_back() {
+    let mut h = Harness::with_options(
+        vec![TestTrack::pcm("a", 30_000)],
+        FakeSinkFactory::blocking(),
+        with_release_after(Some(Duration::from_millis(80))),
+    );
+    let sink = play_until_queue_is_full(&mut h, "a");
+    send_and_unblock(&h, &sink, Command::Pause);
+    assert_eq!(h.labels_until(is_released), ["state:Playing", "state:Paused", "released:-:Idle"]);
+    assert_eq!(h.sinks.release_count(), 1);
+    assert_eq!(h.engine.status().output, OutputState::Released { by: None });
+}
+
+#[test]
+fn resuming_before_the_time_is_up_keeps_the_device() {
+    let mut h = Harness::with_options(
+        vec![TestTrack::pcm("a", 30_000)],
+        FakeSinkFactory::blocking(),
+        with_release_after(Some(Duration::from_millis(400))),
+    );
+    let sink = play_until_queue_is_full(&mut h, "a");
+    send_and_unblock(&h, &sink, Command::Pause);
+    h.events_until(is_paused);
+    std::thread::sleep(Duration::from_millis(100));
+    h.send(Command::Resume);
+    h.events_until(|e| matches!(e, Event::StateChanged(State::Playing)));
+
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(h.sinks.release_count(), 0);
+    assert_eq!(h.engine.status().output, OutputState::Open);
+    sink.set_blocking(false);
+}
+
+#[test]
+fn zero_gives_the_device_back_on_every_pause() {
+    let mut h = Harness::with_options(
+        vec![TestTrack::pcm("a", 30_000)],
+        FakeSinkFactory::blocking(),
+        with_release_after(Some(Duration::ZERO)),
+    );
+    let sink = play_until_queue_is_full(&mut h, "a");
+    send_and_unblock(&h, &sink, Command::Pause);
+    h.events_until(is_released);
+}
+
+#[test]
+fn without_a_time_a_pause_keeps_the_device() {
+    let mut h = Harness::with_options(
+        vec![TestTrack::pcm("a", 30_000)],
+        FakeSinkFactory::blocking(),
+        with_release_after(None),
+    );
+    let sink = play_until_queue_is_full(&mut h, "a");
+    send_and_unblock(&h, &sink, Command::Pause);
+    h.events_until(is_paused);
+    h.assert_quiet_for(Duration::from_millis(300));
+    assert_eq!(h.sinks.release_count(), 0);
+    sink.set_blocking(false);
+}
+
+// ---- another program asks for the card ----------------------------------------------------
+
+/// Asks for the card from another thread, as the D-Bus side does, since the call waits for the
+/// engine's answer.
+fn request_release(h: &Harness, by: &str, priority: i32) -> std::thread::JoinHandle<bool> {
+    let sinks = h.sinks.clone();
+    let by = by.to_string();
+    std::thread::spawn(move || sinks.request_release(Some(&by), priority))
+}
+
+#[test]
+fn a_program_that_matters_more_gets_the_device_and_playback_pauses() {
+    let frames = 30_000;
+    let mut h = Harness::new(vec![TestTrack::pcm("a", frames)], FakeSinkFactory::blocking());
+    let sink = play_until_queue_is_full(&mut h, "a");
+
+    let asked = request_release(&h, "jackd", 99);
+    std::thread::sleep(Duration::from_millis(50));
+    sink.advance(PERIOD);
+    assert!(asked.join().unwrap(), "the request is granted");
+
+    assert_eq!(h.labels_until(is_released), ["state:Playing", "state:Paused", "released:jackd:Requested"]);
+    assert_eq!(h.sinks.release_count(), 1);
+    assert_eq!(h.engine.status().output, OutputState::Released { by: Some("jackd".into()) });
+
+    h.assert_quiet_for(Duration::from_millis(100)); // and it does not start again by itself
+    h.send(Command::Resume);
+    h.events_until(|e| matches!(e, Event::StateChanged(State::Playing)));
+    h.sink(1).set_blocking(false);
+    h.labels_until(is_stopped);
+    assert_eq!(played_on_all(&h), ramp(frames));
+}
+
+#[test]
+fn a_program_that_matters_no_more_than_phonia_is_refused_and_playback_carries_on() {
+    let mut h = Harness::new(vec![TestTrack::pcm("a", 30_000)], FakeSinkFactory::blocking());
+    let sink = play_until_queue_is_full(&mut h, "a");
+
+    for priority in [-20, 0, crate::output::reserve::PRIORITY] {
+        assert!(!h.sinks.request_release(Some("pulseaudio"), priority), "priority {priority}");
+    }
+    assert_eq!(h.engine.status().state, State::Playing);
+    assert_eq!(h.sinks.release_count(), 0);
+    sink.set_blocking(false);
+}
+
+#[test]
+fn a_request_while_the_track_loads_is_answered_once_the_device_was_given_up() {
+    let h = Harness::new(
+        vec![TestTrack::pcm("a", 10_000).slow(Duration::from_millis(150))],
+        FakeSinkFactory::blocking(),
+    );
+    h.play("a");
+    let asked = request_release(&h, "jackd", 99);
+    assert!(asked.join().unwrap());
+    assert_eq!(h.sinks.release_count(), 1, "the card had been given back by the time the answer came");
+    assert_eq!(h.engine.status().output, OutputState::Released { by: Some("jackd".into()) });
+}
+
+#[test]
+fn a_request_while_stopped_is_granted_at_once() {
+    let h = Harness::new(vec![], FakeSinkFactory::autoplay());
+    assert!(request_release(&h, "jackd", 99).join().unwrap());
+}
+
+#[test]
+fn keeping_the_same_format_or_changing_it_never_hands_the_card_back_between_tracks() {
+    let mut h = Harness::new(
+        vec![TestTrack::pcm_with("a", 2_000, SPEC_48K), TestTrack::pcm_with("b", 30_000, SPEC_96K)],
+        FakeSinkFactory::blocking(),
+    );
+    h.play("a");
+    h.events_until(is_started_label("started:b"));
+    wait_until_the_writer_is_blocked(&h.sink(1));
+    assert_eq!(h.sinks.handles().len(), 2);
+    assert_eq!(h.sinks.release_count(), 0, "a new sink for a new format keeps the reservation");
+
+    h.sink(1).set_blocking(false);
+    h.labels_until(is_stopped);
+    assert_eq!(h.sinks.release_count(), 1, "the card goes back once, when playback ends");
 }

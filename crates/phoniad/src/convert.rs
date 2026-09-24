@@ -3,7 +3,7 @@
 //! what clients see by accident.
 
 use phonia_core::decode::SourceSpec;
-use phonia_core::engine::{self, EndReason, SeekTarget};
+use phonia_core::engine::{self, EndReason, OutputState, ReleaseReason, SeekTarget};
 use phonia_core::output::alsa::{ProcReading, SinkReport};
 use phonia_core::queue::{self, ItemId, QueueSnapshot};
 use phonia_ipc as ipc;
@@ -96,6 +96,19 @@ pub fn status_dto(status: &engine::Status, queue: &QueueSnapshot) -> ipc::Status
         spec: status.spec.map(spec),
         position_ms: ms(status.position),
         duration_ms: status.duration.map(ms),
+        output: match &status.output {
+            OutputState::Closed => ipc::Output::Closed,
+            OutputState::Open => ipc::Output::Open,
+            OutputState::Released { by } => ipc::Output::Released { by: by.clone() },
+        },
+    }
+}
+
+fn release_reason(reason: ReleaseReason) -> ipc::ReleaseReason {
+    match reason {
+        ReleaseReason::Idle => ipc::ReleaseReason::Idle,
+        ReleaseReason::Command => ipc::ReleaseReason::Command,
+        ReleaseReason::Requested => ipc::ReleaseReason::Requested,
     }
 }
 
@@ -136,6 +149,10 @@ pub fn event(event: &engine::Event, queue: &QueueSnapshot) -> ipc::Event {
         engine::Event::Seeked { position } => ipc::Event::Seeked { position_ms: ms(*position) },
         engine::Event::SeekRejected { reason } => ipc::Event::SeekRejected { reason: reason.clone() },
         engine::Event::QueueExhausted => ipc::Event::QueueExhausted,
+        engine::Event::OutputReleased { by, reason } => {
+            ipc::Event::OutputReleased { by: by.clone(), reason: release_reason(*reason) }
+        }
+        engine::Event::OutputAcquired => ipc::Event::OutputAcquired,
         engine::Event::Error { message } => ipc::Event::Error { message: message.clone() },
     }
 }
@@ -185,6 +202,7 @@ mod tests {
             spec: Some(SourceSpec { sample_rate: 96_000, channels: 2, bits_per_sample: 24 }),
             position: Duration::from_millis(1_500),
             duration: Some(Duration::from_secs(215)),
+            output: OutputState::Released { by: Some("jackd".into()) },
         };
         let dto = status_dto(&status, &snapshot());
         let track = dto.track.unwrap();
@@ -192,6 +210,18 @@ mod tests {
         assert_eq!(track.source.as_deref(), Some("file:/m/a.flac"), "the wire names the source, never the engine's reference");
         assert_eq!((dto.position_ms, dto.state), (1_500, ipc::State::Playing));
         assert_eq!(dto.spec.unwrap().sample_rate, 96_000);
+        assert_eq!(dto.output, ipc::Output::Released { by: Some("jackd".into()) });
+    }
+
+    #[test]
+    fn output_events_map_to_wire_events() {
+        let q = snapshot();
+        let released = engine::Event::OutputReleased { by: Some("jackd".into()), reason: ReleaseReason::Requested };
+        assert_eq!(
+            event(&released, &q),
+            ipc::Event::OutputReleased { by: Some("jackd".into()), reason: ipc::ReleaseReason::Requested }
+        );
+        assert_eq!(event(&engine::Event::OutputAcquired, &q), ipc::Event::OutputAcquired);
     }
 
     #[test]

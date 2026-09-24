@@ -46,6 +46,36 @@ pub struct Status {
     /// What has been heard of the current track.
     pub position_ms: u64,
     pub duration_ms: Option<u64>,
+    /// What the daemon is doing with the audio device. Absent from daemons older than 1.1.
+    #[serde(default)]
+    pub output: Output,
+}
+
+/// The daemon's hold on the audio device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Output {
+    /// Not holding it: nothing played yet, or playback stopped.
+    #[default]
+    Closed,
+    Open,
+    /// Handed back to the desktop while a track stays loaded; resuming takes it again. `by` names
+    /// the program that asked for it, if one did.
+    Released { by: Option<String> },
+}
+
+/// Why the daemon handed the audio device back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseReason {
+    /// Paused for longer than the configured time.
+    Idle,
+    /// A client asked (`release`).
+    Command,
+    /// Another program asked for the device.
+    Requested,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

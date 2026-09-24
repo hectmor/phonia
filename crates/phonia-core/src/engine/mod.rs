@@ -13,17 +13,26 @@ mod types;
 mod tests;
 
 pub use supplier::{Advance, LoadedTrack, SeekMode, TrackMedia, TrackOpener, TrackSupplier};
-pub use types::{Command, EndReason, Event, SeekTarget, State, Status, TrackMeta, TrackRef};
+pub use types::{
+    Command, EndReason, Event, OutputState, ReleaseReason, SeekTarget, State, Status, TrackMeta, TrackRef,
+};
 
 use std::time::Duration;
 
 /// How often a playing track reports its position.
 const POSITION_INTERVAL: Duration = Duration::from_millis(250);
 
+/// How long a pause lasts before the audio device is handed back to the desktop.
+pub const RELEASE_AFTER_PAUSE: Duration = Duration::from_secs(10);
+
+/// How long a program asking for the audio device waits for the engine to answer.
+const RELEASE_ANSWER_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// `Previous` restarts the current track instead of going back once it has played this long.
 pub const PREVIOUS_RESTART_AFTER: Duration = Duration::from_secs(3);
 
-use crate::output::SinkFactory;
+use crate::output::reserve;
+use crate::output::{ReleaseRequest, SinkFactory};
 use anyhow::{Context as _, Result, anyhow};
 use audio_thread::{Context, Msg};
 use std::sync::mpsc;
@@ -35,6 +44,22 @@ use tokio::sync::{broadcast, watch};
 /// A slow subscriber misses events (`Lagged`) rather than holding the audio thread back.
 const EVENT_CAPACITY: usize = 256;
 
+/// Tunables of an [`Engine`].
+#[derive(Debug, Clone, Copy)]
+pub struct Options {
+    /// How often a playing track reports its position; zero reports after every write.
+    pub position_interval: Duration,
+    /// How long a pause lasts before the audio device is handed back to the desktop. `None`
+    /// keeps it for as long as the engine has a track; zero hands it back on every pause.
+    pub release_after_pause: Option<Duration>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self { position_interval: POSITION_INTERVAL, release_after_pause: Some(RELEASE_AFTER_PAUSE) }
+    }
+}
+
 pub struct Engine {
     tx: mpsc::Sender<Msg>,
     events: broadcast::Sender<Event>,
@@ -43,18 +68,29 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Starts the audio thread. `rt` runs the supplier's (possibly slow) `open` calls.
+    /// Starts the audio thread. `rt` runs the supplier's (possibly slow) `open` calls. Pausing
+    /// for [`RELEASE_AFTER_PAUSE`] hands the audio device back.
     pub fn spawn(rt: Handle, sinks: Arc<dyn SinkFactory>, supplier: Arc<dyn TrackSupplier>) -> Result<Self> {
-        Self::spawn_with_position_interval(rt, sinks, supplier, POSITION_INTERVAL)
+        Self::spawn_with_options(rt, sinks, supplier, Options::default())
+    }
+
+    /// Like [`Engine::spawn`], with `options`.
+    pub fn spawn_with_options(
+        rt: Handle,
+        sinks: Arc<dyn SinkFactory>,
+        supplier: Arc<dyn TrackSupplier>,
+        options: Options,
+    ) -> Result<Self> {
+        Self::spawn_inner(rt, sinks, supplier, options)
     }
 
     /// Like [`Engine::spawn`], with a custom interval between position reports; a zero interval
     /// reports after every write, which tests use to observe positions deterministically.
-    pub(crate) fn spawn_with_position_interval(
+    fn spawn_inner(
         rt: Handle,
         sinks: Arc<dyn SinkFactory>,
         supplier: Arc<dyn TrackSupplier>,
-        position_interval: Duration,
+        options: Options,
     ) -> Result<Self> {
         let (tx, rx) = mpsc::channel();
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
@@ -64,7 +100,21 @@ impl Engine {
             spec: None,
             position: Duration::ZERO,
             duration: None,
+            output: OutputState::Closed,
         });
+
+        let request_tx = tx.clone();
+        sinks.on_release_request(Arc::new(move |request: ReleaseRequest| {
+            // The protocol's rule: only a program that matters more than us gets the device.
+            if request.priority <= reserve::PRIORITY {
+                return false;
+            }
+            let (done, answer) = mpsc::channel();
+            if request_tx.send(Msg::ReleaseRequested { by: request.by, done }).is_err() {
+                return false;
+            }
+            answer.recv_timeout(RELEASE_ANSWER_TIMEOUT).unwrap_or(false)
+        }));
 
         let ctx = Context {
             rx,
@@ -74,7 +124,8 @@ impl Engine {
             supplier,
             events: events.clone(),
             status: status_tx,
-            position_interval,
+            position_interval: options.position_interval,
+            release_after_pause: options.release_after_pause,
         };
         let thread = std::thread::Builder::new()
             .name("phonia-audio".into())

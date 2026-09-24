@@ -7,12 +7,14 @@
 
 use super::PREVIOUS_RESTART_AFTER;
 use super::supplier::{Advance, LoadedTrack, SeekMode, TrackMedia, TrackSupplier};
-use super::types::{Command, EndReason, Event, SeekTarget, State, Status, TrackMeta, TrackRef};
+use super::types::{
+    Command, EndReason, Event, OutputState, ReleaseReason, SeekTarget, State, Status, TrackMeta, TrackRef,
+};
 use crate::decode::{Decoder, SourceSpec, duration_to_frames, frames_to_duration};
 use crate::output::{AudioSink, SinkFactory};
 use anyhow::{Context as _, Result, anyhow, bail};
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 use tokio::sync::{broadcast, watch};
@@ -27,6 +29,8 @@ pub(super) enum Msg {
     Loaded { generation: u64, track: Box<LoadedTrack> },
     LoadFailed { generation: u64, error: String },
     QueueExhausted { generation: u64 },
+    /// Another program wants the audio device; `done` gets whether the engine gave it up.
+    ReleaseRequested { by: Option<String>, done: Sender<bool> },
     Shutdown,
 }
 
@@ -39,6 +43,7 @@ pub(super) struct Context {
     pub events: broadcast::Sender<Event>,
     pub status: watch::Sender<Status>,
     pub position_interval: Duration,
+    pub release_after_pause: Option<Duration>,
 }
 
 pub(super) fn run(ctx: Context) {
@@ -49,6 +54,9 @@ pub(super) fn run(ctx: Context) {
         load_task: None,
         pause_when_ready: false,
         sink: None,
+        released: None,
+        release_when_ready: None,
+        paused_at: None,
         current: None,
     }
     .run();
@@ -133,6 +141,9 @@ struct Playing {
     /// The chunk being written to the sink, of which `offset` samples are already in.
     pending: Vec<i32>,
     offset: usize,
+    /// The most recent samples handed to the sink (at least what it can hold queued), so that
+    /// what the listener has not heard yet can be played again after the device was closed.
+    recent: Vec<i32>,
     /// Whether the sink itself was paused. A track that starts paused never touched the sink,
     /// so there is nothing to resume there.
     sink_paused: bool,
@@ -158,7 +169,29 @@ struct AudioThread {
     pause_when_ready: bool,
     /// Kept open between tracks of the same format, so there is no gap or click.
     sink: Option<Box<dyn AudioSink>>,
+    /// The device was handed back while a track is loaded: `Some(who asked)`.
+    released: Option<Option<String>>,
+    /// A release asked for while a track was loading: done as soon as it starts, paused.
+    release_when_ready: Option<Release>,
+    /// When the current pause began.
+    paused_at: Option<Instant>,
     current: Option<Playing>,
+}
+
+/// A request to hand the audio device back.
+struct Release {
+    reason: ReleaseReason,
+    by: Option<String>,
+    /// Told whether the device was given up, when another program is waiting for the answer.
+    done: Option<Sender<bool>>,
+}
+
+impl Release {
+    fn answer(self, given_up: bool) {
+        if let Some(done) = self.done {
+            let _ = done.send(given_up);
+        }
+    }
 }
 
 impl AudioThread {
@@ -171,6 +204,15 @@ impl AudioThread {
                     Ok(msg) => Some(msg),
                     Err(TryRecvError::Empty) => None,
                     Err(TryRecvError::Disconnected) => break,
+                }
+            } else if let Some(deadline) = self.idle_deadline() {
+                match self.ctx.rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                    Ok(msg) => Some(msg),
+                    Err(RecvTimeoutError::Timeout) => {
+                        self.release_output(Release { reason: ReleaseReason::Idle, by: None, done: None });
+                        continue;
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break,
                 }
             } else {
                 match self.ctx.rx.recv() {
@@ -193,6 +235,14 @@ impl AudioThread {
             }
         }
         self.stop();
+    }
+
+    /// When a pause with the device still open has lasted long enough to give the device back.
+    fn idle_deadline(&self) -> Option<Instant> {
+        if self.state != State::Paused || self.sink.is_none() {
+            return None;
+        }
+        Some(self.paused_at? + self.ctx.release_after_pause?)
     }
 
     /// Returns `false` when the thread should exit.
@@ -224,6 +274,12 @@ impl AudioThread {
                 _ => self.resume(),
             },
             Msg::Command(Command::Seek(target)) => self.seek(target),
+            Msg::Command(Command::Release) => {
+                self.release_output(Release { reason: ReleaseReason::Command, by: None, done: None })
+            }
+            Msg::ReleaseRequested { by, done } => {
+                self.release_output(Release { reason: ReleaseReason::Requested, by, done: Some(done) })
+            }
             Msg::Loaded { generation, track } if self.is_awaited(generation) => {
                 let result = if self.state == State::Seeking {
                     self.finish_seek(*track)
@@ -271,6 +327,14 @@ impl AudioThread {
         let channels = playing.spec.channels as usize;
         let frames = sink.write(&playing.pending[playing.offset..])?;
         // A sink that takes nothing from a partial frame would otherwise spin forever.
+        if frames > 0 {
+            let written_to = playing.offset + frames * channels;
+            playing.recent.extend_from_slice(&playing.pending[playing.offset..written_to]);
+            let keep = sink.capacity_frames() as usize * channels;
+            if playing.recent.len() > keep * 2 {
+                playing.recent.drain(..playing.recent.len() - keep);
+            }
+        }
         playing.offset = if frames == 0 { playing.pending.len() } else { playing.offset + frames * channels };
         playing.frames_written += frames as u64;
 
@@ -283,11 +347,9 @@ impl AudioThread {
     /// What the listener has actually heard: everything handed to the device except what it has
     /// not played yet. Counting only what was written would run ahead by the device's buffer.
     fn heard_position(&mut self) -> Duration {
-        let (Some(playing), Some(sink)) = (self.current.as_ref(), self.sink.as_mut()) else {
-            return Duration::ZERO;
-        };
-        // If the device can't say, assume nothing is queued.
-        let queued = sink.delay_frames().unwrap_or(0);
+        let Some(playing) = self.current.as_ref() else { return Duration::ZERO };
+        // If the device can't say, or was handed back, nothing is queued.
+        let queued = self.sink.as_mut().map_or(0, |sink| sink.delay_frames().unwrap_or(0));
         let heard = playing.frames_written.saturating_sub(queued);
         playing.base + frames_to_duration(heard, playing.spec.sample_rate)
     }
@@ -332,9 +394,7 @@ impl AudioThread {
         let spec = source.spec();
         let duration = meta.duration.or_else(|| source.duration());
         if !self.sink.as_ref().is_some_and(|sink| sink.spec() == spec) {
-            // The device can only be opened once, so the old configuration has to go first.
-            self.sink = None;
-            self.sink = Some(self.ctx.sinks.open(spec).context("opening the audio output")?);
+            self.open_sink(spec)?;
         }
 
         self.current = Some(Playing {
@@ -344,6 +404,7 @@ impl AudioThread {
             seek,
             pending: Vec::new(),
             offset: 0,
+            recent: Vec::new(),
             sink_paused: false,
             frames_written: 0,
             base: start,
@@ -356,7 +417,29 @@ impl AudioThread {
         self.pause_when_ready = false;
         self.set_state(state);
         self.emit_position();
+        self.release_if_asked();
         Ok(())
+    }
+
+    /// Opens the device for `spec`, taking it back from the desktop if it had been handed over.
+    fn open_sink(&mut self, spec: SourceSpec) -> Result<()> {
+        // The device can only be opened once, so the old configuration has to go first.
+        self.sink = None;
+        self.sink = Some(self.ctx.sinks.open(spec).context("opening the audio output")?);
+        if self.released.take().is_some() {
+            self.emit(Event::OutputAcquired);
+        }
+        Ok(())
+    }
+
+    /// Hands the device back as soon as the track that was loading when the request came is
+    /// ready (paused).
+    fn release_if_asked(&mut self) {
+        if self.state == State::Paused
+            && let Some(request) = self.release_when_ready.take()
+        {
+            self.release_output(request);
+        }
     }
 
     fn seek(&mut self, target: SeekTarget) {
@@ -455,6 +538,7 @@ impl AudioThread {
             playing.frames_written = 0;
             playing.pending.clear();
             playing.offset = 0;
+            playing.recent.clear();
             playing.position = position;
             // The flush that always precedes this also unpaused the device; while the engine is
             // paused nothing is written until it resumes, so there is nothing to resume in it.
@@ -493,6 +577,7 @@ impl AudioThread {
         self.pause_when_ready = false;
         self.set_state(state);
         self.emit_position();
+        self.release_if_asked();
         Ok(())
     }
 
@@ -518,6 +603,15 @@ impl AudioThread {
         match self.state {
             State::Loading | State::Seeking => self.pause_when_ready = false,
             State::Paused => {
+                if self.sink.is_none()
+                    && let Some(spec) = self.current.as_ref().map(|playing| playing.spec)
+                    && let Err(error) = self.open_sink(spec)
+                {
+                    // Whoever has the device may still refuse. Nothing is lost: the track, the
+                    // position and the audio not yet heard are kept, so a later resume can retry.
+                    self.emit(Event::Error { message: format!("{error:#}") });
+                    return;
+                }
                 if let (Some(playing), Some(sink)) = (self.current.as_mut(), self.sink.as_mut())
                     && playing.sink_paused
                 {
@@ -555,8 +649,72 @@ impl AudioThread {
         self.interrupt_current();
         self.cancel_load();
         self.pause_when_ready = false;
-        self.sink = None;
+        self.close_output();
         self.set_state(State::Stopped);
+    }
+
+    /// Closes the device for good and gives the card back.
+    fn close_output(&mut self) {
+        self.sink = None;
+        self.released = None;
+        if let Some(request) = self.release_when_ready.take() {
+            request.answer(true);
+        }
+        self.ctx.sinks.release();
+    }
+
+    /// Hands the audio device back, keeping the track and the exact position: the audio queued
+    /// in the device but not yet heard is set aside and played first when the device is taken
+    /// again.
+    fn release_output(&mut self, request: Release) {
+        match self.state {
+            State::Loading | State::Seeking => {
+                // The track isn't ready: it starts paused and lets go as soon as it does.
+                self.pause_when_ready = true;
+                if let Some(earlier) = self.release_when_ready.replace(request) {
+                    earlier.answer(false);
+                }
+            }
+            State::Stopped => request.answer(true),
+            State::Playing | State::Paused => {
+                if self.sink.is_none() {
+                    request.answer(true);
+                    return;
+                }
+                self.pause();
+                if self.state != State::Paused {
+                    // Pausing failed and stopped the engine; the device is closed anyway.
+                    request.answer(true);
+                    return;
+                }
+                self.set_aside_unheard();
+                self.sink = None;
+                self.ctx.sinks.release();
+                self.released = Some(request.by.clone());
+                self.emit(Event::OutputReleased { by: request.by.clone(), reason: request.reason });
+                self.publish_status();
+                request.answer(true);
+            }
+        }
+    }
+
+    /// Moves what the device holds but the listener has not heard back into `pending`, and
+    /// rebases the position on what has been heard.
+    fn set_aside_unheard(&mut self) {
+        let (Some(playing), Some(sink)) = (self.current.as_mut(), self.sink.as_mut()) else { return };
+        let channels = playing.spec.channels as usize;
+        let queued = sink.delay_frames().unwrap_or(0) as usize;
+        let keep = queued.min(playing.recent.len() / channels).min(playing.frames_written as usize);
+
+        let mut carried = playing.recent[playing.recent.len() - keep * channels..].to_vec();
+        carried.extend_from_slice(&playing.pending[playing.offset.min(playing.pending.len())..]);
+        playing.pending = carried;
+        playing.offset = 0;
+        playing.base += frames_to_duration(playing.frames_written - keep as u64, playing.spec.sample_rate);
+        playing.frames_written = 0;
+        playing.recent.clear();
+        playing.sink_paused = false;
+        playing.position = playing.base;
     }
 
     fn fail(&mut self, error: anyhow::Error) {
@@ -566,7 +724,7 @@ impl AudioThread {
         }
         self.cancel_load();
         self.pause_when_ready = false;
-        self.sink = None;
+        self.close_output();
         self.set_state(State::Stopped);
     }
 
@@ -585,6 +743,10 @@ impl AudioThread {
     /// Asks the supplier for a track, from `at` if it can, and waits in `state` for the answer.
     fn begin_load(&mut self, target: LoadTarget, at: Duration, state: State, pause_when_ready: bool) {
         self.cancel_load();
+        if let Some(pending) = self.release_when_ready.take() {
+            // Asking for a track again means the device is wanted.
+            pending.answer(false);
+        }
         self.pause_when_ready = pause_when_ready;
         self.set_state(state);
 
@@ -609,6 +771,9 @@ impl AudioThread {
 
     fn set_state(&mut self, state: State) {
         let changed = self.state != state;
+        if changed {
+            self.paused_at = (state == State::Paused).then(Instant::now);
+        }
         self.state = state;
         self.publish_status();
         if changed {
@@ -624,6 +789,11 @@ impl AudioThread {
             spec: playing.map(|p| p.spec),
             position: playing.map_or(Duration::ZERO, |p| p.position),
             duration: playing.and_then(|p| p.duration),
+            output: match (&self.sink, &self.released) {
+                (Some(_), _) => OutputState::Open,
+                (None, Some(by)) => OutputState::Released { by: by.clone() },
+                (None, None) => OutputState::Closed,
+            },
         });
     }
 

@@ -32,6 +32,7 @@ async fn fixture(name: &str, blocking: bool) -> Fixture {
         sinks: sinks.clone(),
         opener: Arc::new(DispatchOpener::new(None)),
         reports: report_rx,
+        engine: Default::default(),
     })
     .unwrap();
     let dir = std::env::temp_dir().join(format!("phoniad-protocol-test-{}-{name}", std::process::id()));
@@ -162,6 +163,7 @@ async fn a_client_connects_and_reads_the_state() {
     let client = f.client().await;
     assert_eq!(client.server().server.name, "phoniad");
     assert_eq!(client.server().protocol, PROTOCOL);
+    assert!(client.server().capabilities.iter().any(|capability| capability == CAP_OUTPUT_RELEASE));
 
     let status = client.status().await.unwrap();
     assert_eq!(status.state, State::Stopped);
@@ -464,6 +466,36 @@ async fn the_bit_perfect_report_reaches_subscribers() {
 }
 
 // ---- playback control ----------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn releasing_hands_the_device_back_and_resuming_takes_it_again() {
+    let f = fixture("release", true).await;
+    let client = f.client().await;
+    let a = f.wav("a.wav", 200_000);
+    let (ids, _, _) = added(client.request(add(&[&a], AddAt::End)).await.unwrap());
+    let (_, mut events) = client.subscribe().await.unwrap();
+
+    client.request(Request::Play { item: Some(ids[0]) }).await.unwrap();
+    events_until(&mut events, |event| matches!(event, Event::TrackStarted { .. })).await;
+    assert_eq!(client.status().await.unwrap().output, Output::Open);
+
+    assert_eq!(client.request(Request::Release).await.unwrap(), Payload::Ack);
+    f.sinks.handles()[0].advance(1024); // lets the blocked write return so the engine sees it
+    let seen = events_until(&mut events, |event| matches!(event, Event::OutputReleased { .. })).await;
+    assert!(matches!(
+        seen.last(),
+        Some((_, Event::OutputReleased { by: None, reason: ReleaseReason::Command }))
+    ));
+    let status = client.status().await.unwrap();
+    assert_eq!((status.state, status.output), (State::Paused, Output::Released { by: None }));
+    assert_eq!(f.sinks.release_count(), 1);
+
+    client.request(Request::Resume).await.unwrap();
+    events_until(&mut events, |event| matches!(event, Event::OutputAcquired)).await;
+    assert_eq!(client.status().await.unwrap().output, Output::Open);
+    f.sinks.handles()[1].set_blocking(false);
+    f.finish().await;
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_seek_with_nothing_playing_is_answered_and_then_reported_as_rejected() {

@@ -62,6 +62,7 @@ required to exist except the audio device:
 [output]
 device = "hw:DS2,0"     # a sound card: `phonia devices` lists them. "auto" = the first USB card.
 mode = "exclusive"      # phonia owns the card, nothing mixes or resamples: bit-perfect (the only mode so far)
+release_after_pause = 10   # seconds a pause lasts before the card is handed back; 0 = on every pause, "never" = keep it
 
 [tidal]
 max_quality = "hires"   # hires | lossless
@@ -103,6 +104,7 @@ phonia ctl queue add song.flac 233059491     # a file, or a TIDAL track id (or t
 phonia ctl queue list
 phonia ctl play                              # or `play 3` for entry 3
 phonia ctl pause | resume | toggle | next | prev | stop
+phonia ctl release                           # pause and hand the DAC back, so another program can use it
 phonia ctl seek 90                           # 1:30; `+10` / `-10` are relative
 phonia ctl shuffle on   /   phonia ctl repeat all
 phonia ctl queue rm 2 | clear | move 3 1
@@ -117,6 +119,16 @@ phonia ctl shutdown
   unreachable) is added without them.
 - `stop` releases the audio device but keeps the queue, so other applications (PipeWire) can use
   the DAC while the daemon is idle.
+- **Sharing the DAC.** In exclusive mode phonia holds the card, so nothing else can play on it. To
+  use it for something else (a video in the browser, say), pause: after `release_after_pause`
+  seconds (10 by default) phonia closes the device and gives the card back, or `phonia ctl release`
+  does it at once. The track and the exact position are kept, and the audio that had been queued
+  in the DAC but not yet heard is kept in memory, so `resume` takes the card again (and checks
+  bit-perfect again) and continues from the very sample where you were, for a file or a TIDAL
+  stream alike. If someone else has the card and won't let go, `resume` says who and phonia stays
+  paused, ready to try again. `phonia ctl status` shows `paused (DAC released)`. `phonia play
+  --interactive` has `o` for the same. A pause shorter than the time keeps the card, so a quick
+  pause never makes the next `resume` slower.
 - The socket is `$XDG_RUNTIME_DIR/phonia/phoniad.sock` (override with `[daemon] socket` in the config
   file, or `--socket`; `phoniad` and `phonia ctl` read the same file), in a directory only you can enter, mode `0600`, and only connections from your own
   user are served. A second `phoniad` refuses to start while one answers; a socket left by a
@@ -130,7 +142,7 @@ One connection carries requests, their responses and, once subscribed, events, a
 JSON, so `socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/phonia/phoniad.sock` is a working client:
 
 ```
-< {"type":"hello","protocol":{"major":1,"minor":0},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":[]}
+< {"type":"hello","protocol":{"major":1,"minor":1},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release"]}
 > {"id":1,"request":{"type":"hello","protocol":{"major":1,"minor":0},"client":{"name":"me","version":"0"}}}
 < {"type":"response","id":1,"ok":{"type":"ack"}}
 > {"id":2,"request":{"type":"subscribe"}}

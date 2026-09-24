@@ -1,10 +1,13 @@
 //! The messages: what a client may ask, and what the daemon answers and announces.
 
-use crate::dto::{ItemId, Queue, Repeat, SinkReport, Spec, State, Status, EndReason};
+use crate::dto::{EndReason, ItemId, Queue, ReleaseReason, Repeat, SinkReport, Spec, State, Status};
 use serde::{Deserialize, Serialize};
 
+/// Capability: the daemon understands `release` and reports `output` (protocol 1.1).
+pub const CAP_OUTPUT_RELEASE: &str = "output_release";
+
 /// The protocol version this crate speaks.
-pub const PROTOCOL: Version = Version { major: 1, minor: 0 };
+pub const PROTOCOL: Version = Version { major: 1, minor: 1 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Version {
@@ -42,7 +45,7 @@ pub struct RequestId(pub u64);
 pub struct ServerHello {
     pub protocol: Version,
     pub server: ServerInfo,
-    /// Optional features this daemon has, so clients can adapt (none yet).
+    /// Optional features this daemon has, so clients can adapt (see [`CAP_OUTPUT_RELEASE`]).
     #[serde(default)]
     pub capabilities: Vec<String>,
 }
@@ -101,6 +104,9 @@ pub enum Request {
     Next,
     Previous,
     Seek { target: SeekTarget },
+    /// Pauses and hands the audio device back so another program can use it (since 1.1).
+    /// `resume` takes it again.
+    Release,
     /// Adds tracks, resolving their titles and lengths first.
     QueueAdd {
         tracks: Vec<NewTrack>,
@@ -176,6 +182,8 @@ pub enum Payload {
 }
 
 /// The answer to a request: it worked, or here is why not.
+// A reply is built, serialized and dropped: boxing the payload would only complicate every caller.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reply {
@@ -194,6 +202,10 @@ pub enum Event {
     SeekRejected { reason: String },
     QueueChanged { queue: Queue },
     QueueExhausted,
+    /// The daemon paused and gave the audio device back; the track and position are kept.
+    OutputReleased { by: Option<String>, reason: ReleaseReason },
+    /// It took the device again.
+    OutputAcquired,
     SinkReport(SinkReport),
     Error { message: String },
     /// The daemon is stopping.

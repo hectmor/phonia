@@ -7,7 +7,7 @@
 
 mod file;
 
-pub use file::{ConfigFile, Daemon, Output, OutputMode, Quality, Tidal, parse};
+pub use file::{ConfigFile, Daemon, Output, OutputMode, Quality, ReleaseAfterPause, Tidal, parse};
 
 use anyhow::{Context, Result, anyhow, bail};
 use std::ffi::OsStr;
@@ -132,6 +132,7 @@ pub struct Settings {
     /// `None` when neither the command line nor the file names a device.
     pub device: Sourced<Option<String>>,
     pub mode: Sourced<OutputMode>,
+    pub release_after_pause: Sourced<ReleaseAfterPause>,
     pub max_quality: Sourced<Quality>,
     /// `None` means "the default socket path", which only the binaries know.
     pub socket: Sourced<Option<PathBuf>>,
@@ -143,6 +144,7 @@ pub fn resolve(overrides: Overrides, file: &ConfigFile) -> Settings {
     Settings {
         device: Sourced::pick(overrides.device.map(Some), file.output.device.clone().map(Some), None),
         mode: Sourced::pick(None, file.output.mode, OutputMode::default()),
+        release_after_pause: Sourced::pick(None, file.output.release_after_pause, ReleaseAfterPause::default()),
         max_quality: Sourced::pick(overrides.max_quality, file.tidal.max_quality, Quality::default()),
         socket: Sourced::pick(overrides.socket.map(Some), file.daemon.socket.clone().map(Some), None),
         verbose: Sourced::pick(overrides.verbose, file.daemon.verbose, false),
@@ -243,7 +245,7 @@ mod tests {
 
     fn file(device: Option<&str>, quality: Option<Quality>, socket: Option<&str>, verbose: Option<bool>) -> ConfigFile {
         ConfigFile {
-            output: Output { device: device.map(str::to_string), mode: None },
+            output: Output { device: device.map(str::to_string), ..Output::default() },
             tidal: Tidal { max_quality: quality },
             daemon: Daemon { socket: socket.map(PathBuf::from), verbose },
         }
@@ -254,6 +256,10 @@ mod tests {
         let settings = resolve(Overrides::default(), &ConfigFile::default());
         assert_eq!(settings.device, Sourced { value: None, origin: Origin::Default });
         assert_eq!(settings.mode, Sourced { value: OutputMode::Exclusive, origin: Origin::Default });
+        assert_eq!(
+            settings.release_after_pause,
+            Sourced { value: ReleaseAfterPause::After(std::time::Duration::from_secs(10)), origin: Origin::Default }
+        );
         assert_eq!(settings.max_quality, Sourced { value: Quality::Hires, origin: Origin::Default });
         assert_eq!(settings.socket, Sourced { value: None, origin: Origin::Default });
         assert_eq!(settings.verbose, Sourced { value: false, origin: Origin::Default });

@@ -56,6 +56,11 @@ fn format_settings(settings: &Settings, source: Option<&ConfigSource>, read: boo
             settings.device.origin,
         ),
         ("output.mode", settings.mode.value.to_string(), settings.mode.origin),
+        (
+            "output.release_after_pause",
+            settings.release_after_pause.value.to_string(),
+            settings.release_after_pause.origin,
+        ),
         ("tidal.max_quality", settings.max_quality.value.to_string(), settings.max_quality.origin),
         (
             "daemon.socket",
@@ -94,18 +99,19 @@ mod tests {
         assert_eq!(
             text,
             "Config file: /home/u/.config/phonia/config.toml (not found: all defaults)\n\
-             \x20 output.device      (not set)                           (default)\n\
-             \x20 output.mode        exclusive                           (default)\n\
-             \x20 tidal.max_quality  hires                               (default)\n\
-             \x20 daemon.socket      /run/user/1000/phonia/phoniad.sock  (default)\n\
-             \x20 daemon.verbose     false                               (default)"
+             \x20 output.device               (not set)                           (default)\n\
+             \x20 output.mode                 exclusive                           (default)\n\
+             \x20 output.release_after_pause  10 s                                (default)\n\
+             \x20 tidal.max_quality           hires                               (default)\n\
+             \x20 daemon.socket               /run/user/1000/phonia/phoniad.sock  (default)\n\
+             \x20 daemon.verbose              false                               (default)"
         );
     }
 
     #[test]
     fn values_from_the_file_say_so() {
         let file = ConfigFile {
-            output: Output { device: Some("hw:DS2,0".into()), mode: None },
+            output: Output { device: Some("hw:DS2,0".into()), ..Output::default() },
             tidal: Tidal { max_quality: Some(Quality::Lossless) },
             ..ConfigFile::default()
         };
@@ -118,7 +124,7 @@ mod tests {
         assert!(text.starts_with("Config file: /tmp/c.toml\n"), "{text}");
         assert!(text.contains("hw:DS2,0") && text.contains("(config file)"), "{text}");
         assert!(text.contains("lossless"), "{text}");
-        assert_eq!(text.matches("(default)").count(), 3, "mode, socket and verbose were not written");
+        assert_eq!(text.matches("(default)").count(), 4, "mode, release_after_pause, socket and verbose were not written");
     }
 
     #[test]
