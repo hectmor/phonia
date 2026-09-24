@@ -12,6 +12,8 @@ use phonia_core::diag::{self, Level};
 use phonia_core::engine;
 use phonia_core::openers::{DispatchOpener, TidalOpener};
 use phonia_core::output::alsa::AlsaSinkFactory;
+use phonia_core::output::dbus::DbusReserver;
+use phonia_core::output::reserve;
 use phonia_core::{auth, tidal};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -80,10 +82,16 @@ async fn run(args: Args) -> Result<()> {
     let opener = Arc::new(DispatchOpener::new(tidal_opener));
 
     let (report_tx, reports) = mpsc::unbounded_channel();
-    let sinks = Arc::new(AlsaSinkFactory::new(device.clone()).on_report(Arc::new(move |report| {
+    let mut factory = AlsaSinkFactory::new(device.clone()).on_report(Arc::new(move |report| {
         // Called on the audio thread: an unbounded send never blocks.
         let _ = report_tx.send(report);
-    })));
+    }));
+    if settings.reserve.value {
+        // Asks WirePlumber or PulseAudio for the card before opening it, and answers them when
+        // they ask for it back.
+        factory = factory.reserve(Arc::new(DbusReserver::new(tokio::runtime::Handle::current(), reserve::PRIORITY)));
+    }
+    let sinks = Arc::new(factory);
     let daemon = Daemon::start(DaemonParts {
         sinks,
         opener,

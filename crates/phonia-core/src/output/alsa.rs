@@ -477,6 +477,12 @@ impl SinkFactory for AlsaSinkFactory {
             slot.release();
         }
     }
+
+    fn on_release_request(&self, handler: super::ReleaseHandler) {
+        if let Some(slot) = &self.reservation {
+            slot.on_release_request(handler);
+        }
+    }
 }
 
 /// The last `capacity` bytes written to the device, kept so audio thrown away by a drop-based
@@ -518,12 +524,28 @@ impl TailBuffer {
 /// Lists which sample formats and rates `device` accepts, using `HwParams::test_format` /
 /// `test_rate`. This opens the device in playback mode (without ever writing to it) purely to
 /// query its capabilities -- meant to be run by the user on their own hardware.
-pub fn probe_device(device: &str) -> Result<()> {
+///
+/// With a `reserver` the card is reserved first, like playing would, so the probe works while the
+/// desktop is holding the card. Blocks on that reservation: don't call it from an async task.
+pub fn probe_device(device: &str, reserver: Option<Arc<dyn DeviceReserver>>) -> Result<()> {
     let resolved = device::resolve(device, Path::new(device::ASOUND))?;
     let (name, device) = (resolved.alsa_name(), resolved.describe());
     let c_device = CString::new(name).context("invalid ALSA device name")?;
-    let pcm = PCM::open(&c_device, Direction::Playback, false)
-        .with_context(|| format!("opening device {device}"))?;
+    let slot = reserver.map(ReservationSlot::new);
+    let card = match &resolved {
+        device::Device::Hw { card, .. } => Some((*card, device.as_str())),
+        device::Device::Other(_) => None,
+    };
+    // Held until the probe is done.
+    let pcm = open_reserved(slot.as_ref(), card, || {
+        PCM::open(&c_device, Direction::Playback, false).map_err(|e| {
+            if e.errno() == libc::EBUSY {
+                anyhow::Error::new(DeviceBusy { device: device.clone(), detail: e.to_string() })
+            } else {
+                anyhow!("opening device {device}: {e}")
+            }
+        })
+    })?;
     let hwp = HwParams::any(&pcm).context("could not get the default hw_params")?;
 
     println!("Formats supported on {device}:");

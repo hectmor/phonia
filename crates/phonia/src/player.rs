@@ -5,6 +5,7 @@ use anyhow::{Result, anyhow};
 use phonia_core::control::Controller;
 use phonia_core::engine::{self, Command, Engine, EndReason, Event, SeekTarget, State, TrackSupplier};
 use phonia_core::output::alsa::AlsaSinkFactory;
+use phonia_core::output::reserve::DeviceReserver;
 use phonia_core::queue::{ItemId, Queue, QueueSnapshot, Repeat};
 use std::io::Write;
 use std::sync::Arc;
@@ -196,11 +197,21 @@ impl Console {
 
 /// Plays the queue from its start until it is exhausted or the user quits. Ctrl+C stops
 /// playback and releases the device; a second one exits at once.
-pub async fn run(queue: Arc<Queue>, device: &str, interactive: bool, options: engine::Options) -> Result<()> {
-    let sinks = Arc::new(AlsaSinkFactory::new(device).on_report(Arc::new(|report| {
+pub async fn run(
+    queue: Arc<Queue>,
+    device: &str,
+    interactive: bool,
+    options: engine::Options,
+    reserver: Option<Arc<dyn DeviceReserver>>,
+) -> Result<()> {
+    let mut factory = AlsaSinkFactory::new(device).on_report(Arc::new(|report| {
         println!();
         println!("{}", report.to_text());
-    })));
+    }));
+    if let Some(reserver) = reserver {
+        factory = factory.reserve(reserver);
+    }
+    let sinks = Arc::new(factory);
     let supplier: Arc<dyn TrackSupplier> = queue.clone();
     let engine = Engine::spawn_with_options(tokio::runtime::Handle::current(), sinks, supplier, options)?;
     let controller = Controller::new(engine, queue.clone());

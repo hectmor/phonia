@@ -161,7 +161,13 @@ async fn main() -> ExitCode {
             match settings(cli.config.as_deref(), Overrides { device, ..Overrides::default() })
                 .and_then(|settings| settings.require_device().map(str::to_string))
             {
-                Ok(device) => alsa::probe_device(&device),
+                Ok(device) => {
+                    let reserver = probe_reserver(cli.config.as_deref());
+                    tokio::task::spawn_blocking(move || alsa::probe_device(&device, reserver))
+                        .await
+                        .map_err(|error| anyhow::anyhow!("the probe stopped unexpectedly: {error}"))
+                        .and_then(|result| result)
+                }
                 Err(error) => Err(error),
             }
         }
@@ -196,7 +202,7 @@ async fn run_play_file(
     }
     queue.set_shuffle(shuffle);
     queue.set_repeat(repeat);
-    player::run(queue, device, interactive, player_options(settings)).await
+    player::run(queue, device, interactive, player_options(settings), reserver(settings)).await
 }
 
 async fn run_play(
@@ -228,7 +234,7 @@ async fn run_play(
     }
     queue.set_shuffle(shuffle);
     queue.set_repeat(repeat);
-    player::run(queue, device, interactive, player_options(settings)).await
+    player::run(queue, device, interactive, player_options(settings), reserver(settings)).await
 }
 
 /// What the settings say about how the engine treats the sound card.
@@ -237,4 +243,20 @@ fn player_options(settings: &phonia_core::config::Settings) -> phonia_core::engi
         release_after_pause: settings.release_after_pause.value.duration(),
         ..phonia_core::engine::Options::default()
     }
+}
+
+/// The reservation to probe under, unless the settings turn reservation off.
+fn probe_reserver(config_flag: Option<&std::path::Path>) -> Option<Arc<dyn phonia_core::output::reserve::DeviceReserver>> {
+    let settings = settings(config_flag, Overrides::default()).ok()?;
+    reserver(&settings)
+}
+
+/// Asks the desktop for the sound card through D-Bus, unless `[output] reserve` is off.
+fn reserver(settings: &phonia_core::config::Settings) -> Option<Arc<dyn phonia_core::output::reserve::DeviceReserver>> {
+    settings.reserve.value.then(|| {
+        Arc::new(phonia_core::output::dbus::DbusReserver::new(
+            tokio::runtime::Handle::current(),
+            phonia_core::output::reserve::PRIORITY,
+        )) as Arc<dyn phonia_core::output::reserve::DeviceReserver>
+    })
 }
