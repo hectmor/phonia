@@ -130,15 +130,23 @@ fn settings(config_flag: Option<&Path>, overrides: Overrides) -> Result<Settings
     Ok(config::resolve(overrides, &loaded.file))
 }
 
+/// Where the TIDAL login is kept, according to the settings.
+fn session_store(config_flag: Option<&Path>) -> Result<Arc<dyn auth::SessionStore>> {
+    auth::open_store(settings(config_flag, Overrides::default())?.session_store.value)
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Command::Login { no_wait, finish } => match finish {
-            Some(redirect_url) => auth::login_finish(&redirect_url).await,
-            None if no_wait || !std::io::stdin().is_terminal() => auth::login_begin(),
-            None => auth::login().await,
+        Command::Login { no_wait, finish } => match session_store(cli.config.as_deref()) {
+            Ok(store) => match finish {
+                Some(redirect_url) => auth::login_finish(&*store, &redirect_url).await,
+                None if no_wait || !std::io::stdin().is_terminal() => auth::login_begin(),
+                None => auth::login(&*store).await,
+            },
+            Err(error) => Err(error),
         },
         Command::Play { track_ids, device, quality, save_mp4, interactive, shuffle, repeat } => {
             match settings(cli.config.as_deref(), Overrides { device, max_quality: quality, ..Overrides::default() }) {
@@ -214,7 +222,10 @@ async fn run_play(
     repeat: Repeat,
 ) -> Result<()> {
     let device = settings.require_device()?;
-    let client = auth::load_client().await?;
+    let store = auth::open_store(settings.session_store.value)?;
+    let mut client = auth::load_client(&*store).await?;
+    // Only to fail now, with a clear message, if the login no longer works.
+    client.refresh_access_token(false).await.context("refreshing the access token")?;
     let http = tidal::build_http_client()?;
 
     let mut opener = TidalOpener::new(http, client, settings.max_quality.value.into()).print_info();

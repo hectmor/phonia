@@ -72,14 +72,16 @@ async fn run(args: Args) -> Result<()> {
     // A daemon has no terminal to talk to: what the library would print goes nowhere unless asked.
     diag::set_level(if settings.verbose.value { Level::All } else { Level::Silent });
 
-    let tidal_opener = match auth::load_client().await {
-        Ok(client) => Some(TidalOpener::new(tidal::build_http_client()?, client, settings.max_quality.value.into())),
-        Err(error) => {
-            eprintln!("phoniad: TIDAL is not available ({error:#}); only local files will play");
-            None
-        }
-    };
-    let opener = Arc::new(DispatchOpener::new(tidal_opener));
+    // The login is read when TIDAL is first used, not now: the daemon may start before the network
+    // is up, or before `phonia login`, and should then work without a restart.
+    let store = auth::open_store(settings.session_store.value)?;
+    match auth::load_client(&*store).await {
+        Ok(_) => {}
+        Err(error) => eprintln!("phoniad: no TIDAL session yet ({error:#}); local files play, TIDAL will once you log in"),
+    }
+    let tidal_opener =
+        TidalOpener::from_store(tidal::build_http_client()?, store, settings.max_quality.value.into());
+    let opener = Arc::new(DispatchOpener::new(Some(tidal_opener)));
 
     let (report_tx, reports) = mpsc::unbounded_channel();
     let mut factory = AlsaSinkFactory::new(device.clone()).on_report(Arc::new(move |report| {
