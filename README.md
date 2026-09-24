@@ -13,8 +13,8 @@ chain works with real hardware (a Fosi Audio DS2 during development).
   never gets granted the `HI_RES_LOSSLESS` entitlement, even if the account has it). Opens a
   URL in the browser (or prints it if it couldn't be opened automatically); after logging in,
   TIDAL redirects to an error page ("oops"), that's expected -- copy the full URL from the
-  address bar and paste it into the terminal. Saves the session to
-  `~/.config/phonia/session.json` (`0600` permissions).
+  address bar and paste it into the terminal. Saves the session as described in
+  "Where the TIDAL session is kept" below.
 
 - **`phonia play <TRACK_ID>... [--device <device>] [--quality hires|lossless] [--save-mp4 <path>] [--interactive] [--shuffle] [--repeat off|one|all]`**
   -- Streams and plays tracks by their IDs, one after another. Queries `playbackinfo`, streams
@@ -67,6 +67,7 @@ release_after_pause = 10   # seconds a pause lasts before the card is handed bac
 
 [tidal]
 max_quality = "hires"   # hires | lossless
+session_store = "file"  # where the TIDAL login is kept (only "file" so far)
 
 [daemon]
 socket = "/run/user/1000/phonia/phoniad.sock"   # default: $XDG_RUNTIME_DIR/phonia/phoniad.sock
@@ -90,7 +91,22 @@ verbose = false
   with where its value comes from (the file or the default). `--config <file>` (or the
   `PHONIA_CONFIG` environment variable) selects another file, also for `phoniad`.
 - The daemon reads the file once, at startup: restart it to apply a change. The file holds no
-  secrets (the TIDAL session is kept apart, in `session.json`).
+  secrets (the TIDAL session is kept apart, see below).
+
+### Where the TIDAL session is kept
+
+What has to survive between runs is small: the **refresh token** (TIDAL never rotates it, so it is
+the only long-lived credential) and the client id and secret it was issued to. That is all phonia
+stores, in `~/.config/phonia/session.json` with `0600` permissions, replaced in one step so a crash
+never leaves half a file. The access token (it lasts four hours) and your profile (email, birthday,
+user id...) are not kept: the first use of TIDAL in each process fetches a new access token, which
+takes a fraction of a second. A `session.json` written by an earlier version, which held all of
+that, is read and rewritten in the new format the first time.
+
+The login is read when TIDAL is first used, not when the program starts, so a `phoniad` that came
+up before the network (or before you ran `phonia login`) works as soon as they are there, without a
+restart. Refreshing the access token changes nothing on disk, so `phonia` and `phoniad` no longer
+write the file over each other.
 
 ## The daemon: `phoniad` and `phonia ctl`
 

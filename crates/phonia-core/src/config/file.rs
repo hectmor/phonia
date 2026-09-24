@@ -138,10 +138,28 @@ pub struct Output {
     pub release_after_pause: Option<ReleaseAfterPause>,
 }
 
+/// Where the TIDAL login is kept between runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionStoreKind {
+    /// A file only you can read (`session.json` in the config directory).
+    #[default]
+    File,
+}
+
+impl fmt::Display for SessionStoreKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            SessionStoreKind::File => "file",
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Tidal {
     pub max_quality: Option<Quality>,
+    pub session_store: Option<SessionStoreKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -178,6 +196,7 @@ release_after_pause = 30
 
 [tidal]
 max_quality = "lossless"
+session_store = "file"
 
 [daemon]
 socket = "/run/user/1000/phonia/phoniad.sock"
@@ -195,7 +214,7 @@ verbose = true
                     reserve: Some(false),
                     release_after_pause: Some(ReleaseAfterPause::After(Duration::from_secs(30))),
                 },
-                tidal: Tidal { max_quality: Some(Quality::Lossless) },
+                tidal: Tidal { max_quality: Some(Quality::Lossless), session_store: Some(SessionStoreKind::File) },
                 daemon: Daemon { socket: Some("/run/user/1000/phonia/phoniad.sock".into()), verbose: Some(true) },
             }
         );
@@ -210,6 +229,12 @@ verbose = true
             let error = read(bad).unwrap_err().to_string();
             assert!(error.contains("release_after_pause") || error.contains("never"), "{bad}: {error}");
         }
+    }
+
+    #[test]
+    fn an_unknown_session_store_is_an_error() {
+        let error = parse("[tidal]\nsession_store = \"cloud\"\n").unwrap_err().to_string();
+        assert!(error.contains("session_store") || error.contains("cloud"), "{error}");
     }
 
     #[test]

@@ -63,6 +63,7 @@ fn format_settings(settings: &Settings, source: Option<&ConfigSource>, read: boo
             settings.release_after_pause.origin,
         ),
         ("tidal.max_quality", settings.max_quality.value.to_string(), settings.max_quality.origin),
+        ("tidal.session_store", settings.session_store.value.to_string(), settings.session_store.origin),
         (
             "daemon.socket",
             settings.socket.value.clone().unwrap_or_else(|| default_socket.to_path_buf()).display().to_string(),
@@ -105,6 +106,7 @@ mod tests {
              \x20 output.reserve              true                                (default)\n\
              \x20 output.release_after_pause  10 s                                (default)\n\
              \x20 tidal.max_quality           hires                               (default)\n\
+             \x20 tidal.session_store         file                                (default)\n\
              \x20 daemon.socket               /run/user/1000/phonia/phoniad.sock  (default)\n\
              \x20 daemon.verbose              false                               (default)"
         );
@@ -114,7 +116,7 @@ mod tests {
     fn values_from_the_file_say_so() {
         let file = ConfigFile {
             output: Output { device: Some("hw:DS2,0".into()), ..Output::default() },
-            tidal: Tidal { max_quality: Some(Quality::Lossless) },
+            tidal: Tidal { max_quality: Some(Quality::Lossless), ..Tidal::default() },
             ..ConfigFile::default()
         };
         let text = format_settings(
@@ -126,7 +128,7 @@ mod tests {
         assert!(text.starts_with("Config file: /tmp/c.toml\n"), "{text}");
         assert!(text.contains("hw:DS2,0") && text.contains("(config file)"), "{text}");
         assert!(text.contains("lossless"), "{text}");
-        assert_eq!(text.matches("(default)").count(), 5, "mode, reserve, release_after_pause, socket and verbose were not written");
+        assert_eq!(text.matches("(default)").count(), 6, "mode, reserve, release_after_pause, session_store, socket and verbose were not written");
     }
 
     #[test]

@@ -7,7 +7,7 @@
 
 mod file;
 
-pub use file::{ConfigFile, Daemon, Output, OutputMode, Quality, ReleaseAfterPause, Tidal, parse};
+pub use file::{ConfigFile, Daemon, Output, OutputMode, Quality, ReleaseAfterPause, SessionStoreKind, Tidal, parse};
 
 use anyhow::{Context, Result, anyhow, bail};
 use std::ffi::OsStr;
@@ -135,6 +135,7 @@ pub struct Settings {
     pub reserve: Sourced<bool>,
     pub release_after_pause: Sourced<ReleaseAfterPause>,
     pub max_quality: Sourced<Quality>,
+    pub session_store: Sourced<SessionStoreKind>,
     /// `None` means "the default socket path", which only the binaries know.
     pub socket: Sourced<Option<PathBuf>>,
     pub verbose: Sourced<bool>,
@@ -148,6 +149,7 @@ pub fn resolve(overrides: Overrides, file: &ConfigFile) -> Settings {
         reserve: Sourced::pick(None, file.output.reserve, true),
         release_after_pause: Sourced::pick(None, file.output.release_after_pause, ReleaseAfterPause::default()),
         max_quality: Sourced::pick(overrides.max_quality, file.tidal.max_quality, Quality::default()),
+        session_store: Sourced::pick(None, file.tidal.session_store, SessionStoreKind::default()),
         socket: Sourced::pick(overrides.socket.map(Some), file.daemon.socket.clone().map(Some), None),
         verbose: Sourced::pick(overrides.verbose, file.daemon.verbose, false),
     }
@@ -248,7 +250,7 @@ mod tests {
     fn file(device: Option<&str>, quality: Option<Quality>, socket: Option<&str>, verbose: Option<bool>) -> ConfigFile {
         ConfigFile {
             output: Output { device: device.map(str::to_string), ..Output::default() },
-            tidal: Tidal { max_quality: quality },
+            tidal: Tidal { max_quality: quality, ..Tidal::default() },
             daemon: Daemon { socket: socket.map(PathBuf::from), verbose },
         }
     }
@@ -264,6 +266,7 @@ mod tests {
             Sourced { value: ReleaseAfterPause::After(std::time::Duration::from_secs(10)), origin: Origin::Default }
         );
         assert_eq!(settings.max_quality, Sourced { value: Quality::Hires, origin: Origin::Default });
+        assert_eq!(settings.session_store, Sourced { value: SessionStoreKind::File, origin: Origin::Default });
         assert_eq!(settings.socket, Sourced { value: None, origin: Origin::Default });
         assert_eq!(settings.verbose, Sourced { value: false, origin: Origin::Default });
     }

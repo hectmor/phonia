@@ -24,6 +24,39 @@ use tidlers::TidalClient;
 use tidlers::client::models::playback::AudioQuality;
 use tokio::sync::{RwLock, RwLockReadGuard};
 
+/// The TIDAL login of a process: read from its store the first time it is needed (so a daemon
+/// that started before the network, or before `phonia login`, still works once they are there),
+/// and kept fresh from then on.
+struct TidalSession {
+    /// Behind a lock because the access token expires after a while and has to be refreshed in
+    /// place, which a long-running process (a daemon) will always eventually need.
+    client: RwLock<Option<TidalClient>>,
+    /// Where to read the login from when there is no client yet.
+    store: Option<Arc<dyn auth::SessionStore>>,
+}
+
+impl TidalSession {
+    /// The client with a valid access token, refreshed if the old one has expired. TIDAL does not
+    /// rotate refresh tokens, so there is nothing to save afterwards.
+    async fn fresh(&self) -> Result<RwLockReadGuard<'_, TidalClient>> {
+        {
+            let mut guard = self.client.write().await;
+            if guard.is_none() {
+                let store = self.store.as_deref().ok_or_else(|| anyhow!("there is no TIDAL session"))?;
+                *guard = Some(auth::load_client(store).await?);
+            }
+            let client = guard.as_mut().expect("loaded just above");
+            client
+                .refresh_access_token(false)
+                .await
+                .map_err(|error| anyhow!("refreshing the TIDAL access token: {error}"))?;
+        }
+        Ok(RwLockReadGuard::map(self.client.read().await, |client| {
+            client.as_ref().expect("a loaded client is never taken away")
+        }))
+    }
+}
+
 /// Where a track's audio comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
@@ -143,9 +176,7 @@ impl TrackOpener for FileOpener {
 /// Opens TIDAL tracks, which a track's reference names by TIDAL track id, and streams them.
 pub struct TidalOpener {
     http: reqwest::Client,
-    /// Behind a lock because the access token expires after a while and has to be refreshed in
-    /// place, which a long-running process (a daemon) will always eventually need.
-    client: Arc<RwLock<TidalClient>>,
+    session: Arc<TidalSession>,
     quality: AudioQuality,
     print_info: bool,
     /// Where to copy the audio of the next opening, if anywhere.
@@ -153,13 +184,23 @@ pub struct TidalOpener {
 }
 
 impl TidalOpener {
+    /// With a client that is already logged in.
     pub fn new(http: reqwest::Client, client: TidalClient, quality: AudioQuality) -> Self {
-        Self { http, client: Arc::new(RwLock::new(client)), quality, print_info: false, save_to: Mutex::new(None) }
+        let session = TidalSession { client: RwLock::new(Some(client)), store: None };
+        Self { http, session: Arc::new(session), quality, print_info: false, save_to: Mutex::new(None) }
+    }
+
+    /// Logging in from `store` the first time TIDAL is used, not now.
+    pub fn from_store(http: reqwest::Client, store: Arc<dyn auth::SessionStore>, quality: AudioQuality) -> Self {
+        let session = TidalSession { client: RwLock::new(None), store: Some(store) };
+        Self { http, session: Arc::new(session), quality, print_info: false, save_to: Mutex::new(None) }
     }
 
     /// Name and length of a TIDAL track, without streaming it.
     pub async fn describe(&self, id: &str) -> Result<SourceInfo, DescribeError> {
-        let client = fresh_client(&self.client)
+        let client = self
+            .session
+            .fresh()
             .await
             .map_err(|error| DescribeError::Unavailable(format!("{error:#}")))?;
         match client.get_track(id).await {
@@ -205,26 +246,10 @@ fn classify_track_error(id: &str, error: &tidlers::TidalError) -> DescribeError 
     }
 }
 
-/// The TIDAL client, with a valid access token: refreshed (and saved, so the next run starts from
-/// the new one) if the old one has expired.
-async fn fresh_client(lock: &RwLock<TidalClient>) -> Result<RwLockReadGuard<'_, TidalClient>> {
-    {
-        let mut client = lock.write().await;
-        let refreshed = client
-            .refresh_access_token(false)
-            .await
-            .map_err(|error| anyhow!("refreshing the TIDAL access token: {error}"))?;
-        if refreshed {
-            auth::save_session(&client)?;
-        }
-    }
-    Ok(lock.read().await)
-}
-
 impl TrackOpener for TidalOpener {
     fn open(&self, track: TrackRef, at: Duration) -> BoxFuture<'static, Result<LoadedTrack>> {
         let http = self.http.clone();
-        let client = self.client.clone();
+        let session = self.session.clone();
         let quality = self.quality.clone();
         let print_info = self.print_info;
         // Only the opening from the start is copied: reopening for a seek would append a piece.
@@ -232,7 +257,7 @@ impl TrackOpener for TidalOpener {
 
         Box::pin(async move {
             let info = {
-                let client = fresh_client(&client).await?;
+                let client = session.fresh().await?;
                 tidal::fetch_playback_info(&http, &client, &track.0, quality).await?
             };
             if print_info && at.is_zero() {
@@ -324,6 +349,49 @@ fn dash_opening(dash: &DashSegments, at: Duration) -> DashOpening {
 
 #[cfg(test)]
 mod tests {
+    use crate::auth::{MemoryStore, StoredSession};
+
+    fn session_with(store: Option<Arc<MemoryStore>>) -> TidalSession {
+        TidalSession { client: RwLock::new(None), store: store.map(|store| store as Arc<dyn auth::SessionStore>) }
+    }
+
+    #[tokio::test]
+    async fn without_a_login_the_first_use_says_to_log_in() {
+        let store = Arc::new(MemoryStore::new());
+        let error = session_with(Some(store.clone())).fresh().await.err().unwrap();
+        assert!(format!("{error:#}").contains("phonia login"), "{error:#}");
+        assert_eq!(store.loads(), 1, "the store is asked when TIDAL is used");
+    }
+
+    #[tokio::test]
+    async fn a_login_made_after_the_daemon_started_is_found_without_a_restart() {
+        let store = Arc::new(MemoryStore::new());
+        let session = session_with(Some(store.clone()));
+        assert!(session.fresh().await.is_err());
+
+        // `phonia login` runs in another process, writing to the same store.
+        let stored = StoredSession { v: 1, refresh_token: "r".into(), client_id: "c".into(), client_secret: "s".into() };
+        crate::auth::SessionStore::save(&*store, &stored).await.unwrap();
+        // It loads now; refreshing then needs TIDAL, which is not asked in a test.
+        let mut guard = session.client.write().await;
+        assert!(guard.is_none());
+        *guard = Some(auth::load_client(&*store).await.unwrap());
+        assert!(guard.as_ref().unwrap().session.auth.refresh_token.as_deref() == Some("r"));
+    }
+
+    #[tokio::test]
+    async fn a_store_that_cannot_be_reached_is_named_in_the_error() {
+        let store = Arc::new(MemoryStore::new());
+        store.fail_with("no bus");
+        let error = session_with(Some(store)).fresh().await.err().unwrap();
+        let text = format!("{error:#}");
+        assert!(text.contains("memory") && text.contains("no bus"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_session_with_no_store_and_no_client_is_an_error() {
+        assert!(session_with(None).fresh().await.is_err());
+    }
     use super::*;
     use crate::dash::parse_mpd;
     use crate::testutil::wav;

@@ -6,12 +6,18 @@
 //! backend, even for subscribers whose account has it. PKCE is the only flow that returns tokens
 //! usable for HiRes streaming, which is the whole point of this player.
 
+mod store;
+
+pub use store::{FileStore, MemoryStore, SessionStore, StoreError, StoredSession, client_from, stored_from};
+
+use crate::config::SessionStoreKind;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tidlers::TidalClient;
 use tidlers::auth::TidalAuth;
@@ -55,10 +61,11 @@ fn write_secret_file(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-/// Writes the session (tokens included) to `session.json`, readable only by the owner.
-pub fn save_session(client: &TidalClient) -> Result<()> {
-    let path = session_path()?;
-    write_secret_file(&path, &client.get_json()).context("saving the session")
+/// The store the settings ask for.
+pub fn open_store(kind: SessionStoreKind) -> Result<Arc<dyn SessionStore>> {
+    match kind {
+        SessionStoreKind::File => Ok(Arc::new(FileStore::new(session_path()?))),
+    }
 }
 
 /// A PKCE login that has been started but not finished. The PKCE `code_verifier` only exists in
@@ -108,33 +115,22 @@ fn delete_pending_login(path: &Path) {
     let _ = fs::remove_file(path);
 }
 
-/// Loads the saved session (if any), refreshing the access token if it has expired, and
-/// persists the (possibly refreshed) session back to disk.
+/// The saved session as a client that can refresh its access token, which it does on first use.
+/// Nothing is asked of the network here, so it works before the network is up.
 ///
 /// Fails with a clear message if the user has never logged in.
-pub async fn load_client() -> Result<TidalClient> {
-    let path = session_path()?;
-    if !path.exists() {
-        bail!("no session saved yet. Run `phonia login` first.");
+pub async fn load_client(store: &dyn SessionStore) -> Result<TidalClient> {
+    match store.load().await {
+        Ok(Some(stored)) => Ok(client_from(&stored)),
+        Ok(None) => bail!("no session saved yet. Run `phonia login` first."),
+        Err(error @ StoreError::Corrupt(_)) => bail!("{error}; run `phonia login` again"),
+        Err(error) => Err(anyhow!(error)).with_context(|| format!("reading the session from {}", store.describe())),
     }
-
-    let json = fs::read_to_string(&path).with_context(|| format!("reading the saved session from {path:?}"))?;
-    let mut client = TidalClient::from_json(&json)
-        .with_context(|| format!("the session saved at {path:?} is corrupt; run `phonia login` again"))?;
-
-    client
-        .refresh_access_token(false)
-        .await
-        .context("refreshing the access token")?;
-
-    save_session(&client)?;
-
-    Ok(client)
 }
 
 /// Finishes a PKCE login: exchanges the redirect URL's authorization code for tokens and saves
 /// the session.
-async fn complete_login(mut client: TidalClient, redirect_url: &str) -> Result<()> {
+async fn complete_login(store: &dyn SessionStore, mut client: TidalClient, redirect_url: &str) -> Result<()> {
     let redirect_url = redirect_url.trim();
     if redirect_url.is_empty() {
         bail!("no redirect URL was received");
@@ -149,7 +145,10 @@ async fn complete_login(mut client: TidalClient, redirect_url: &str) -> Result<(
         eprintln!("Warning: could not refresh user info: {e}");
     }
 
-    save_session(&client)?;
+    store
+        .save(&stored_from(&client)?)
+        .await
+        .with_context(|| format!("saving the session to {}", store.describe()))?;
 
     if let Some(user) = &client.user_info {
         println!("\nLogged in successfully as: {}", user.username);
@@ -178,7 +177,7 @@ fn start_pkce_login() -> Result<(TidalClient, String)> {
 /// tries to open it automatically, then reads the redirect URL they land on (TIDAL sends PKCE
 /// redirects to an "oops"/error page by design; the authorization code is in that URL's query
 /// string regardless) from stdin.
-pub async fn login() -> Result<()> {
+pub async fn login(store: &dyn SessionStore) -> Result<()> {
     let (client, url) = start_pkce_login()?;
 
     println!("Open this URL in your browser to log in to TIDAL:\n\n  {url}\n");
@@ -196,7 +195,7 @@ pub async fn login() -> Result<()> {
         .read_line(&mut input)
         .context("reading the redirect URL from stdin")?;
 
-    complete_login(client, &input).await
+    complete_login(store, client, &input).await
 }
 
 /// First half of the two-step login, for when stdin is not an interactive terminal: prints the
@@ -216,10 +215,10 @@ pub fn login_begin() -> Result<()> {
 
 /// Second half of the two-step login: completes the login started by [`login_begin`] using the
 /// redirect URL the browser ended up on.
-pub async fn login_finish(redirect_url: &str) -> Result<()> {
+pub async fn login_finish(store: &dyn SessionStore, redirect_url: &str) -> Result<()> {
     let path = pending_login_path()?;
     let client = load_pending_login(&path, now_secs())?;
-    complete_login(client, redirect_url).await?;
+    complete_login(store, client, redirect_url).await?;
     delete_pending_login(&path);
     Ok(())
 }
@@ -301,6 +300,41 @@ mod tests {
         fs::write(&path, "not json").unwrap();
         let err = load_pending_login(&path, 1_000).err().unwrap();
         assert!(err.to_string().contains("corrupt"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn loading_without_a_login_says_to_log_in() {
+        let error = load_client(&MemoryStore::new()).await.err().unwrap();
+        assert!(error.to_string().contains("phonia login"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn loading_a_stored_login_gives_a_client_that_can_refresh() {
+        let store = MemoryStore::with(StoredSession {
+            v: 1,
+            refresh_token: "r".into(),
+            client_id: "c".into(),
+            client_secret: "s".into(),
+        });
+        let client = load_client(&store).await.unwrap();
+        assert_eq!(client.session.auth.refresh_token.as_deref(), Some("r"));
+        assert!(client.session.auth.access_token.is_none(), "the access token is fetched, not stored");
+    }
+
+    #[tokio::test]
+    async fn a_store_that_fails_is_named_in_the_error() {
+        let store = MemoryStore::new();
+        store.fail_with("no bus");
+        let error = format!("{:#}", load_client(&store).await.err().unwrap());
+        assert!(error.contains("memory") && error.contains("no bus"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_session_says_to_log_in_again() {
+        let path = temp_path("corrupt-session").with_file_name("session.json");
+        fs::write(&path, "not json").unwrap();
+        let error = load_client(&FileStore::new(&path)).await.err().unwrap();
+        assert!(error.to_string().contains("phonia login"), "{error}");
     }
 
     #[test]
