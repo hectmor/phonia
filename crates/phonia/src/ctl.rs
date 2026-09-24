@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 
 #[derive(Args)]
 pub struct CtlArgs {
-    /// The daemon's socket (default: `$XDG_RUNTIME_DIR/phonia/phoniad.sock`).
+    /// The daemon's socket. Default: [daemon] socket in the config file, else
+    /// `$XDG_RUNTIME_DIR/phonia/phoniad.sock`.
     #[arg(long, global = true)]
     socket: Option<PathBuf>,
     /// Print the daemon's answers as the raw protocol JSON.
@@ -89,9 +90,15 @@ pub enum RepeatMode {
     All,
 }
 
-pub async fn run(args: CtlArgs) -> Result<()> {
+pub async fn run(args: CtlArgs, config_flag: Option<&Path>) -> Result<()> {
     let info = ClientInfo { name: "phonia-ctl".to_string(), version: env!("CARGO_PKG_VERSION").to_string() };
-    let client = Client::connect(args.socket.as_deref(), info).await.map_err(explain_connection_error)?;
+    let loaded = phonia_core::config::load(phonia_core::config::discover_from_env(config_flag).as_ref())?;
+    let settings = phonia_core::config::resolve(
+        phonia_core::config::Overrides { socket: args.socket.clone(), ..Default::default() },
+        &loaded.file,
+    );
+    let socket = settings.socket_path(phonia_ipc::socket::default_socket_path);
+    let client = Client::connect(Some(&socket), info).await.map_err(explain_connection_error)?;
     let json = args.json;
 
     match args.command {

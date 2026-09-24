@@ -1,27 +1,35 @@
+mod config_cmd;
 mod ctl;
 mod player;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use phonia_core::engine::TrackRef;
+use phonia_core::config::{self, Overrides, Quality, Settings};
 use phonia_core::openers::{DispatchOpener, Source, TidalOpener};
-use phonia_core::output::alsa;
+use phonia_core::output::{alsa, device};
 use phonia_core::queue::{Queue, QueueTrack, Repeat};
 use phonia_core::{auth, tidal};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
-use tidlers::client::models::playback::AudioQuality;
 
 /// phonia -- phase 0: CLI spike that validates PKCE login -> HiRes playbackinfo -> DASH segments
 /// -> FLAC decoding -> bit-perfect ALSA output to a USB DAC.
 #[derive(Parser)]
 #[command(name = "phonia", about = "Bit-perfect TIDAL hi-fi player (phase 0)")]
 struct Cli {
+    /// The config file to read instead of `~/.config/phonia/config.toml` (also `PHONIA_CONFIG`).
+    #[arg(long, global = true, value_name = "FILE")]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
+
+/// The `--device` help shared by the commands that play.
+const DEVICE_HELP: &str = "The ALSA device: hw:N,D, a card id such as hw:DS2,0, or `auto`. \
+    Default: [output] device in the config file (`phonia devices` lists the cards)";
 
 #[derive(Subcommand)]
 enum Command {
@@ -41,10 +49,12 @@ enum Command {
     Play {
         #[arg(required = true)]
         track_ids: Vec<String>,
-        #[arg(long, default_value = "hw:1,0")]
-        device: String,
-        #[arg(long, value_enum, default_value_t = Quality::Hires)]
-        quality: Quality,
+        #[arg(long, help = DEVICE_HELP)]
+        device: Option<String>,
+        /// The highest quality to ask TIDAL for: hires or lossless. Default: [tidal] max_quality
+        /// in the config file, else hires.
+        #[arg(long, value_name = "hires|lossless")]
+        quality: Option<Quality>,
         /// If given, saves the downloaded bytes (fMP4/DASH or the JSON manifest) to this path.
         #[arg(long)]
         save_mp4: Option<PathBuf>,
@@ -63,8 +73,8 @@ enum Command {
     PlayFile {
         #[arg(required = true)]
         paths: Vec<PathBuf>,
-        #[arg(long, default_value = "hw:1,0")]
-        device: String,
+        #[arg(long, help = DEVICE_HELP)]
+        device: Option<String>,
         /// Read playback commands from the keyboard (pause, seek, next, ...); `?` lists them.
         #[arg(long)]
         interactive: bool,
@@ -77,10 +87,17 @@ enum Command {
     },
     /// Controls a running `phoniad` (the daemon): playback, queue and events.
     Ctl(ctl::CtlArgs),
+    /// Lists the sound cards that can play, with the device name to put in the config file.
+    Devices,
+    /// Shows where the configuration comes from and what it says.
+    Config {
+        #[command(subcommand)]
+        action: config_cmd::ConfigAction,
+    },
     /// Lists which formats and rates the given ALSA device accepts, without playing anything.
     ProbeDevice {
-        #[arg(long, default_value = "hw:1,0")]
-        device: String,
+        #[arg(long, help = DEVICE_HELP)]
+        device: Option<String>,
     },
 }
 
@@ -104,19 +121,13 @@ impl From<RepeatMode> for Repeat {
     }
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum Quality {
-    Hires,
-    Lossless,
-}
-
-impl From<Quality> for AudioQuality {
-    fn from(q: Quality) -> Self {
-        match q {
-            Quality::Hires => AudioQuality::HiRes,
-            Quality::Lossless => AudioQuality::Lossless,
-        }
-    }
+/// Reads the config file and decides the settings: the command line over the file over the
+/// defaults. Only the commands that need settings call this, so a broken config file doesn't stop
+/// `phonia devices` or `phonia config path`, which are what you use to fix it.
+fn settings(config_flag: Option<&Path>, overrides: Overrides) -> Result<Settings> {
+    let source = config::discover_from_env(config_flag);
+    let loaded = config::load(source.as_ref())?;
+    Ok(config::resolve(overrides, &loaded.file))
 }
 
 #[tokio::main]
@@ -130,13 +141,30 @@ async fn main() -> ExitCode {
             None => auth::login().await,
         },
         Command::Play { track_ids, device, quality, save_mp4, interactive, shuffle, repeat } => {
-            run_play(&track_ids, &device, quality.into(), save_mp4.as_deref(), interactive, shuffle, repeat.into()).await
+            match settings(cli.config.as_deref(), Overrides { device, max_quality: quality, ..Overrides::default() }) {
+                Ok(settings) => {
+                    run_play(&track_ids, &settings, save_mp4.as_deref(), interactive, shuffle, repeat.into()).await
+                }
+                Err(error) => Err(error),
+            }
         }
         Command::PlayFile { paths, device, interactive, shuffle, repeat } => {
-            run_play_file(&paths, &device, interactive, shuffle, repeat.into()).await
+            match settings(cli.config.as_deref(), Overrides { device, ..Overrides::default() }) {
+                Ok(settings) => run_play_file(&paths, &settings, interactive, shuffle, repeat.into()).await,
+                Err(error) => Err(error),
+            }
         }
-        Command::Ctl(args) => ctl::run(args).await,
-        Command::ProbeDevice { device } => alsa::probe_device(&device),
+        Command::Ctl(args) => ctl::run(args, cli.config.as_deref()).await,
+        Command::Devices => device::list(std::path::Path::new(device::ASOUND)).map(|text| println!("{text}")),
+        Command::Config { action } => config_cmd::run(action, cli.config.as_deref()),
+        Command::ProbeDevice { device } => {
+            match settings(cli.config.as_deref(), Overrides { device, ..Overrides::default() })
+                .and_then(|settings| settings.require_device().map(str::to_string))
+            {
+                Ok(device) => alsa::probe_device(&device),
+                Err(error) => Err(error),
+            }
+        }
     };
 
     match result {
@@ -150,11 +178,12 @@ async fn main() -> ExitCode {
 
 async fn run_play_file(
     paths: &[PathBuf],
-    device: &str,
+    settings: &Settings,
     interactive: bool,
     shuffle: bool,
     repeat: Repeat,
 ) -> Result<()> {
+    let device = settings.require_device()?;
     let queue = Queue::new(Arc::new(DispatchOpener::new(None)));
     for path in paths {
         // Sources are absolute, so a file means the same thing wherever it is opened.
@@ -172,17 +201,17 @@ async fn run_play_file(
 
 async fn run_play(
     track_ids: &[String],
-    device: &str,
-    quality: AudioQuality,
+    settings: &Settings,
     save_mp4: Option<&Path>,
     interactive: bool,
     shuffle: bool,
     repeat: Repeat,
 ) -> Result<()> {
+    let device = settings.require_device()?;
     let client = auth::load_client().await?;
     let http = tidal::build_http_client()?;
 
-    let mut opener = TidalOpener::new(http, client, quality).print_info();
+    let mut opener = TidalOpener::new(http, client, settings.max_quality.value.into()).print_info();
     if let Some(path) = save_mp4 {
         let file = std::fs::File::create(path).with_context(|| format!("creating {path:?}"))?;
         println!("Saving audio to {path:?} as it streams (the first track opened)...");

@@ -4,49 +4,41 @@
 //! drive it over a Unix socket.
 
 use anyhow::{Context, Result};
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 use phoniad::daemon::{Daemon, DaemonParts, wait_for_shutdown};
 use phoniad::{server, socket};
+use phonia_core::config::{self, Overrides, Quality};
 use phonia_core::diag::{self, Level};
 use phonia_core::openers::{DispatchOpener, TidalOpener};
 use phonia_core::output::alsa::AlsaSinkFactory;
 use phonia_core::{auth, tidal};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tidlers::client::models::playback::AudioQuality;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 
 #[derive(Parser)]
 #[command(name = "phoniad", about = "The phonia daemon: plays a queue and serves clients over a Unix socket")]
 struct Args {
-    /// The ALSA device to play on. Use a raw hardware device (`hw:N,D`) for bit-perfect output.
-    #[arg(long, default_value = "hw:1,0")]
-    device: String,
-    /// Where to listen (default: `$XDG_RUNTIME_DIR/phonia/phoniad.sock`).
+    /// The config file to read instead of `~/.config/phonia/config.toml` (also `PHONIA_CONFIG`).
+    /// It is read once, at startup: restart the daemon to apply a change.
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
+    /// The ALSA device: hw:N,D, a card id such as hw:DS2,0, or `auto`. Default: [output] device in
+    /// the config file (`phonia devices` lists the cards).
+    #[arg(long)]
+    device: Option<String>,
+    /// Where to listen. Default: [daemon] socket in the config file, else
+    /// `$XDG_RUNTIME_DIR/phonia/phoniad.sock`.
     #[arg(long)]
     socket: Option<PathBuf>,
-    /// The quality to ask TIDAL for.
-    #[arg(long, value_enum, default_value_t = Quality::Hires)]
-    quality: Quality,
+    /// The highest quality to ask TIDAL for: hires or lossless. Default: [tidal] max_quality in the
+    /// config file, else hires.
+    #[arg(long, value_name = "hires|lossless")]
+    quality: Option<Quality>,
     /// Print the library's notes and warnings to the terminal.
     #[arg(long)]
     verbose: bool,
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-enum Quality {
-    Hires,
-    Lossless,
-}
-
-impl From<Quality> for AudioQuality {
-    fn from(quality: Quality) -> Self {
-        match quality {
-            Quality::Hires => AudioQuality::HiRes,
-            Quality::Lossless => AudioQuality::Lossless,
-        }
-    }
 }
 
 #[tokio::main]
@@ -61,11 +53,24 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run(args: Args) -> Result<()> {
+    let source = config::discover_from_env(args.config.as_deref());
+    let loaded = config::load(source.as_ref())?;
+    let settings = config::resolve(
+        Overrides {
+            device: args.device,
+            max_quality: args.quality,
+            socket: args.socket,
+            verbose: args.verbose.then_some(true),
+        },
+        &loaded.file,
+    );
+    let device = settings.require_device()?.to_string();
+
     // A daemon has no terminal to talk to: what the library would print goes nowhere unless asked.
-    diag::set_level(if args.verbose { Level::All } else { Level::Silent });
+    diag::set_level(if settings.verbose.value { Level::All } else { Level::Silent });
 
     let tidal_opener = match auth::load_client().await {
-        Ok(client) => Some(TidalOpener::new(tidal::build_http_client()?, client, args.quality.into())),
+        Ok(client) => Some(TidalOpener::new(tidal::build_http_client()?, client, settings.max_quality.value.into())),
         Err(error) => {
             eprintln!("phoniad: TIDAL is not available ({error:#}); only local files will play");
             None
@@ -74,15 +79,19 @@ async fn run(args: Args) -> Result<()> {
     let opener = Arc::new(DispatchOpener::new(tidal_opener));
 
     let (report_tx, reports) = mpsc::unbounded_channel();
-    let sinks = Arc::new(AlsaSinkFactory::new(args.device.clone()).on_report(Arc::new(move |report| {
+    let sinks = Arc::new(AlsaSinkFactory::new(device.clone()).on_report(Arc::new(move |report| {
         // Called on the audio thread: an unbounded send never blocks.
         let _ = report_tx.send(report);
     })));
     let daemon = Daemon::start(DaemonParts { sinks, opener, reports })?;
 
-    let path = args.socket.unwrap_or_else(phonia_ipc::socket::default_socket_path);
+    let path = settings.socket_path(phonia_ipc::socket::default_socket_path);
     let (listener, _guard) = socket::bind(&path).await?;
-    eprintln!("phoniad: listening on {} (device {})", path.display(), args.device);
+    match &loaded.path {
+        Some(config) => eprintln!("phoniad: config {}", config.display()),
+        None => eprintln!("phoniad: no config file, using the defaults"),
+    }
+    eprintln!("phoniad: listening on {} (device {})", path.display(), device);
 
     let mut interrupt = signal(SignalKind::interrupt()).context("installing the SIGINT handler")?;
     let mut terminate = signal(SignalKind::terminate()).context("installing the SIGTERM handler")?;
