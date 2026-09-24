@@ -62,6 +62,7 @@ required to exist except the audio device:
 [output]
 device = "hw:DS2,0"     # a sound card: `phonia devices` lists them. "auto" = the first USB card.
 mode = "exclusive"      # phonia owns the card, nothing mixes or resamples: bit-perfect (the only mode so far)
+reserve = true          # ask WirePlumber/PulseAudio to release the card first, and give it back after
 release_after_pause = 10   # seconds a pause lasts before the card is handed back; 0 = on every pause, "never" = keep it
 
 [tidal]
@@ -183,14 +184,36 @@ cat /proc/asound/card1/pcm0p/sub0/hw_params
 
 If you see `closed`, nothing has the device open at that moment.
 
-## Important: PipeWire must not have the DAC open
+## Sharing the DAC with PipeWire
 
 `phonia` opens the ALSA device you configured directly, without going through
 `plughw`/`default`/`dmix`, because any of those layers can resample or mix the audio and
-break the bit-perfect guarantee. If PipeWire (or another application) already has the DAC
-open, `phonia` will fail to open the device with an EBUSY error explaining that it needs to
-be released first (for example, by pausing playback to that card from PipeWire, or by
-muting/disabling its profile for that card while using `phonia`).
+break the bit-perfect guarantee. That means only one program can have the DAC at a time, and on
+a desktop that is normally WirePlumber (PipeWire's session manager) or PulseAudio.
+
+They share cards with each other through the `org.freedesktop.ReserveDevice1` D-Bus protocol,
+and phonia speaks it: before opening the card it asks whoever holds it to let go, and it keeps
+the card reserved for as long as it is playing, so the desktop can't grab it in the middle of a
+track or between two tracks of different formats. When phonia stops, pauses for longer than
+`release_after_pause`, is told to `release`, or dies (even with `kill -9`), the card goes back to
+the desktop by itself. There is nothing to configure and no `pactl set-card-profile ... off` to
+run.
+
+- While phonia has the DAC, the DAC is not an output of the desktop any more: what was playing
+  through it moves to another output (the laptop's speakers, say), exactly as it does when you
+  turn the card's profile off by hand.
+- If the holder refuses, the error names it: `the DAC hw:2,0 (DS2) is held by <program>, which
+  refused to release it to phonia`. If nothing answers on D-Bus at all (no session bus, as over
+  SSH or in a system service) phonia says so and tries to open the card anyway, which works if
+  nothing else has it.
+- A program that does not use the protocol and has the card open makes the open fail with
+  EBUSY; the message says how to find it (`fuser -v /dev/snd/*`).
+- Another program that matters more (higher priority than phonia's 10, such as JACK) can ask
+  phonia for the card: phonia pauses, gives it up and reports `paused (DAC released to <program>)`.
+  It never resumes by itself; `phonia ctl resume` takes the card again.
+- `reserve = false` under `[output]` turns all of this off: phonia never touches D-Bus and opens
+  the card as it always did, so the desktop must not be using it (mute the card's profile in
+  PipeWire while using phonia).
 
 ## Phase 0 status
 
@@ -216,6 +239,16 @@ more importantly, *why* it was chosen.
 - **[`clap`](https://docs.rs/clap)** -- parses the CLI's subcommands and flags (`login`, `play`,
   `play-file`, `probe-device`). Declarative, well-tested, and there was no reason to hand-roll
   argument parsing for a project this size.
+
+- **[`zbus`](https://docs.rs/zbus)** -- the D-Bus client that reserves the sound card
+  (`org.freedesktop.ReserveDevice1`): phonia must own a bus name, export an object that answers
+  `RequestRelease` and ask another program's object to release the card, which is a real D-Bus
+  peer and not a one-off call, so shelling out to `busctl` can't do it (a child process can't
+  hold the name for us, and the card would go straight back to WirePlumber). Pure Rust, so no
+  system library or `pkg-config`; only its `tokio` feature is on, so it runs on the runtime the
+  daemon already has. It brings about thirty small crates (`zvariant`, `enumflags2`, ...), the
+  price of not writing the D-Bus wire protocol by hand. The alternative, `dbus`, has fewer crates
+  but links the C `libdbus` and needs a thread of its own for every reservation.
 
 - **[`toml`](https://docs.rs/toml)** -- reads `config.toml` into `serde` structs. Chosen over
   `basic-toml` because its errors carry the line, the column and the offending key, which is what

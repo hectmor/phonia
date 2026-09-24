@@ -133,6 +133,8 @@ pub struct Output {
     /// The ALSA device: `hw:N,D`, a card id such as `hw:DS2,0`, or `auto`.
     pub device: Option<String>,
     pub mode: Option<OutputMode>,
+    /// Ask the desktop (WirePlumber, PulseAudio) to release the card before opening it.
+    pub reserve: Option<bool>,
     pub release_after_pause: Option<ReleaseAfterPause>,
 }
 
@@ -171,6 +173,7 @@ mod tests {
 [output]
 device = "hw:DS2,0"
 mode = "exclusive"
+reserve = false
 release_after_pause = 30
 
 [tidal]
@@ -189,6 +192,7 @@ verbose = true
                 output: Output {
                     device: Some("hw:DS2,0".into()),
                     mode: Some(OutputMode::Exclusive),
+                    reserve: Some(false),
                     release_after_pause: Some(ReleaseAfterPause::After(Duration::from_secs(30))),
                 },
                 tidal: Tidal { max_quality: Some(Quality::Lossless) },

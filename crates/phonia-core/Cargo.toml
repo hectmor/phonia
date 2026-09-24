@@ -21,3 +21,4 @@ symphonia.workspace = true
 tidlers.workspace = true
 tokio.workspace = true
 toml.workspace = true
+zbus.workspace = true

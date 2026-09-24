@@ -7,6 +7,7 @@
 //! sink opens under it. The D-Bus implementation of [`DeviceReserver`] lives elsewhere, so all of
 //! this is testable without a bus.
 
+use super::ReleaseHandler;
 use anyhow::Result;
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -32,6 +33,9 @@ pub trait Reservation: Send {
 /// (for example `hw:DS2,0`), used only for messages.
 pub trait DeviceReserver: Send + Sync {
     fn acquire(&self, card: u32, device_name: &str) -> std::result::Result<Box<dyn Reservation>, ReserveError>;
+
+    /// Installs the function to call when another program asks for a card this reserver holds.
+    fn on_release_request(&self, _handler: ReleaseHandler) {}
 }
 
 #[derive(Debug)]
@@ -126,6 +130,10 @@ impl ReservationSlot {
         let took_over = reservation.took_over();
         *held = Some((card, reservation));
         Ok(Ensured::Acquired { took_over })
+    }
+
+    pub fn on_release_request(&self, handler: ReleaseHandler) {
+        self.reserver.on_release_request(handler);
     }
 
     /// Gives the card back. Does nothing if none is held.
