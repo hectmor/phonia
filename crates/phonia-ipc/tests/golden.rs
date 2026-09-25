@@ -34,10 +34,11 @@ fn status() -> Status {
         position_ms: 1_234,
         duration_ms: Some(215_000),
         output: Output::Open,
+        route: None,
     }
 }
 
-const STATUS_JSON: &str = r#"{"state":"playing","track":{"item_id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000},"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"position_ms":1234,"duration_ms":215000,"output":{"state":"open"}}"#;
+const STATUS_JSON: &str = r#"{"state":"playing","track":{"item_id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000},"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"position_ms":1234,"duration_ms":215000,"output":{"state":"open"},"route":null}"#;
 
 fn queue() -> Queue {
     Queue {
@@ -133,16 +134,16 @@ fn the_server_banner() {
         ServerMessage::Hello(ServerHello {
             protocol: PROTOCOL,
             server: ServerInfo { name: "phoniad".into(), version: "0.1.0".into(), pid: 1234 },
-            capabilities: vec![CAP_OUTPUT_RELEASE.into()],
+            capabilities: vec![CAP_OUTPUT_RELEASE.into(), CAP_OUTPUT_SELECT.into()],
         }),
-        r#"{"type":"hello","protocol":{"major":1,"minor":1},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release"]}"#,
+        r#"{"type":"hello","protocol":{"major":1,"minor":2},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select"]}"#,
     );
 }
 
 #[test]
 fn successful_responses() {
     response(1, Reply::Ok(Payload::Ack), r#"{"type":"response","id":1,"ok":{"type":"ack"}}"#);
-    response(2, Reply::Ok(Payload::Status(status())), &format!(r#"{{"type":"response","id":2,"ok":{{"type":"status","state":"playing","track":{},"spec":{},"position_ms":1234,"duration_ms":215000,"output":{{"state":"open"}}}}}}"#,
+    response(2, Reply::Ok(Payload::Status(status())), &format!(r#"{{"type":"response","id":2,"ok":{{"type":"status","state":"playing","track":{},"spec":{},"position_ms":1234,"duration_ms":215000,"output":{{"state":"open"}},"route":null}}}}"#,
         r#"{"item_id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000}"#, r#"{"sample_rate":96000,"channels":2,"bits_per_sample":24}"#));
     response(3, Reply::Ok(Payload::Removed { count: 2 }), r#"{"type":"response","id":3,"ok":{"type":"removed","count":2}}"#);
     response(
@@ -222,8 +223,12 @@ fn events() {
             bit_perfect: true,
             problem: None,
             hw_params: Some("rate: 96000 (96000/1)\n".into()),
+            mode: Some(OutputMode::Exclusive),
+            resampled_to: None,
+            codec: None,
+            lossy: false,
         }),
-        r#"{"type":"event","seq":12,"event":{"type":"sink_report","device":"hw:1,0","source":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"negotiated_format":"S24_3LE","bit_perfect":true,"problem":null,"hw_params":"rate: 96000 (96000/1)\n"}}"#,
+        r#"{"type":"event","seq":12,"event":{"type":"sink_report","device":"hw:1,0","source":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"negotiated_format":"S24_3LE","bit_perfect":true,"problem":null,"hw_params":"rate: 96000 (96000/1)\n","mode":"exclusive","resampled_to":null,"codec":null,"lossy":false}}"#,
     );
 }
 
@@ -245,6 +250,86 @@ fn output_events_and_the_state_of_the_device() {
     round_trip(&Output::Open, r#"{"state":"open"}"#);
     round_trip(&Output::Released { by: Some("jackd".into()) }, r#"{"state":"released","by":"jackd"}"#);
     round_trip(&Output::Released { by: None }, r#"{"state":"released","by":null}"#);
+}
+
+fn route() -> Route {
+    Route { id: "shared:bluez_output.AA".into(), mode: OutputMode::Shared, description: "Soundcore Life P2".into() }
+}
+
+fn output(id: &str, mode: OutputMode, bit_perfect: bool) -> OutputInfo {
+    OutputInfo {
+        id: id.into(),
+        mode,
+        name: "Fosi Audio DS2".into(),
+        detail: Some("USB".into()),
+        bit_perfect,
+        lossy: false,
+        codec: None,
+        is_default: false,
+    }
+}
+
+#[test]
+fn output_selection_requests() {
+    request(1, Request::Outputs, r#"{"id":1,"request":{"type":"outputs"}}"#);
+    request(
+        2,
+        Request::SetOutput { output: "shared:default".into() },
+        r#"{"id":2,"request":{"type":"set_output","output":"shared:default"}}"#,
+    );
+}
+
+#[test]
+fn the_list_of_outputs_and_the_route_in_a_status() {
+    response(
+        1,
+        Reply::Ok(Payload::Outputs {
+            outputs: vec![output("exclusive:hw:DS2,0", OutputMode::Exclusive, true)],
+            current: Some("exclusive:hw:DS2,0".into()),
+        }),
+        r#"{"type":"response","id":1,"ok":{"type":"outputs","outputs":[{"id":"exclusive:hw:DS2,0","mode":"exclusive","name":"Fosi Audio DS2","detail":"USB","bit_perfect":true,"lossy":false,"codec":null,"is_default":false}],"current":"exclusive:hw:DS2,0"}}"#,
+    );
+    let with_route = Status { route: Some(route()), ..status() };
+    round_trip(
+        &with_route,
+        &STATUS_JSON.replace(r#""route":null"#, r#""route":{"id":"shared:bluez_output.AA","mode":"shared","description":"Soundcore Life P2"}"#),
+    );
+}
+
+#[test]
+fn output_selection_events_and_the_lost_reason() {
+    event(
+        16,
+        Event::OutputChanged { route: route() },
+        r#"{"type":"event","seq":16,"event":{"type":"output_changed","route":{"id":"shared:bluez_output.AA","mode":"shared","description":"Soundcore Life P2"}}}"#,
+    );
+    event(17, Event::OutputsChanged, r#"{"type":"event","seq":17,"event":{"type":"outputs_changed"}}"#);
+    event(
+        18,
+        Event::OutputReleased { by: None, reason: ReleaseReason::Lost },
+        r#"{"type":"event","seq":18,"event":{"type":"output_released","by":null,"reason":"lost"}}"#,
+    );
+}
+
+#[test]
+fn a_shared_sink_report_carries_how_the_sound_got_there() {
+    let report = SinkReport {
+        device: "Soundcore Life P2".into(),
+        source: spec(),
+        negotiated_format: "S32LE".into(),
+        bit_perfect: false,
+        problem: Some("shared through the sound server, and the SBC codec loses information".into()),
+        hw_params: None,
+        mode: Some(OutputMode::Shared),
+        resampled_to: Some(48_000),
+        codec: Some("SBC".into()),
+        lossy: true,
+    };
+    event(
+        19,
+        Event::SinkReport(report),
+        r#"{"type":"event","seq":19,"event":{"type":"sink_report","device":"Soundcore Life P2","source":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"negotiated_format":"S32LE","bit_perfect":false,"problem":"shared through the sound server, and the SBC codec loses information","hw_params":null,"mode":"shared","resampled_to":48000,"codec":"SBC","lossy":true}}"#,
+    );
 }
 
 // ---- compatibility -------------------------------------------------------------------------
@@ -298,6 +383,23 @@ fn a_status_from_a_daemon_older_than_1_1_has_no_output() {
 }
 
 #[test]
+fn a_1_1_daemon_status_and_sink_report_still_parse() {
+    let old = r#"{"state":"paused","track":null,"spec":null,"position_ms":0,"duration_ms":null,"output":{"state":"open"}}"#;
+    let parsed: Status = serde_json::from_str(old).unwrap();
+    assert_eq!(parsed.route, None);
+
+    let old = r#"{"device":"hw:1,0","source":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"negotiated_format":"S24_3LE","bit_perfect":true,"problem":null,"hw_params":null}"#;
+    let parsed: SinkReport = serde_json::from_str(old).unwrap();
+    assert_eq!((parsed.mode, parsed.resampled_to, parsed.codec, parsed.lossy), (None, None, None, false));
+}
+
+#[test]
+fn a_mode_from_the_future_does_not_break_a_client() {
+    let parsed: Route = serde_json::from_str(r#"{"id":"x","mode":"cloud","description":"d"}"#).unwrap();
+    assert_eq!(parsed.mode, OutputMode::Unknown);
+}
+
+#[test]
 fn a_release_reason_from_the_future_does_not_break_a_client() {
     let parsed: ServerMessage =
         serde_json::from_str(r#"{"type":"event","seq":1,"event":{"type":"output_released","by":null,"reason":"thermal"}}"#).unwrap();
@@ -313,7 +415,7 @@ fn versions_are_compatible_across_minors_but_not_majors() {
     assert!(v(1, 0).compatible_with(v(1, 7)));
     assert!(v(1, 7).compatible_with(v(1, 0)));
     assert!(!v(1, 0).compatible_with(v(2, 0)));
-    assert_eq!(PROTOCOL, v(1, 1));
+    assert_eq!(PROTOCOL, v(1, 2));
 }
 
 #[test]

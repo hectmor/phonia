@@ -3,8 +3,8 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use phonia_ipc::{
-    AddAt, CAP_OUTPUT_RELEASE, Client, ClientError, ClientInfo, Event, ItemId, NewTrack, Output, Payload, Queue,
-    ReleaseReason, Repeat, Request, SeekTarget, State, Status,
+    AddAt, CAP_OUTPUT_RELEASE, CAP_OUTPUT_SELECT, Client, ClientError, ClientInfo, Event, ItemId, NewTrack, Output,
+    OutputInfo, OutputMode, Payload, Queue, ReleaseReason, Repeat, Request, SeekTarget, State, Status,
 };
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -39,6 +39,13 @@ pub enum CtlCommand {
     /// Pauses and hands the DAC back to the desktop, so another program can use it. `resume`
     /// takes it again and carries on from the same place.
     Release,
+    /// Lists the outputs and shows which one is playing; `output set <n>` plays through another
+    /// one from now on, keeping the track and the position. An exclusive card is bit-perfect;
+    /// a shared output goes through the desktop's sound server and is not.
+    Output {
+        #[command(subcommand)]
+        action: Option<OutputAction>,
+    },
     /// Pauses if playing, resumes if paused.
     Toggle,
     Next,
@@ -61,6 +68,12 @@ pub enum CtlCommand {
     Watch,
     /// Stops the daemon.
     Shutdown,
+}
+
+#[derive(Subcommand)]
+pub enum OutputAction {
+    /// Plays through this output from now on: its number in the list, its id, or part of its name.
+    Set { output: String },
 }
 
 #[derive(Subcommand)]
@@ -136,6 +149,7 @@ pub async fn run(args: CtlArgs, config_flag: Option<&Path>) -> Result<()> {
         CtlCommand::Prev => ack(&client, json, Request::Previous).await,
         CtlCommand::Stop => ack(&client, json, Request::Stop).await,
         CtlCommand::Seek { position } => ack(&client, json, Request::Seek { target: parse_seek(&position)? }).await,
+        CtlCommand::Output { action } => output(&client, json, action).await,
         CtlCommand::Queue { action } => queue(&client, json, action).await,
         CtlCommand::Shuffle { mode } => {
             ack(&client, json, Request::SetShuffle { shuffle: matches!(mode, Switch::On) }).await
@@ -239,6 +253,21 @@ async fn queue(client: &Client, json: bool, action: QueueAction) -> Result<()> {
     }
 }
 
+async fn output(client: &Client, json: bool, action: Option<OutputAction>) -> Result<()> {
+    if !client.server().capabilities.iter().any(|capability| capability == CAP_OUTPUT_SELECT) {
+        bail!("this phoniad is too old to switch outputs (protocol 1.1): restart it after updating");
+    }
+    let listing = client.request(Request::Outputs).await?;
+    let Payload::Outputs { outputs, current } = &listing else { bail!("the daemon answered something unexpected") };
+    match action {
+        None => print_payload(json, &listing, || format_outputs(outputs, current.as_deref())),
+        Some(OutputAction::Set { output }) => {
+            let id = resolve_output(&output, outputs)?;
+            ack(client, json, Request::SetOutput { output: id }).await
+        }
+    }
+}
+
 async fn watch(client: &Client, json: bool) -> Result<()> {
     let (snapshot, mut events) = client.subscribe().await?;
     if json {
@@ -320,6 +349,66 @@ fn format_ms(ms: u64) -> String {
     }
 }
 
+/// The output a person meant: its number in the list, its id, or a part of its id or name that only
+/// one output has.
+fn resolve_output(wanted: &str, outputs: &[OutputInfo]) -> Result<String> {
+    if let Ok(number) = wanted.parse::<usize>() {
+        return number
+            .checked_sub(1)
+            .and_then(|index| outputs.get(index))
+            .map(|output| output.id.clone())
+            .ok_or_else(|| anyhow!("there is no output {number} (`phonia ctl output` lists {})", outputs.len()));
+    }
+    if let Some(exact) = outputs.iter().find(|output| output.id == wanted) {
+        return Ok(exact.id.clone());
+    }
+    let lower = wanted.to_lowercase();
+    let matching: Vec<&OutputInfo> = outputs
+        .iter()
+        .filter(|output| output.id.to_lowercase().contains(&lower) || output.name.to_lowercase().contains(&lower))
+        .collect();
+    match matching.as_slice() {
+        [one] => Ok(one.id.clone()),
+        [] => bail!("no output matches {wanted:?} (`phonia ctl output` lists them)"),
+        many => bail!(
+            "{wanted:?} matches {} outputs; be more specific: {}",
+            many.len(),
+            many.iter().map(|output| output.id.as_str()).collect::<Vec<_>>().join(", ")
+        ),
+    }
+}
+
+fn how(output: &OutputInfo) -> String {
+    match (output.mode, output.bit_perfect) {
+        (OutputMode::Exclusive, true) => "bit-perfect".to_string(),
+        _ => match (&output.codec, output.lossy) {
+            (Some(codec), true) => format!("shared, lossy ({codec})"),
+            (None, true) => "shared, lossy".to_string(),
+            _ => "shared, not bit-perfect".to_string(),
+        },
+    }
+}
+
+fn format_outputs(outputs: &[OutputInfo], current: Option<&str>) -> String {
+    if outputs.is_empty() {
+        return "No outputs found.".to_string();
+    }
+    let width = outputs.iter().map(|output| output.id.len()).max().unwrap_or(0);
+    let mut text = "Outputs (`phonia ctl output set <n>` moves playback, keeping the position):".to_string();
+    for (index, output) in outputs.iter().enumerate() {
+        let marker = if current == Some(output.id.as_str()) { '*' } else { ' ' };
+        let detail = output.detail.as_deref().map(|detail| format!(" ({detail})")).unwrap_or_default();
+        text.push_str(&format!(
+            "\n {marker} {:>2}. {:<width$}  {}{detail}  [{}]",
+            index + 1,
+            output.id,
+            output.name,
+            how(output)
+        ));
+    }
+    text
+}
+
 fn state_name(state: State) -> &'static str {
     match state {
         State::Stopped => "stopped",
@@ -343,6 +432,14 @@ fn format_status(status: &Status) -> String {
         text.push_str(&format!("\nTrack:    {name}"));
         let total = status.duration_ms.map(|ms| format!(" / {}", format_ms(ms))).unwrap_or_default();
         text.push_str(&format!("\nPosition: {}{total}", format_ms(status.position_ms)));
+    }
+    if let Some(route) = &status.route {
+        let how = match route.mode {
+            OutputMode::Exclusive => "exclusive",
+            OutputMode::Shared => "shared, not bit-perfect",
+            OutputMode::Unknown => "?",
+        };
+        text.push_str(&format!("\nOutput:   {} [{how}]", route.description));
     }
     if let Some(spec) = status.spec {
         text.push_str(&format!("\nFormat:   {}-bit / {} Hz / {} ch", spec.bits_per_sample, spec.sample_rate, spec.channels));
@@ -404,13 +501,25 @@ fn format_event(event: &Event) -> String {
             "output {}: {} {}",
             report.device,
             report.negotiated_format,
-            if report.bit_perfect { "BIT-PERFECT".to_string() } else { format!("CONVERTED ({})", report.problem.as_deref().unwrap_or("?")) }
+            match (report.mode, report.bit_perfect) {
+                (_, true) => "BIT-PERFECT".to_string(),
+                (Some(OutputMode::Shared), false) => match (&report.codec, report.lossy) {
+                    (Some(codec), true) => format!("SHARED, LOSSY CODEC ({codec})"),
+                    (None, true) => "SHARED, LOSSY".to_string(),
+                    _ => match report.resampled_to {
+                        Some(rate) => format!("SHARED (not bit-perfect, resampled to {rate} Hz)"),
+                        None => "SHARED (not bit-perfect)".to_string(),
+                    },
+                },
+                _ => format!("CONVERTED ({})", report.problem.as_deref().unwrap_or("?")),
+            }
         ),
         Event::OutputReleased { by, reason } => {
             let why = match reason {
                 ReleaseReason::Idle => "paused for a while",
                 ReleaseReason::Command => "asked to",
                 ReleaseReason::Requested => "another program asked for it",
+                ReleaseReason::Lost => "the output went away",
                 ReleaseReason::Unknown => "?",
             };
             match by {
@@ -419,6 +528,8 @@ fn format_event(event: &Event) -> String {
             }
         }
         Event::OutputAcquired => "DAC taken again".to_string(),
+        Event::OutputChanged { route } => format!("output now {} ({})", route.description, route.id),
+        Event::OutputsChanged => "the outputs changed (`phonia ctl output` lists them)".to_string(),
         Event::Error { message } => format!("error: {message}"),
         Event::ShuttingDown => "the daemon is shutting down".to_string(),
         Event::Resync { skipped, .. } => format!("resynced (missed {skipped} events)"),
@@ -517,10 +628,11 @@ mod tests {
             position_ms: 83_000,
             duration_ms: Some(348_680),
             output: Output::Open,
+            route: None,
         };
         assert_eq!(format_status(&status), "State:    playing\nTrack:    Song\nPosition: 1:23 / 5:48\nFormat:   24-bit / 192000 Hz / 2 ch");
         let idle =
-            Status { state: State::Stopped, track: None, spec: None, position_ms: 0, duration_ms: None, output: Output::Closed };
+            Status { state: State::Stopped, track: None, spec: None, position_ms: 0, duration_ms: None, output: Output::Closed, route: None };
         assert_eq!(format_status(&idle), "State:    stopped");
 
         let released = Status { state: State::Paused, output: Output::Released { by: Some("jackd".into()) }, ..idle.clone() };
@@ -557,5 +669,112 @@ mod tests {
         );
         assert_eq!(format_event(&Event::OutputAcquired), "DAC taken again");
         assert_eq!(format_event(&Event::Unknown), "(an event this client does not know)");
+    }
+
+    fn out(id: &str, mode: OutputMode, name: &str, bit_perfect: bool, lossy: bool, codec: Option<&str>) -> OutputInfo {
+        OutputInfo {
+            id: id.into(),
+            mode,
+            name: name.into(),
+            detail: Some("USB".into()),
+            bit_perfect,
+            lossy,
+            codec: codec.map(str::to_string),
+            is_default: false,
+        }
+    }
+
+    fn outputs() -> Vec<OutputInfo> {
+        vec![
+            out("exclusive:hw:DS2,0", OutputMode::Exclusive, "Fosi Audio DS2", true, false, None),
+            out("shared:alsa_output.usb-DS2", OutputMode::Shared, "Fosi Audio DS2 Analog Stereo", false, false, None),
+            out("shared:bluez_output.AA", OutputMode::Shared, "Soundcore Life P2", false, true, Some("SBC")),
+        ]
+    }
+
+    #[test]
+    fn the_output_list_marks_the_current_one_and_says_how_each_plays() {
+        assert_eq!(
+            format_outputs(&outputs(), Some("shared:bluez_output.AA")),
+            "Outputs (`phonia ctl output set <n>` moves playback, keeping the position):\n\
+             \x20   1. exclusive:hw:DS2,0          Fosi Audio DS2 (USB)  [bit-perfect]\n\
+             \x20   2. shared:alsa_output.usb-DS2  Fosi Audio DS2 Analog Stereo (USB)  [shared, not bit-perfect]\n\
+             \x20*  3. shared:bluez_output.AA      Soundcore Life P2 (USB)  [shared, lossy (SBC)]"
+        );
+        assert_eq!(format_outputs(&[], None), "No outputs found.");
+    }
+
+    #[test]
+    fn an_output_is_picked_by_number_id_or_a_part_of_its_name() {
+        let all = outputs();
+        assert_eq!(resolve_output("2", &all).unwrap(), "shared:alsa_output.usb-DS2");
+        assert_eq!(resolve_output("exclusive:hw:DS2,0", &all).unwrap(), "exclusive:hw:DS2,0");
+        assert_eq!(resolve_output("soundcore", &all).unwrap(), "shared:bluez_output.AA");
+        assert_eq!(resolve_output("bluez", &all).unwrap(), "shared:bluez_output.AA");
+    }
+
+    #[test]
+    fn a_wrong_or_ambiguous_output_is_explained() {
+        let all = outputs();
+        for (wanted, expect) in [("0", "no output 0"), ("9", "no output 9"), ("nothing", "no output matches"), ("ds2", "matches 2 outputs")] {
+            let error = resolve_output(wanted, &all).unwrap_err().to_string();
+            assert!(error.contains(expect), "{wanted}: {error}");
+        }
+    }
+
+    #[test]
+    fn the_status_says_where_the_sound_goes() {
+        let status = Status {
+            state: State::Playing,
+            track: None,
+            spec: None,
+            position_ms: 0,
+            duration_ms: None,
+            output: Output::Open,
+            route: Some(phonia_ipc::Route {
+                id: "shared:bluez_output.AA".into(),
+                mode: OutputMode::Shared,
+                description: "Soundcore Life P2".into(),
+            }),
+        };
+        assert_eq!(format_status(&status), "State:    playing\nOutput:   Soundcore Life P2 [shared, not bit-perfect]");
+    }
+
+    #[test]
+    fn output_events_and_shared_reports_read_naturally() {
+        let route = phonia_ipc::Route { id: "shared:x".into(), mode: OutputMode::Shared, description: "Speaker".into() };
+        assert_eq!(format_event(&Event::OutputChanged { route }), "output now Speaker (shared:x)");
+        assert!(format_event(&Event::OutputsChanged).contains("outputs changed"));
+        assert_eq!(
+            format_event(&Event::OutputReleased { by: None, reason: ReleaseReason::Lost }),
+            "DAC released (the output went away)"
+        );
+
+        let report = |mode, bit_perfect, codec: Option<&str>, lossy, resampled| {
+            Event::SinkReport(phonia_ipc::SinkReport {
+                device: "Soundcore Life P2".into(),
+                source: Spec { sample_rate: 96_000, channels: 2, bits_per_sample: 24 },
+                negotiated_format: "S32LE".into(),
+                bit_perfect,
+                problem: Some("why".into()),
+                hw_params: None,
+                mode: Some(mode),
+                resampled_to: resampled,
+                codec: codec.map(str::to_string),
+                lossy,
+            })
+        };
+        assert_eq!(
+            format_event(&report(OutputMode::Shared, false, Some("SBC"), true, Some(48_000))),
+            "output Soundcore Life P2: S32LE SHARED, LOSSY CODEC (SBC)"
+        );
+        assert_eq!(
+            format_event(&report(OutputMode::Shared, false, None, false, Some(48_000))),
+            "output Soundcore Life P2: S32LE SHARED (not bit-perfect, resampled to 48000 Hz)"
+        );
+        assert_eq!(
+            format_event(&report(OutputMode::Exclusive, true, None, false, None)),
+            "output Soundcore Life P2: S32LE BIT-PERFECT"
+        );
     }
 }

@@ -11,7 +11,7 @@
 //! point, which is what makes "stop/next in the middle of a track" deterministic to test.
 
 use super::reserve::{DeviceReserver, Reservation, ReserveError};
-use super::{AudioSink, ReleaseHandler, ReleaseRequest, SinkFactory};
+use super::{AudioSink, OutputGone, ReleaseHandler, ReleaseRequest, SinkFactory};
 use crate::decode::SourceSpec;
 use anyhow::{Result, bail};
 use std::collections::VecDeque;
@@ -33,6 +33,8 @@ struct State {
     paused: bool,
     autoplay: bool,
     blocking: bool,
+    /// The output went away: writes fail with [`OutputGone`].
+    gone: Option<String>,
     flushes: u32,
     drains: u32,
 }
@@ -126,6 +128,13 @@ impl FakeSinkHandle {
         self.lock().paused
     }
 
+    /// The output goes away, as a Bluetooth speaker switched off does: a write waiting for room
+    /// and every later one fail with [`OutputGone`].
+    pub fn lose_output(&self, why: &str) {
+        self.lock().gone = Some(why.to_string());
+        self.shared.room.notify_all();
+    }
+
     pub fn flush_count(&self) -> u32 {
         self.lock().flushes
     }
@@ -153,6 +162,9 @@ impl AudioSink for FakeSink {
         let deadline = Instant::now() + BLOCKED_WRITE_TIMEOUT;
         let mut state = self.lock();
         loop {
+            if let Some(why) = &state.gone {
+                bail!(OutputGone(why.clone()));
+            }
             if state.paused {
                 bail!("write() called on a paused sink");
             }

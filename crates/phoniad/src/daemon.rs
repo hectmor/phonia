@@ -4,6 +4,7 @@
 //! ordered stream of events. The server in `server.rs` puts them on a socket.
 
 use crate::convert;
+use crate::outputs::Outputs;
 use futures_util::StreamExt;
 use futures_util::stream;
 use phonia_core::control::Controller;
@@ -39,10 +40,13 @@ pub struct DaemonParts {
     /// Bit-perfect reports from the sinks, to be announced to clients.
     pub reports: mpsc::UnboundedReceiver<SinkReport>,
     pub engine: engine::Options,
+    /// Which output the daemon is on and how to move it.
+    pub outputs: Outputs,
 }
 
 pub struct Daemon {
     controller: Controller,
+    outputs: Outputs,
     opener: Arc<DispatchOpener>,
     events: broadcast::Sender<(u64, ipc::Event)>,
     /// The sequence number of the last event published; only changed under `publish_lock`.
@@ -68,6 +72,7 @@ impl Daemon {
         let (shutdown, _) = watch::channel(false);
         let daemon = Arc::new(Daemon {
             controller,
+            outputs: parts.outputs,
             opener: parts.opener,
             events,
             seq: AtomicU64::new(0),
@@ -128,7 +133,10 @@ impl Daemon {
 
     fn state(&self) -> (ipc::Status, ipc::Queue) {
         let queue = self.controller.snapshot();
-        (convert::status_dto(&self.controller.status(), &queue), convert::queue_dto(&queue))
+        (
+            convert::status_dto(&self.controller.status(), &queue, Some(self.outputs.route())),
+            convert::queue_dto(&queue),
+        )
     }
 
     /// The state right now, with the sequence number of the last event it includes. A snapshot
@@ -146,7 +154,7 @@ impl Daemon {
     }
 
     pub fn hello(&self) -> ipc::ServerHello {
-        ipc::ServerHello { protocol: ipc::PROTOCOL, server: self.info.clone(), capabilities: vec![ipc::CAP_OUTPUT_RELEASE.to_string()] }
+        ipc::ServerHello { protocol: ipc::PROTOCOL, server: self.info.clone(), capabilities: vec![ipc::CAP_OUTPUT_RELEASE.to_string(), ipc::CAP_OUTPUT_SELECT.to_string()] }
     }
 
     /// Flips to true when the daemon should stop.
@@ -175,6 +183,14 @@ impl Daemon {
             Request::Status => Reply::Ok(Payload::Status(self.state().0)),
             Request::Queue => Reply::Ok(Payload::Queue(self.state().1)),
             Request::QueueAdd { tracks, at } => self.queue_add(tracks, at).await,
+            Request::Outputs => {
+                let entries = self.outputs.list().await;
+                Reply::Ok(Payload::Outputs {
+                    outputs: entries.iter().map(convert::output_info).collect(),
+                    current: Some(self.outputs.route().id),
+                })
+            }
+            Request::SetOutput { output } => self.set_output(&output).await,
             Request::Hello { .. } | Request::Subscribe | Request::Unsubscribe => {
                 error(ErrorCode::BadRequest, "this request is handled by the connection")
             }
@@ -184,6 +200,38 @@ impl Daemon {
                 self.change(mutating)
             }
         }
+    }
+
+    /// Moves playback to another output, keeping the track and the position. The engine has
+    /// moved even if the new output could not be opened (it is paused on the track, ready for a
+    /// resume), so the route follows it and clients are told either way.
+    async fn set_output(&self, id: &str) -> Reply {
+        let _serial = self.control_lock.lock().await;
+        let (spec, factory) = match self.outputs.prepare(id) {
+            Ok(prepared) => prepared,
+            Err(error) => return self::error(ErrorCode::BadRequest, &format!("{error:#}")),
+        };
+        // Taking a card or opening a Bluetooth speaker can take a while, and the audio thread
+        // may be in the middle of a write.
+        let switched = tokio::task::block_in_place(|| self.controller.set_output(factory));
+        let entries = self.outputs.list().await;
+        self.outputs.switched_to(spec, &entries);
+        let route = self.outputs.route();
+        self.publish(|_| ipc::Event::OutputChanged { route });
+        match switched {
+            Ok(()) => Reply::Ok(Payload::Ack),
+            Err(error) => self::error(ErrorCode::Internal, &format!("{error:#}")),
+        }
+    }
+
+    /// Names the output the daemon started on the way the list of outputs does.
+    pub async fn refresh_route(&self) {
+        self.outputs.refresh().await;
+    }
+
+    /// Outputs appeared or disappeared: tells subscribers to ask again.
+    pub fn outputs_changed(&self) {
+        self.publish(|_| ipc::Event::OutputsChanged);
     }
 
     /// The requests that change something. Called with the control lock held.

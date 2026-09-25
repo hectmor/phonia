@@ -1,24 +1,31 @@
 //! The daemon, its server and the client, talking through in-memory pipes with a fake audio
 //! device: everything except real hardware and real sockets.
 
+use phonia_core::config::OutputSpec;
 use phonia_core::openers::DispatchOpener;
+use phonia_core::output::catalog::{Entry, Mode};
 use phonia_core::output::alsa::{ProcReading, SinkReport};
 use phonia_core::output::fake::FakeSinkFactory;
 use phoniad::daemon::{Daemon, DaemonParts};
+use phoniad::outputs::{Build, Outputs};
 use phoniad::server::serve_connection;
 use phonia_ipc::framing::{read_frame, write_frame};
 use phonia_ipc::*;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufReader, DuplexStream, ReadHalf, WriteHalf};
 use tokio::sync::mpsc;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Every sink factory built for an output the daemon was switched to, in order, by output id.
+type Switched = Arc<Mutex<Vec<(String, Arc<FakeSinkFactory>)>>>;
+
 struct Fixture {
     daemon: Arc<Daemon>,
     sinks: Arc<FakeSinkFactory>,
+    switched: Switched,
     reports: mpsc::UnboundedSender<SinkReport>,
     dir: PathBuf,
 }
@@ -28,8 +35,34 @@ struct Fixture {
 async fn fixture(name: &str, blocking: bool) -> Fixture {
     let sinks = if blocking { FakeSinkFactory::blocking() } else { FakeSinkFactory::autoplay() };
     let (reports, report_rx) = mpsc::unbounded_channel();
+    let switched: Switched = Arc::default();
+    let built = switched.clone();
+    let build: Build = Arc::new(move |spec| {
+        let factory = FakeSinkFactory::blocking();
+        built.lock().unwrap().push((spec.id(), factory.clone()));
+        factory
+    });
+    let outputs = Outputs::new(OutputSpec::Exclusive { device: "hw:fake,0".into() }, build).with_lister(Arc::new(|| {
+        Box::pin(async {
+            let entry = |id: &str, mode, name: &str, bit_perfect| Entry {
+                id: id.into(),
+                mode,
+                name: name.into(),
+                detail: None,
+                bit_perfect,
+                lossy: false,
+                codec: None,
+                is_default: false,
+            };
+            vec![
+                entry("exclusive:hw:fake,0", Mode::Exclusive, "Fake DAC", true),
+                entry("shared:speaker", Mode::Shared, "Fake speaker", false),
+            ]
+        })
+    }));
     let daemon = Daemon::start(DaemonParts {
         sinks: sinks.clone(),
+        outputs,
         opener: Arc::new(DispatchOpener::new(None)),
         reports: report_rx,
         engine: Default::default(),
@@ -38,7 +71,7 @@ async fn fixture(name: &str, blocking: bool) -> Fixture {
     let dir = std::env::temp_dir().join(format!("phoniad-protocol-test-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    Fixture { daemon, sinks, reports, dir }
+    Fixture { daemon, sinks, switched, reports, dir }
 }
 
 impl Fixture {
@@ -462,6 +495,98 @@ async fn the_bit_perfect_report_reaches_subscribers() {
     assert!(report.bit_perfect);
     assert_eq!((report.device.as_str(), report.negotiated_format.as_str()), ("hw:1,0", "S24_3LE"));
     assert_eq!(report.hw_params.as_deref(), Some(contents));
+    f.finish().await;
+}
+
+// ---- outputs -------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_outputs_are_listed_and_the_status_says_which_one_is_playing() {
+    let f = fixture("outputs", false).await;
+    let client = f.client().await;
+    assert!(client.server().capabilities.iter().any(|capability| capability == CAP_OUTPUT_SELECT));
+
+    let Payload::Outputs { outputs, current } = client.request(Request::Outputs).await.unwrap() else { panic!("not a list") };
+    assert_eq!(outputs.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(), ["exclusive:hw:fake,0", "shared:speaker"]);
+    assert_eq!(current.as_deref(), Some("exclusive:hw:fake,0"));
+    assert!(outputs[0].bit_perfect && !outputs[1].bit_perfect);
+
+    let route = client.status().await.unwrap().route.expect("the daemon says where the sound goes");
+    assert_eq!((route.id.as_str(), route.mode), ("exclusive:hw:fake,0", OutputMode::Exclusive));
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn switching_the_output_moves_playback_keeps_the_position_and_tells_everyone() {
+    let f = fixture("switch", true).await;
+    let client = f.client().await;
+    let a = f.wav("a.wav", 300_000);
+    let (ids, _, _) = added(client.request(add(&[&a], AddAt::End)).await.unwrap());
+    let (_, mut events) = client.subscribe().await.unwrap();
+    client.request(Request::Play { item: Some(ids[0]) }).await.unwrap();
+    events_until(&mut events, |event| matches!(event, Event::TrackStarted { .. })).await;
+
+    // The engine is writing to a full queue: let the DAC play a period while the switch waits.
+    let sink = f.sinks.handles()[0].clone();
+    let switching = {
+        let client = f.client().await;
+        tokio::spawn(async move { client.request(Request::SetOutput { output: "shared:speaker".into() }).await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    sink.advance(1024);
+    assert_eq!(switching.await.unwrap().unwrap(), Payload::Ack);
+
+    let seen = events_until(&mut events, |event| matches!(event, Event::OutputChanged { .. })).await;
+    let Some((_, Event::OutputChanged { route })) = seen.last() else { unreachable!() };
+    assert_eq!((route.id.as_str(), route.mode), ("shared:speaker", OutputMode::Shared));
+    assert_eq!(route.description, "Fake speaker", "named from the list of outputs");
+
+    let status = client.status().await.unwrap();
+    assert_eq!(status.route.unwrap().id, "shared:speaker");
+    assert_eq!(status.state, State::Playing, "playback carried on");
+    assert_eq!(f.sinks.release_count(), 1, "the old output was given back");
+    let (id, second) = {
+        let switched = f.switched.lock().unwrap();
+        assert_eq!(switched.len(), 1);
+        switched[0].clone()
+    };
+    assert_eq!(id, "shared:speaker");
+    wait_until_open(&second).await;
+    second.handles()[0].set_blocking(false);
+    f.finish().await;
+}
+
+async fn wait_until_open(factory: &FakeSinkFactory) {
+    for _ in 0..200 {
+        if !factory.handles().is_empty() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the new output was never opened");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bad_output_id_is_a_bad_request_and_changes_nothing() {
+    let f = fixture("badoutput", false).await;
+    let client = f.client().await;
+    for bad in ["", "hw:1,0", "cloud:x"] {
+        let error = client.request(Request::SetOutput { output: bad.into() }).await.unwrap_err();
+        assert_eq!(protocol_code(error), ErrorCode::BadRequest, "{bad:?}");
+    }
+    assert_eq!(client.status().await.unwrap().route.unwrap().id, "exclusive:hw:fake,0");
+    assert!(f.switched.lock().unwrap().is_empty());
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subscribers_hear_when_the_outputs_change() {
+    let f = fixture("outputs-changed", false).await;
+    let client = f.client().await;
+    let (_, mut events) = client.subscribe().await.unwrap();
+    f.daemon.outputs_changed();
+    let (_, event) = next_event(&mut events).await;
+    assert_eq!(event, Event::OutputsChanged);
     f.finish().await;
 }
 

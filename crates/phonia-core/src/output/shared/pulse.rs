@@ -281,6 +281,45 @@ impl Drop for Watcher {
     }
 }
 
+/// Calls a function whenever the sound server's outputs change: one appears, one goes away, or the
+/// desktop's default moves. Ends when dropped.
+pub struct OutputWatch {
+    socket: UnixStream,
+}
+
+impl Drop for OutputWatch {
+    fn drop(&mut self) {
+        let _ = self.socket.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+/// Starts telling `on_change` about changes to the outputs. The connection is not remade if the
+/// server goes away: the watch just ends.
+pub fn watch_outputs(on_change: impl Fn() + Send + 'static) -> Result<OutputWatch> {
+    let (mut reader, version) = raw_connect()?;
+    let mask = protocol::SubscriptionMask::SINK | protocol::SubscriptionMask::SERVER;
+    protocol::write_command_message(reader.get_mut(), 2, &protocol::Command::Subscribe(mask), version)?;
+    protocol::read_ack_message(&mut reader).context("subscribing to the sound server's outputs")?;
+    let socket = reader.get_ref().try_clone().context("keeping a handle on the subscription")?;
+
+    std::thread::Builder::new().name("phonia-outputs-watch".into()).spawn(move || {
+        while let Ok((_, command)) = protocol::read_command_message(&mut reader, version) {
+            if let protocol::Command::SubscribeEvent(event) = command {
+                use protocol::{SubscriptionEventFacility as Facility, SubscriptionEventType as Kind};
+                let changed = match event.event_facility {
+                    Facility::Sink => matches!(event.event_type, Kind::New | Kind::Removed),
+                    Facility::Server => true,
+                    _ => false,
+                };
+                if changed {
+                    on_change();
+                }
+            }
+        }
+    })?;
+    Ok(OutputWatch { socket })
+}
+
 fn raw_connect() -> Result<(BufReader<UnixStream>, u16)> {
     let path = pulseaudio::socket_path_from_env().ok_or_else(|| anyhow!("no sound server socket"))?;
     let mut sock = BufReader::new(UnixStream::connect(path).context("connecting to the sound server")?);

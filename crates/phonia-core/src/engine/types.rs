@@ -102,6 +102,9 @@ pub enum ReleaseReason {
     Command,
     /// Another program asked for the device.
     Requested,
+    /// The output went away underneath the engine (a Bluetooth speaker switched off, the sound
+    /// server stopped). An [`Event::Error`] says which.
+    Lost,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

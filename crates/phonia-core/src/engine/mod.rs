@@ -28,11 +28,14 @@ pub const RELEASE_AFTER_PAUSE: Duration = Duration::from_secs(10);
 /// How long a program asking for the audio device waits for the engine to answer.
 const RELEASE_ANSWER_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// How long switching outputs may take before the caller gives up waiting for the answer.
+const SET_OUTPUT_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// `Previous` restarts the current track instead of going back once it has played this long.
 pub const PREVIOUS_RESTART_AFTER: Duration = Duration::from_secs(3);
 
 use crate::output::reserve;
-use crate::output::{ReleaseRequest, SinkFactory};
+use crate::output::{ReleaseHandler, ReleaseRequest, SinkFactory};
 use anyhow::{Context as _, Result, anyhow};
 use audio_thread::{Context, Msg};
 use std::sync::mpsc;
@@ -104,7 +107,7 @@ impl Engine {
         });
 
         let request_tx = tx.clone();
-        sinks.on_release_request(Arc::new(move |request: ReleaseRequest| {
+        let release_handler: ReleaseHandler = Arc::new(move |request: ReleaseRequest| {
             // The protocol's rule: only a program that matters more than us gets the device.
             if request.priority <= reserve::PRIORITY {
                 return false;
@@ -114,13 +117,15 @@ impl Engine {
                 return false;
             }
             answer.recv_timeout(RELEASE_ANSWER_TIMEOUT).unwrap_or(false)
-        }));
+        });
+        sinks.on_release_request(release_handler.clone());
 
         let ctx = Context {
             rx,
             tx: tx.clone(),
             rt,
             sinks,
+            release_handler,
             supplier,
             events: events.clone(),
             status: status_tx,
@@ -133,6 +138,24 @@ impl Engine {
             .context("spawning the audio thread")?;
 
         Ok(Self { tx, events, status, thread: Mutex::new(Some(thread)) })
+    }
+
+    /// Plays through `sinks` from now on. Whatever is playing moves over without losing its place:
+    /// it is paused, the audio not yet heard is set aside, the old output is closed and given
+    /// back, and if it was playing it carries on from the exact sample on the new one. If the new
+    /// output cannot be opened the engine stays paused on the track and says why, and a later
+    /// [`Command::Resume`] tries again.
+    ///
+    /// Blocks until the switch is done, which can take a moment (a card is taken, a Bluetooth
+    /// speaker opened): call it from a thread that may block.
+    pub fn set_output(&self, sinks: Arc<dyn SinkFactory>) -> Result<()> {
+        let (done, answer) = mpsc::channel();
+        self.tx.send(Msg::SetOutput { sinks, done }).map_err(|_| anyhow!("the playback engine has shut down"))?;
+        match answer.recv_timeout(SET_OUTPUT_TIMEOUT) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(why)) => Err(anyhow!(why)),
+            Err(_) => Err(anyhow!("the playback engine did not answer in time")),
+        }
     }
 
     /// Fails only once the engine has shut down.

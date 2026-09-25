@@ -3,5 +3,6 @@
 
 pub mod convert;
 pub mod daemon;
+pub mod outputs;
 pub mod server;
 pub mod socket;
