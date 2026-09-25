@@ -6,6 +6,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use phoniad::daemon::{Daemon, DaemonParts, wait_for_shutdown};
+use phoniad::outputs::{Build, Outputs};
 use phoniad::{server, socket};
 use phonia_core::config::{self, Overrides, Quality};
 use phonia_core::diag::{self, Level};
@@ -28,6 +29,10 @@ struct Args {
     /// the config file (`phonia devices` lists the cards).
     #[arg(long)]
     device: Option<String>,
+    /// The output to start on: exclusive:<card>, shared:default or shared:<name> (see `phonia
+    /// devices`). Default: [output] in the config file. Clients can switch it later.
+    #[arg(long, value_name = "ID", conflicts_with = "device")]
+    output: Option<String>,
     /// Where to listen. Default: [daemon] socket in the config file, else
     /// `$XDG_RUNTIME_DIR/phonia/phoniad.sock`.
     #[arg(long)]
@@ -55,15 +60,17 @@ async fn main() -> std::process::ExitCode {
 async fn run(args: Args) -> Result<()> {
     let source = config::discover_from_env(args.config.as_deref());
     let loaded = config::load(source.as_ref())?;
-    let settings = config::resolve(
-        Overrides {
-            device: args.device,
-            max_quality: args.quality,
-            socket: args.socket,
-            verbose: args.verbose.then_some(true),
-        },
-        &loaded.file,
-    );
+    let mut overrides = Overrides {
+        device: args.device,
+        max_quality: args.quality,
+        socket: args.socket,
+        verbose: args.verbose.then_some(true),
+        ..Overrides::default()
+    };
+    if let Some(id) = &args.output {
+        overrides = overrides.with_output_id(id)?;
+    }
+    let settings = config::resolve(overrides, &loaded.file);
     let output = settings.output()?;
 
     // A daemon has no terminal to talk to: what the library would print goes nowhere unless asked.
@@ -86,17 +93,24 @@ async fn run(args: Args) -> Result<()> {
     let (report_tx, reports) = mpsc::unbounded_channel();
     // In exclusive mode this asks WirePlumber or PulseAudio for the card before opening it, and
     // answers them when they ask for it back; in shared mode it plays through the sound server.
-    let sinks = phonia_core::output::factory_for(
-        &output,
-        settings.reserve.value,
-        tokio::runtime::Handle::current(),
-        Arc::new(move |report| {
+    // The same recipe builds the sink for any output a client later switches to.
+    let reserve = settings.reserve.value;
+    let build: Build = Arc::new(move |spec| {
+        let reports = report_tx.clone();
+        phonia_core::output::factory_for(
+            spec,
+            reserve,
+            tokio::runtime::Handle::current(),
             // Called on the audio thread: an unbounded send never blocks.
-            let _ = report_tx.send(report);
-        }),
-    );
+            Arc::new(move |report| {
+                let _ = reports.send(report);
+            }),
+        )
+    });
+    let sinks = build(&output);
     let daemon = Daemon::start(DaemonParts {
         sinks,
+        outputs: Outputs::new(output.clone(), build),
         opener,
         reports,
         engine: engine::Options {
@@ -104,6 +118,16 @@ async fn run(args: Args) -> Result<()> {
             ..engine::Options::default()
         },
     })?;
+
+    daemon.refresh_route().await;
+
+    // Tells clients when outputs come and go, so a list of them can be kept up to date. Without a
+    // sound server there is nothing to watch.
+    let _outputs_watch = phonia_core::output::shared::pulse::watch_outputs({
+        let daemon = daemon.clone();
+        move || daemon.outputs_changed()
+    })
+    .ok();
 
     let path = settings.socket_path(phonia_ipc::socket::default_socket_path);
     let (listener, _guard) = socket::bind(&path).await?;

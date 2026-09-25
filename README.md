@@ -153,6 +153,7 @@ phonia ctl queue add song.flac 233059491     # a file, or a TIDAL track id (or t
 phonia ctl queue list
 phonia ctl play                              # or `play 3` for entry 3
 phonia ctl pause | resume | toggle | next | prev | stop
+phonia ctl output                            # the outputs; `output set <n>` plays through another one
 phonia ctl release                           # pause and hand the DAC back, so another program can use it
 phonia ctl seek 90                           # 1:30; `+10` / `-10` are relative
 phonia ctl shuffle on   /   phonia ctl repeat all
@@ -191,7 +192,7 @@ One connection carries requests, their responses and, once subscribed, events, a
 JSON, so `socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/phonia/phoniad.sock` is a working client:
 
 ```
-< {"type":"hello","protocol":{"major":1,"minor":1},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release"]}
+< {"type":"hello","protocol":{"major":1,"minor":2},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select"]}
 > {"id":1,"request":{"type":"hello","protocol":{"major":1,"minor":0},"client":{"name":"me","version":"0"}}}
 < {"type":"response","id":1,"ok":{"type":"ack"}}
 > {"id":2,"request":{"type":"subscribe"}}
@@ -294,7 +295,24 @@ sink = "bluez_output.AA_BB_CC_DD_EE_FF.1"   # from `phonia devices`; or "default
 - Shared mode never reserves the card and never touches D-Bus for it. It also does not hand the
   card back after a pause (`release_after_pause` is for exclusive mode): a paused stream blocks
   nobody.
-- Volume, and switching between outputs while playing, come in the next steps of this feature.
+- **Switching while playing.** With the daemon running, `phonia ctl output` lists every output
+  (the sound cards, marked bit-perfect, and the sound server's, marked shared, Bluetooth ones with
+  their codec) and `phonia ctl output set <n>` (a number, an id such as `shared:default`,
+  `exclusive:hw:DS2,0` or `shared:<name>`, or part of a name) moves playback there from now on.
+  The track and the exact position are kept: phonia pauses, sets aside the audio the old output had
+  not played yet, closes it (a card is handed back to the desktop) and carries on from the same
+  sample on the new one. If the new output can't be opened, playback stays paused on the track, says
+  why, and `phonia ctl resume` tries again. `phoniad --output <id>` and `phonia play --output <id>`
+  choose the output for one run, whatever the config file says.
+- **When the output goes away** (a Bluetooth speaker is switched off, the server stops) playback
+  pauses on the spot, with the position kept, and reports `DAC released (the output went away)`.
+  It does not move to another output and does not resume by itself; when the speaker is back,
+  `phonia ctl resume` carries on from where it was, or `phonia ctl output set` picks another.
+  `phonia ctl watch` shows outputs appearing and disappearing.
+- One limit: while phonia holds a card in exclusive mode the desktop has no output for it, so the
+  card's shared output is not in the list. `phonia ctl release` gives the card back and it
+  reappears.
+- Volume comes in the next step of this feature.
 
 ## Phase 0 status
 

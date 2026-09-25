@@ -1495,3 +1495,165 @@ fn keeping_the_same_format_or_changing_it_never_hands_the_card_back_between_trac
     h.labels_until(is_stopped);
     assert_eq!(h.sinks.release_count(), 1, "the card goes back once, when playback ends");
 }
+
+// ---- switching the output ------------------------------------------------------------------
+
+/// Asks for the switch from another thread, since it waits for the audio thread, which may be
+/// stuck writing to a full queue until the test lets the DAC play a period.
+fn switch_output(h: &Harness, sink: &FakeSinkHandle, to: &Arc<FakeSinkFactory>) {
+    let switcher = start_switch(h, to);
+    std::thread::sleep(Duration::from_millis(50));
+    sink.advance(PERIOD);
+    switcher.join().unwrap().unwrap();
+}
+
+/// Sends the switch from another thread and returns its outcome when joined.
+fn start_switch(h: &Harness, to: &Arc<FakeSinkFactory>) -> std::thread::JoinHandle<anyhow::Result<()>> {
+    let tx = h.engine.tx.clone();
+    let to = to.clone();
+    std::thread::spawn(move || {
+        let (done, answer) = std::sync::mpsc::channel();
+        tx.send(Msg::SetOutput { sinks: to, done }).unwrap();
+        match answer.recv_timeout(TIMEOUT) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(why)) => Err(anyhow!(why)),
+            Err(_) => Err(anyhow!("no answer")),
+        }
+    })
+}
+
+#[test]
+fn switching_the_output_mid_track_carries_on_exactly_on_the_new_one() {
+    let frames = 30_000;
+    let mut h = Harness::new(vec![TestTrack::pcm("a", frames)], FakeSinkFactory::blocking());
+    let sink = play_until_queue_is_full(&mut h, "a");
+    let second = FakeSinkFactory::blocking();
+
+    switch_output(&h, &sink, &second);
+    wait_until("the new output is open and playing", || {
+        second.handles().len() == 1 && h.engine.status().state == State::Playing
+    });
+    assert_eq!(h.sinks.release_count(), 1, "the old output was given back");
+    assert_eq!(h.sinks.handles().len(), 1, "and never reopened");
+
+    second.handles()[0].set_blocking(false);
+    h.labels_until(is_stopped);
+    let mut played = h.sink(0).played();
+    played.extend(second.handles()[0].played());
+    assert_eq!(played, ramp(frames), "no sample lost or repeated across the switch");
+}
+
+#[test]
+fn switching_while_paused_opens_the_new_output_only_on_resume() {
+    let frames = 30_000;
+    let mut h = Harness::new(vec![TestTrack::pcm("a", frames)], FakeSinkFactory::blocking());
+    let sink = play_until_queue_is_full(&mut h, "a");
+    send_and_unblock(&h, &sink, Command::Pause);
+    h.events_until(is_paused);
+    let second = FakeSinkFactory::blocking();
+
+    h.engine.set_output(second.clone()).unwrap();
+    assert!(second.handles().is_empty(), "nothing is opened while paused");
+    assert_eq!(h.engine.status().state, State::Paused);
+
+    h.send(Command::Resume);
+    h.events_until(|e| matches!(e, Event::StateChanged(State::Playing)));
+    second.handles()[0].set_blocking(false);
+    h.labels_until(is_stopped);
+    let mut played = h.sink(0).played();
+    played.extend(second.handles()[0].played());
+    assert_eq!(played, ramp(frames));
+}
+
+#[test]
+fn a_new_output_that_cannot_be_opened_leaves_the_engine_paused_and_a_resume_retries() {
+    let frames = 30_000;
+    let mut h = Harness::new(vec![TestTrack::pcm("a", frames)], FakeSinkFactory::blocking());
+    let sink = play_until_queue_is_full(&mut h, "a");
+    let second = FakeSinkFactory::blocking();
+    second.fail_next_open("the speaker is not connected");
+
+    let switcher = start_switch(&h, &second);
+    std::thread::sleep(Duration::from_millis(50));
+    sink.advance(PERIOD);
+    let error = switcher.join().unwrap().unwrap_err();
+    assert!(format!("{error:#}").contains("not connected"), "{error:#}");
+
+    let status = h.engine.status();
+    assert_eq!(status.state, State::Paused, "still on the track, paused");
+    assert!(status.track.is_some());
+
+    h.send(Command::Resume);
+    wait_until("playing on the new output", || second.handles().len() == 1 && h.engine.status().state == State::Playing);
+    second.handles()[0].set_blocking(false);
+    h.labels_until(is_stopped);
+    let mut played = h.sink(0).played();
+    played.extend(second.handles()[0].played());
+    assert_eq!(played, ramp(frames), "the retry continues exactly where the listener was");
+}
+
+#[test]
+fn switching_while_stopped_uses_the_new_output_for_the_next_track() {
+    let h = Harness::new(vec![TestTrack::pcm("a", 2_000)], FakeSinkFactory::autoplay());
+    let second = FakeSinkFactory::autoplay();
+    h.engine.set_output(second.clone()).unwrap();
+    assert_eq!(h.sinks.release_count(), 1);
+
+    let mut h = h;
+    h.play("a");
+    h.labels_until(is_stopped);
+    assert!(h.sinks.handles().is_empty(), "the first output was never used");
+    assert_eq!(second.handles()[0].played(), ramp(2_000));
+}
+
+#[test]
+fn the_new_output_answers_other_programs_that_ask_for_the_device() {
+    let mut h = Harness::new(vec![TestTrack::pcm("a", 30_000)], FakeSinkFactory::blocking());
+    let sink = play_until_queue_is_full(&mut h, "a");
+    let second = FakeSinkFactory::blocking();
+    switch_output(&h, &sink, &second);
+    wait_until("playing on the new output", || second.handles().len() == 1);
+
+    let sinks = second.clone();
+    let asked = std::thread::spawn(move || sinks.request_release(Some("jackd"), 99));
+    std::thread::sleep(Duration::from_millis(50));
+    second.handles()[0].advance(PERIOD);
+    assert!(asked.join().unwrap(), "the handler was installed on the new factory");
+}
+
+#[test]
+fn a_lost_output_pauses_on_the_track_and_a_resume_carries_on_exactly() {
+    let frames = 30_000;
+    let mut h = Harness::new(vec![TestTrack::pcm("a", frames)], FakeSinkFactory::blocking());
+    let sink = play_until_queue_is_full(&mut h, "a");
+
+    sink.lose_output("the speaker switched off");
+    let events = h.events_until(is_released);
+    let labels: Vec<String> = events.iter().map(label).collect();
+    assert!(labels.iter().any(|l| l.starts_with("error:") && l.contains("speaker switched off")), "{labels:?}");
+    assert_eq!(labels.last().unwrap(), "released:-:Lost");
+    let status = h.engine.status();
+    assert_eq!((status.state, status.output), (State::Paused, OutputState::Released { by: None }));
+    assert!(status.track.is_some(), "the track is kept, not failed");
+
+    h.assert_quiet_for(Duration::from_millis(100)); // and it does not resume by itself
+    h.send(Command::Resume);
+    h.events_until(|e| matches!(e, Event::StateChanged(State::Playing)));
+    h.sink(1).set_blocking(false);
+    h.labels_until(is_stopped);
+    assert_eq!(played_on_all(&h), ramp(frames), "what the dead output never played is played again");
+}
+
+#[test]
+fn a_lost_output_that_is_still_gone_when_resuming_stays_paused_with_the_reason() {
+    let mut h = Harness::new(vec![TestTrack::pcm("a", 30_000)], FakeSinkFactory::blocking());
+    let sink = play_until_queue_is_full(&mut h, "a");
+    sink.lose_output("the speaker switched off");
+    h.events_until(is_released);
+
+    h.sinks.fail_next_open("the output 'speaker' is not there");
+    h.send(Command::Resume);
+    let Event::Error { message } = h.next_event() else { panic!("expected the reason") };
+    assert!(message.contains("not there"), "{message}");
+    assert_eq!(h.engine.status().state, State::Paused);
+}

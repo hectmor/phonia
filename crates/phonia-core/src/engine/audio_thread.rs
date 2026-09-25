@@ -11,7 +11,7 @@ use super::types::{
     Command, EndReason, Event, OutputState, ReleaseReason, SeekTarget, State, Status, TrackMeta, TrackRef,
 };
 use crate::decode::{Decoder, SourceSpec, duration_to_frames, frames_to_duration};
-use crate::output::{AudioSink, SinkFactory};
+use crate::output::{AudioSink, OutputGone, ReleaseHandler, SinkFactory};
 use anyhow::{Context as _, Result, anyhow, bail};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -31,6 +31,8 @@ pub(super) enum Msg {
     QueueExhausted { generation: u64 },
     /// Another program wants the audio device; `done` gets whether the engine gave it up.
     ReleaseRequested { by: Option<String>, done: Sender<bool> },
+    /// Play through another output from now on; `done` gets whether that worked.
+    SetOutput { sinks: Arc<dyn SinkFactory>, done: Sender<Result<(), String>> },
     Shutdown,
 }
 
@@ -39,6 +41,9 @@ pub(super) struct Context {
     pub tx: Sender<Msg>,
     pub rt: Handle,
     pub sinks: Arc<dyn SinkFactory>,
+    /// Answers other programs that ask for the audio device; every output the engine plays on has
+    /// it installed.
+    pub release_handler: ReleaseHandler,
     pub supplier: Arc<dyn TrackSupplier>,
     pub events: broadcast::Sender<Event>,
     pub status: watch::Sender<Status>,
@@ -229,7 +234,7 @@ impl AudioThread {
                 }
                 None => {
                     if let Err(error) = self.play_step() {
-                        self.fail(error);
+                        self.failed(error);
                     }
                 }
             }
@@ -298,6 +303,7 @@ impl AudioThread {
                 self.stop();
             }
             Msg::Loaded { .. } | Msg::LoadFailed { .. } | Msg::QueueExhausted { .. } => {}
+            Msg::SetOutput { sinks, done } => self.set_output(sinks, done),
             Msg::Shutdown => {
                 self.stop();
                 return false;
@@ -368,7 +374,7 @@ impl AudioThread {
         if let Some(sink) = self.sink.as_mut()
             && let Err(error) = sink.drain()
         {
-            self.fail(error.context("draining the audio output"));
+            self.failed(error.context("draining the audio output"));
             return;
         }
         self.emit_position();
@@ -599,16 +605,21 @@ impl AudioThread {
         }
     }
 
+    /// Opens the output again for the track that is loaded, if it is closed. Whoever has it may
+    /// refuse, or a chosen output may be gone; nothing is lost either way: the track, the position
+    /// and the audio not yet heard are kept, so a later resume can retry.
+    fn reopen_output(&mut self) -> Result<()> {
+        match self.current.as_ref().map(|playing| playing.spec) {
+            Some(spec) if self.sink.is_none() => self.open_sink(spec),
+            _ => Ok(()),
+        }
+    }
+
     fn resume(&mut self) {
         match self.state {
             State::Loading | State::Seeking => self.pause_when_ready = false,
             State::Paused => {
-                if self.sink.is_none()
-                    && let Some(spec) = self.current.as_ref().map(|playing| playing.spec)
-                    && let Err(error) = self.open_sink(spec)
-                {
-                    // Whoever has the device may still refuse. Nothing is lost: the track, the
-                    // position and the audio not yet heard are kept, so a later resume can retry.
+                if let Err(error) = self.reopen_output() {
                     self.emit(Event::Error { message: format!("{error:#}") });
                     return;
                 }
@@ -651,6 +662,81 @@ impl AudioThread {
         self.pause_when_ready = false;
         self.close_output();
         self.set_state(State::Stopped);
+    }
+
+    /// Something the audio thread was doing failed. An output that has gone away (a Bluetooth
+    /// speaker switched off) is not the engine's failure: it pauses on the track with the position
+    /// kept, so that reconnecting the speaker and resuming carries on. Anything else stops it.
+    fn failed(&mut self, error: anyhow::Error) {
+        let gone = error.downcast_ref::<OutputGone>().is_some();
+        if gone && self.current.is_some() && matches!(self.state, State::Playing | State::Paused) {
+            self.output_lost(error);
+        } else {
+            self.fail(error);
+        }
+    }
+
+    /// The output went away while a track was loaded.
+    fn output_lost(&mut self, error: anyhow::Error) {
+        self.emit(Event::Error { message: format!("{error:#}") });
+        // The dead sink can't be paused; the audio it still held is set aside as if it had been.
+        if self.state == State::Playing {
+            self.set_state(State::Paused);
+        }
+        self.set_aside_unheard();
+        self.sink = None;
+        self.ctx.sinks.release();
+        self.released = Some(None);
+        self.emit(Event::OutputReleased { by: None, reason: ReleaseReason::Lost });
+        self.emit_position();
+        self.publish_status();
+    }
+
+    /// Plays through `sinks` from now on, keeping the track and the exact position.
+    fn set_output(&mut self, sinks: Arc<dyn SinkFactory>, done: Sender<Result<(), String>>) {
+        let was_playing = self.state == State::Playing;
+        if matches!(self.state, State::Playing | State::Paused) && self.sink.is_some() {
+            self.pause();
+            if self.state != State::Paused {
+                // Pausing failed and stopped the engine; there is nothing left to move.
+                self.replace_sinks(sinks);
+                let _ = done.send(Ok(()));
+                return;
+            }
+            self.set_aside_unheard();
+        }
+        // Whatever the old output was holding, and any request for it, is moot now.
+        self.sink = None;
+        self.released = None;
+        if let Some(request) = self.release_when_ready.take() {
+            request.answer(true);
+        }
+        self.replace_sinks(sinks);
+        self.publish_status();
+
+        let result = if was_playing && self.state == State::Paused {
+            match self.reopen_output() {
+                Ok(()) => {
+                    self.resume();
+                    Ok(())
+                }
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    self.emit(Event::Error { message: message.clone() });
+                    Err(message)
+                }
+            }
+        } else {
+            Ok(())
+        };
+        let _ = done.send(result);
+    }
+
+    /// Gives the old output back and takes `sinks` in its place.
+    fn replace_sinks(&mut self, sinks: Arc<dyn SinkFactory>) {
+        self.ctx.sinks.release();
+        sinks.on_release_request(self.ctx.release_handler.clone());
+        self.ctx.sinks = sinks;
     }
 
     /// Closes the device for good and gives the card back.

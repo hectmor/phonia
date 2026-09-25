@@ -1,13 +1,16 @@
 //! The messages: what a client may ask, and what the daemon answers and announces.
 
-use crate::dto::{EndReason, ItemId, Queue, ReleaseReason, Repeat, SinkReport, Spec, State, Status};
+use crate::dto::{EndReason, ItemId, OutputInfo, Queue, ReleaseReason, Repeat, Route, SinkReport, Spec, State, Status};
 use serde::{Deserialize, Serialize};
 
 /// Capability: the daemon understands `release` and reports `output` (protocol 1.1).
 pub const CAP_OUTPUT_RELEASE: &str = "output_release";
 
+/// Capability: the daemon lists its outputs and can switch between them (protocol 1.2).
+pub const CAP_OUTPUT_SELECT: &str = "output_select";
+
 /// The protocol version this crate speaks.
-pub const PROTOCOL: Version = Version { major: 1, minor: 1 };
+pub const PROTOCOL: Version = Version { major: 1, minor: 2 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Version {
@@ -107,6 +110,11 @@ pub enum Request {
     /// Pauses and hands the audio device back so another program can use it (since 1.1).
     /// `resume` takes it again.
     Release,
+    /// The outputs the daemon can play on, and the one it is playing on (since 1.2).
+    Outputs,
+    /// Plays through another output from now on, keeping the track and the position (since 1.2).
+    /// `output` is an id from `outputs`.
+    SetOutput { output: String },
     /// Adds tracks, resolving their titles and lengths first.
     QueueAdd {
         tracks: Vec<NewTrack>,
@@ -175,6 +183,8 @@ pub enum Payload {
     /// (those whose metadata could not be fetched right now are listed in `unresolved`).
     Added { ids: Vec<ItemId>, rejected: Vec<Rejected>, unresolved: Vec<Unresolved> },
     Removed { count: usize },
+    /// The outputs the daemon can play on, and the id of the current one.
+    Outputs { outputs: Vec<OutputInfo>, current: Option<String> },
     /// The state right now, and the sequence number of the last event it includes.
     Snapshot { seq: u64, status: Status, queue: Queue },
     #[serde(other)]
@@ -206,6 +216,10 @@ pub enum Event {
     OutputReleased { by: Option<String>, reason: ReleaseReason },
     /// It took the device again.
     OutputAcquired,
+    /// The daemon now plays through another output (since 1.2).
+    OutputChanged { route: Route },
+    /// Outputs appeared or disappeared: ask `outputs` again (since 1.2).
+    OutputsChanged,
     SinkReport(SinkReport),
     Error { message: String },
     /// The daemon is stopping.

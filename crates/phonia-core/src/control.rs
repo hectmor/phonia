@@ -25,6 +25,12 @@ impl Controller {
         &self.queue
     }
 
+    /// Plays through another output from now on, keeping the track and the position. Blocks until
+    /// the switch is done (see [`Engine::set_output`]).
+    pub fn set_output(&self, sinks: Arc<dyn crate::output::SinkFactory>) -> Result<()> {
+        self.engine.set_output(sinks)
+    }
+
     /// Sends a command to the engine. Fails only once the engine has shut down.
     pub fn send(&self, command: Command) -> Result<()> {
         self.engine.send(command)

@@ -121,6 +121,10 @@ impl<T> Sourced<T> {
 #[derive(Debug, Clone, Default)]
 pub struct Overrides {
     pub device: Option<String>,
+    /// `shared` or `exclusive`, when the command line says (`--output`).
+    pub mode: Option<OutputMode>,
+    /// The output in shared mode, when the command line names one.
+    pub sink: Option<String>,
     pub max_quality: Option<Quality>,
     pub socket: Option<PathBuf>,
     pub verbose: Option<bool>,
@@ -149,8 +153,8 @@ pub fn resolve(overrides: Overrides, file: &ConfigFile) -> Settings {
     Settings {
         device: Sourced::pick(overrides.device.map(Some), file.output.device.clone().map(Some), None),
         // Naming a card on the command line is asking for exclusive mode, whatever the file says.
-        mode: Sourced::pick(device_flag.then_some(OutputMode::Exclusive), file.output.mode, OutputMode::default()),
-        sink: Sourced::pick(None, file.output.sink.clone(), "default".to_string()),
+        mode: Sourced::pick(device_flag.then_some(OutputMode::Exclusive).or(overrides.mode), file.output.mode, OutputMode::default()),
+        sink: Sourced::pick(overrides.sink, file.output.sink.clone(), "default".to_string()),
         reserve: Sourced::pick(None, file.output.reserve, true),
         release_after_pause: Sourced::pick(None, file.output.release_after_pause, ReleaseAfterPause::default()),
         max_quality: Sourced::pick(overrides.max_quality, file.tidal.max_quality, Quality::default()),
@@ -170,6 +174,26 @@ pub enum OutputSpec {
 }
 
 impl OutputSpec {
+    /// The id clients name it by: `exclusive:<device>`, `shared:default` or `shared:<output>`.
+    pub fn id(&self) -> String {
+        match self {
+            OutputSpec::Exclusive { device } => format!("exclusive:{device}"),
+            OutputSpec::Shared { sink: None } => "shared:default".to_string(),
+            OutputSpec::Shared { sink: Some(sink) } => format!("shared:{sink}"),
+        }
+    }
+
+    /// The output an id (see [`OutputSpec::id`]) names.
+    pub fn from_id(id: &str) -> Result<OutputSpec> {
+        if let Some(device) = id.strip_prefix("exclusive:").filter(|device| !device.is_empty()) {
+            return Ok(OutputSpec::Exclusive { device: device.to_string() });
+        }
+        if let Some(sink) = id.strip_prefix("shared:").filter(|sink| !sink.is_empty()) {
+            return Ok(OutputSpec::Shared { sink: (sink != "default").then(|| sink.to_string()) });
+        }
+        bail!("{id:?} is not an output id: they look like exclusive:hw:DS2,0, shared:default or shared:<output name>")
+    }
+
     /// For messages.
     pub fn describe(&self) -> String {
         match self {
@@ -177,6 +201,21 @@ impl OutputSpec {
             OutputSpec::Shared { sink: None } => "shared, the desktop's default output".to_string(),
             OutputSpec::Shared { sink: Some(sink) } => format!("shared, output {sink}"),
         }
+    }
+}
+
+impl Overrides {
+    /// What `--output <id>` says: a card is the device, and an output of the sound server is shared
+    /// mode with that sink.
+    pub fn with_output_id(mut self, id: &str) -> Result<Self> {
+        match OutputSpec::from_id(id)? {
+            OutputSpec::Exclusive { device } => self.device = Some(device),
+            OutputSpec::Shared { sink } => {
+                self.mode = Some(OutputMode::Shared);
+                self.sink = Some(sink.unwrap_or_else(|| "default".to_string()));
+            }
+        }
+        Ok(self)
     }
 }
 
@@ -324,6 +363,7 @@ mod tests {
             max_quality: Some(Quality::Hires),
             socket: Some("/flag".into()),
             verbose: Some(false),
+            ..Overrides::default()
         };
         let settings = resolve(overrides, &file(Some("hw:DS2,0"), Some(Quality::Lossless), Some("/file"), Some(true)));
         assert_eq!(settings.device, Sourced { value: Some("hw:9,0".into()), origin: Origin::Flag });
@@ -412,5 +452,42 @@ mod tests {
         let settings = resolve(Overrides { device: Some("hw:1,0".into()), ..Overrides::default() }, &file);
         assert_eq!(settings.mode, Sourced { value: OutputMode::Exclusive, origin: Origin::Flag });
         assert_eq!(settings.output().unwrap(), OutputSpec::Exclusive { device: "hw:1,0".into() });
+    }
+
+    #[test]
+    fn output_ids_round_trip() {
+        for spec in [
+            OutputSpec::Exclusive { device: "hw:DS2,0".into() },
+            OutputSpec::Shared { sink: None },
+            OutputSpec::Shared { sink: Some("bluez_output.AA:BB.1".into()) },
+        ] {
+            assert_eq!(OutputSpec::from_id(&spec.id()).unwrap(), spec);
+        }
+        assert_eq!(OutputSpec::from_id("shared:default").unwrap(), OutputSpec::Shared { sink: None });
+    }
+
+    #[test]
+    fn a_bad_output_id_says_what_they_look_like() {
+        for bad in ["", "hw:1,0", "exclusive:", "shared:", "cloud:x"] {
+            let error = OutputSpec::from_id(bad).unwrap_err().to_string();
+            assert!(error.contains("exclusive:") && error.contains("shared:"), "{bad}: {error}");
+        }
+    }
+
+    #[test]
+    fn output_on_the_command_line_beats_the_file() {
+        let file = ConfigFile { output: Output { device: Some("hw:DS2,0".into()), ..Output::default() }, ..ConfigFile::default() };
+
+        let shared = Overrides::default().with_output_id("shared:bluez_output.AA").unwrap();
+        let settings = resolve(shared, &file);
+        assert_eq!(settings.output().unwrap(), OutputSpec::Shared { sink: Some("bluez_output.AA".into()) });
+        assert_eq!((settings.mode.origin, settings.sink.origin), (Origin::Flag, Origin::Flag));
+
+        let default = resolve(Overrides::default().with_output_id("shared:default").unwrap(), &file);
+        assert_eq!(default.output().unwrap(), OutputSpec::Shared { sink: None });
+
+        let card = resolve(Overrides::default().with_output_id("exclusive:hw:1,0").unwrap(), &ConfigFile::default());
+        assert_eq!(card.output().unwrap(), OutputSpec::Exclusive { device: "hw:1,0".into() });
+        assert!(Overrides::default().with_output_id("nonsense").is_err());
     }
 }

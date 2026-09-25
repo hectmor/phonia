@@ -49,6 +49,50 @@ pub struct Status {
     /// What the daemon is doing with the audio device. Absent from daemons older than 1.1.
     #[serde(default)]
     pub output: Output,
+    /// Where the sound goes, when the daemon knows (since 1.2).
+    #[serde(default)]
+    pub route: Option<Route>,
+}
+
+/// How the daemon reaches an output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputMode {
+    /// A sound card of the daemon's own: bit-perfect.
+    Exclusive,
+    /// Through the desktop's sound server: mixed and resampled, not bit-perfect.
+    Shared,
+    #[serde(other)]
+    Unknown,
+}
+
+/// Where the sound is going.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Route {
+    /// The id to give back to `set_output`: `exclusive:hw:DS2,0`, `shared:default`, `shared:<sink>`.
+    pub id: String,
+    pub mode: OutputMode,
+    /// For people: the card or the sound server's name for the output.
+    pub description: String,
+}
+
+/// An output the daemon can play on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputInfo {
+    pub id: String,
+    pub mode: OutputMode,
+    /// The output's name.
+    pub name: String,
+    /// What kind of output it is (`USB`, `Bluetooth`, `card 2`...), when known.
+    pub detail: Option<String>,
+    /// Whether playing there is bit-perfect: only an exclusive card is.
+    pub bit_perfect: bool,
+    /// Whether the way to the speaker loses information (a Bluetooth link does).
+    pub lossy: bool,
+    /// The Bluetooth codec in use.
+    pub codec: Option<String>,
+    /// For the sound server's entry that follows the desktop's default output.
+    pub is_default: bool,
 }
 
 /// The daemon's hold on the audio device.
@@ -74,6 +118,8 @@ pub enum ReleaseReason {
     Command,
     /// Another program asked for the device.
     Requested,
+    /// The output went away (a Bluetooth speaker switched off). Since 1.2.
+    Lost,
     #[serde(other)]
     Unknown,
 }
@@ -121,6 +167,18 @@ pub struct SinkReport {
     pub problem: Option<String>,
     /// What the kernel reports for the running stream (`hw_params`), when readable.
     pub hw_params: Option<String>,
+    /// How the sound got there (since 1.2). Absent from older daemons, which only had cards.
+    #[serde(default)]
+    pub mode: Option<OutputMode>,
+    /// For shared mode: the rate the output runs at, when the server resamples to it.
+    #[serde(default)]
+    pub resampled_to: Option<u32>,
+    /// For shared mode: the Bluetooth codec in use.
+    #[serde(default)]
+    pub codec: Option<String>,
+    /// For shared mode: whether the way to the speaker loses information.
+    #[serde(default)]
+    pub lossy: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -5,6 +5,7 @@
 use phonia_core::decode::SourceSpec;
 use phonia_core::engine::{self, EndReason, OutputState, ReleaseReason, SeekTarget};
 use phonia_core::output::alsa::{ProcReading, SinkReport};
+use phonia_core::output::catalog::{self, Entry};
 use phonia_core::queue::{self, ItemId, QueueSnapshot};
 use phonia_ipc as ipc;
 use std::time::Duration;
@@ -86,7 +87,7 @@ fn entry_of(track: &engine::TrackRef, queue: &QueueSnapshot) -> (Option<ipc::Ite
     (Some(ipc::ItemId(id.0)), source)
 }
 
-pub fn status_dto(status: &engine::Status, queue: &QueueSnapshot) -> ipc::Status {
+pub fn status_dto(status: &engine::Status, queue: &QueueSnapshot, route: Option<ipc::Route>) -> ipc::Status {
     ipc::Status {
         state: state(status.state),
         track: status.track.as_ref().map(|meta| {
@@ -101,6 +102,23 @@ pub fn status_dto(status: &engine::Status, queue: &QueueSnapshot) -> ipc::Status
             OutputState::Open => ipc::Output::Open,
             OutputState::Released { by } => ipc::Output::Released { by: by.clone() },
         },
+        route,
+    }
+}
+
+pub fn output_info(entry: &Entry) -> ipc::OutputInfo {
+    ipc::OutputInfo {
+        id: entry.id.clone(),
+        mode: match entry.mode {
+            catalog::Mode::Exclusive => ipc::OutputMode::Exclusive,
+            catalog::Mode::Shared => ipc::OutputMode::Shared,
+        },
+        name: entry.name.clone(),
+        detail: entry.detail.clone(),
+        bit_perfect: entry.bit_perfect,
+        lossy: entry.lossy,
+        codec: entry.codec.clone(),
+        is_default: entry.is_default,
     }
 }
 
@@ -109,6 +127,7 @@ fn release_reason(reason: ReleaseReason) -> ipc::ReleaseReason {
         ReleaseReason::Idle => ipc::ReleaseReason::Idle,
         ReleaseReason::Command => ipc::ReleaseReason::Command,
         ReleaseReason::Requested => ipc::ReleaseReason::Requested,
+        ReleaseReason::Lost => ipc::ReleaseReason::Lost,
     }
 }
 
@@ -123,6 +142,14 @@ pub fn sink_report(report: &SinkReport) -> ipc::SinkReport {
             ProcReading::Read { contents, .. } => Some(contents.clone()),
             _ => None,
         },
+        mode: Some(if report.shared.is_some() { ipc::OutputMode::Shared } else { ipc::OutputMode::Exclusive }),
+        resampled_to: report
+            .shared
+            .as_ref()
+            .map(|route| route.sink_rate)
+            .filter(|rate| *rate != report.source.sample_rate),
+        codec: report.shared.as_ref().and_then(|route| route.codec.clone()),
+        lossy: report.shared.as_ref().is_some_and(|route| route.lossy),
     }
 }
 
@@ -204,7 +231,7 @@ mod tests {
             duration: Some(Duration::from_secs(215)),
             output: OutputState::Released { by: Some("jackd".into()) },
         };
-        let dto = status_dto(&status, &snapshot());
+        let dto = status_dto(&status, &snapshot(), None);
         let track = dto.track.unwrap();
         assert_eq!(track.item_id, Some(ipc::ItemId(7)));
         assert_eq!(track.source.as_deref(), Some("file:/m/a.flac"), "the wire names the source, never the engine's reference");

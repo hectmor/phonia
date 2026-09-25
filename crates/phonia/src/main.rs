@@ -29,6 +29,10 @@ struct Cli {
 }
 
 /// The `--device` help shared by the commands that play.
+/// What `--output` says, for `--help`.
+const OUTPUT_HELP: &str = "The output to play on: exclusive:<card> (bit-perfect), shared:default or shared:<name> \
+     (through the sound server, not bit-perfect). `phonia devices` lists them. Overrides [output] in the config file.";
+
 const DEVICE_HELP: &str = "The ALSA device: hw:N,D, a card id such as hw:DS2,0, or `auto`. \
     Default: [output] device in the config file (`phonia devices` lists the cards)";
 
@@ -60,6 +64,8 @@ enum Command {
         track_ids: Vec<String>,
         #[arg(long, help = DEVICE_HELP)]
         device: Option<String>,
+        #[arg(long, value_name = "ID", conflicts_with = "device", help = OUTPUT_HELP)]
+        output: Option<String>,
         /// The highest quality to ask TIDAL for: hires or lossless. Default: [tidal] max_quality
         /// in the config file, else hires.
         #[arg(long, value_name = "hires|lossless")]
@@ -84,6 +90,8 @@ enum Command {
         paths: Vec<PathBuf>,
         #[arg(long, help = DEVICE_HELP)]
         device: Option<String>,
+        #[arg(long, value_name = "ID", conflicts_with = "device", help = OUTPUT_HELP)]
+        output: Option<String>,
         /// Read playback commands from the keyboard (pause, seek, next, ...); `?` lists them.
         #[arg(long)]
         interactive: bool,
@@ -165,16 +173,22 @@ async fn main() -> ExitCode {
             Ok(settings) => session_cmd::whoami(settings.session_store.value, check).await,
             Err(error) => Err(error),
         },
-        Command::Play { track_ids, device, quality, save_mp4, interactive, shuffle, repeat } => {
-            match settings(cli.config.as_deref(), Overrides { device, max_quality: quality, ..Overrides::default() }) {
+        Command::Play { track_ids, device, output, quality, save_mp4, interactive, shuffle, repeat } => {
+            match (Overrides { device, max_quality: quality, ..Overrides::default() })
+                .with_output(output.as_deref())
+                .and_then(|overrides| settings(cli.config.as_deref(), overrides))
+            {
                 Ok(settings) => {
                     run_play(&track_ids, &settings, save_mp4.as_deref(), interactive, shuffle, repeat.into()).await
                 }
                 Err(error) => Err(error),
             }
         }
-        Command::PlayFile { paths, device, interactive, shuffle, repeat } => {
-            match settings(cli.config.as_deref(), Overrides { device, ..Overrides::default() }) {
+        Command::PlayFile { paths, device, output, interactive, shuffle, repeat } => {
+            match (Overrides { device, ..Overrides::default() })
+                .with_output(output.as_deref())
+                .and_then(|overrides| settings(cli.config.as_deref(), overrides))
+            {
                 Ok(settings) => run_play_file(&paths, &settings, interactive, shuffle, repeat.into()).await,
                 Err(error) => Err(error),
             }
@@ -310,4 +324,18 @@ fn reserver(settings: &phonia_core::config::Settings) -> Option<Arc<dyn phonia_c
             phonia_core::output::reserve::PRIORITY,
         )) as Arc<dyn phonia_core::output::reserve::DeviceReserver>
     })
+}
+
+/// `--output` on top of the other overrides.
+trait WithOutput: Sized {
+    fn with_output(self, id: Option<&str>) -> Result<Self>;
+}
+
+impl WithOutput for Overrides {
+    fn with_output(self, id: Option<&str>) -> Result<Self> {
+        match id {
+            Some(id) => self.with_output_id(id),
+            None => Ok(self),
+        }
+    }
 }
