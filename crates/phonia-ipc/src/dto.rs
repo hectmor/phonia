@@ -52,6 +52,18 @@ pub struct Status {
     /// Where the sound goes, when the daemon knows (since 1.2).
     #[serde(default)]
     pub route: Option<Route>,
+    /// The volume, when the output has one phonia can set: a shared output does, an exclusive
+    /// card does not (since 1.3).
+    #[serde(default)]
+    pub volume: Option<Volume>,
+}
+
+/// How loud, as the desktop's mixers show it: 100 is unity gain, and the scale is cubic in
+/// amplitude, so 50 is about -18 dB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Volume {
+    pub percent: u8,
+    pub muted: bool,
 }
 
 /// How the daemon reaches an output.

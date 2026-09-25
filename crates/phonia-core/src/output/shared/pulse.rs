@@ -7,7 +7,7 @@
 use super::ring::Ring;
 use super::{SharedSink, Timing, Transport};
 use crate::output::alsa::{ReportHandler, SharedRoute, SinkReport};
-use crate::output::{AudioSink, SinkFactory};
+use crate::output::{AudioSink, SinkFactory, Volume, VolumeControl, VolumeHandler};
 use crate::decode::SourceSpec;
 use anyhow::{Context, Result, anyhow, bail};
 use futures_executor::block_on;
@@ -17,7 +17,8 @@ use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::io::BufReader;
 use std::os::unix::net::UnixStream;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// How long a named output gets to appear (a card that phonia has just given back takes a moment to
@@ -195,11 +196,194 @@ pub async fn outputs() -> Result<Vec<Output>> {
     list_outputs(&connect()?).await
 }
 
+/// How long after phonia sets the volume that changes the server reports are taken as its own echo.
+const OWN_CHANGE_ECHO: Duration = Duration::from_millis(600);
+
+/// What the server calls unity gain: 100%.
+const VOLUME_NORM: u32 = 65_536;
+
+/// The server's raw volume for a percentage: what the desktop's mixers show as that percentage.
+fn raw_from_percent(percent: u8) -> u32 {
+    (u32::from(percent.min(100)) * VOLUME_NORM + 50) / 100
+}
+
+/// The percentage a raw volume shows as.
+fn percent_from_raw(raw: u32) -> u8 {
+    ((u64::from(raw) * 100 + u64::from(VOLUME_NORM) / 2) / u64::from(VOLUME_NORM)).min(255) as u8
+}
+
+/// The volume of the stream on the server, kept across streams.
+///
+/// A new track in another format, or another output, is a new stream that must start at the volume
+/// that was set, so the state lives here and is handed to each stream as it is created. Changes
+/// while a stream plays go to the server as commands on a connection of their own (the client
+/// library does not expose them), and changes made by someone else (the desktop's mixer) come back
+/// through [`Watcher`].
+pub struct SharedVolume {
+    inner: Mutex<VolumeInner>,
+    handler: Mutex<Option<VolumeHandler>>,
+    next_generation: AtomicU64,
+}
+
+#[derive(Default)]
+struct VolumeInner {
+    volume: Volume,
+    /// When phonia last set the volume itself. The server tells us about our own changes too, and
+    /// reading them back while several are in flight would report an old value as if it were new.
+    last_set: Option<std::time::Instant>,
+    stream: Option<AttachedStream>,
+    /// The connection the commands go over; made when first needed and again after a failure.
+    link: Option<(BufReader<UnixStream>, u16)>,
+}
+
+struct AttachedStream {
+    /// The stream's index on the server (its sink input).
+    index: u32,
+    channels: u8,
+    generation: u64,
+}
+
+impl SharedVolume {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::default(),
+            handler: Mutex::new(None),
+            next_generation: AtomicU64::new(1),
+        })
+    }
+
+    /// The volume a stream should be created with.
+    fn channel_volume(&self, channels: u8) -> (protocol::ChannelVolume, bool) {
+        let volume = self.inner.lock().unwrap().volume;
+        let mut channel_volume = protocol::ChannelVolume::empty();
+        for _ in 0..channels {
+            channel_volume.push(protocol::Volume::from_u32_clamped(raw_from_percent(volume.percent)));
+        }
+        (channel_volume, volume.muted)
+    }
+
+    /// A stream now plays: later changes go to it. Returns what to give back to [`detach`].
+    fn attach(&self, index: u32, channels: u8) -> u64 {
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        self.inner.lock().unwrap().stream = Some(AttachedStream { index, channels, generation });
+        generation
+    }
+
+    /// The stream is gone, unless a newer one already took its place.
+    fn detach(&self, generation: u64) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.stream.as_ref().is_some_and(|stream| stream.generation == generation) {
+            inner.stream = None;
+        }
+    }
+
+    /// Sends the volume to the stream that plays, if there is one.
+    fn apply(inner: &mut VolumeInner) -> Result<()> {
+        let Some(stream) = &inner.stream else { return Ok(()) };
+        let (index, channels) = (stream.index, stream.channels);
+        let volume = inner.volume;
+        // A connection that has died is made again once.
+        for attempt in 0..2 {
+            if inner.link.is_none() {
+                inner.link = Some(raw_connect()?);
+            }
+            let (reader, version) = inner.link.as_mut().expect("just made");
+            let sent = (|| -> Result<()> {
+                let mut channel_volume = protocol::ChannelVolume::empty();
+                for _ in 0..channels {
+                    channel_volume.push(protocol::Volume::from_u32_clamped(raw_from_percent(volume.percent)));
+                }
+                protocol::write_command_message(
+                    reader.get_mut(),
+                    10,
+                    &protocol::Command::SetSinkInputVolume(protocol::SetStreamVolumeParams { index, volume: channel_volume }),
+                    *version,
+                )?;
+                protocol::read_ack_message(reader)?;
+                protocol::write_command_message(
+                    reader.get_mut(),
+                    11,
+                    &protocol::Command::SetSinkInputMute(protocol::SetStreamMuteParams { index, mute: volume.muted }),
+                    *version,
+                )?;
+                protocol::read_ack_message(reader)?;
+                Ok(())
+            })();
+            match sent {
+                Ok(()) => return Ok(()),
+                Err(_) if attempt == 0 => inner.link = None,
+                Err(error) => return Err(error).context("setting the stream's volume"),
+            }
+        }
+        unreachable!("the second attempt returns")
+    }
+
+    /// The desktop changed the volume of stream `index`.
+    fn changed_outside(&self, index: u32, volume: Volume) {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            let ours = inner.last_set.is_some_and(|at| at.elapsed() < OWN_CHANGE_ECHO);
+            if ours || inner.stream.as_ref().map(|stream| stream.index) != Some(index) || inner.volume == volume {
+                return;
+            }
+            inner.volume = volume;
+        }
+        let handler = self.handler.lock().unwrap().clone();
+        if let Some(handler) = handler {
+            handler(volume);
+        }
+    }
+}
+
+impl VolumeControl for SharedVolume {
+    fn get(&self) -> Volume {
+        self.inner.lock().unwrap().volume
+    }
+
+    fn set(&self, volume: Volume) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.volume = Volume { percent: volume.percent.min(100), muted: volume.muted };
+        inner.last_set = Some(std::time::Instant::now());
+        Self::apply(&mut inner)
+    }
+
+    fn on_change(&self, handler: VolumeHandler) {
+        *self.handler.lock().unwrap() = Some(handler);
+    }
+}
+
+/// Finds our stream among the server's sink inputs by the id we gave it, and how many channels it has.
+fn find_stream(stream_id: &str) -> Result<(u32, u8)> {
+    let (mut reader, version) = raw_connect()?;
+    protocol::write_command_message(reader.get_mut(), 3, &protocol::Command::GetSinkInputInfoList, version)?;
+    let (_, inputs) = protocol::read_reply_message::<protocol::SinkInputInfoList>(&mut reader, version)
+        .context("listing the sound server's streams")?;
+    inputs
+        .iter()
+        .find(|input| input.props.get_bytes(c"phonia.stream-id").map(|id| id.strip_suffix(&[0]).unwrap_or(id)) == Some(stream_id.as_bytes()))
+        .map(|input| (input.index, input.sample_spec.channels))
+        .ok_or_else(|| anyhow!("the new stream is not among the sound server's streams"))
+}
+
+/// The volume of stream `index` as the server has it now.
+fn read_stream_volume(index: u32) -> Result<Volume> {
+    let (mut reader, version) = raw_connect()?;
+    protocol::write_command_message(reader.get_mut(), 4, &protocol::Command::GetSinkInputInfo(index), version)?;
+    let (_, info) = protocol::read_reply_message::<protocol::SinkInputInfo>(&mut reader, version)?;
+    let channels = info.cvolume.channels();
+    let raw = channels.iter().map(|volume| u64::from(volume.as_u32())).sum::<u64>() / channels.len().max(1) as u64;
+    Ok(Volume { percent: percent_from_raw(raw as u32), muted: info.muted })
+}
+
+static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
+
 /// The real [`Transport`]: one playback stream on the server.
 struct PulseTransport {
     stream: PlaybackStream,
     /// Shuts the subscription connection when the stream goes.
     _watcher: Option<Watcher>,
+    volume: Arc<SharedVolume>,
+    generation: u64,
 }
 
 impl Transport for PulseTransport {
@@ -225,6 +409,7 @@ impl Transport for PulseTransport {
 
 impl Drop for PulseTransport {
     fn drop(&mut self) {
+        self.volume.detach(self.generation);
         // Ends the stream on the server; a failure only means it was already gone.
         let _ = block_on(self.stream.clone().delete());
     }
@@ -238,12 +423,14 @@ struct Watcher {
 }
 
 impl Watcher {
-    fn start(sink_index: u32, sink_name: String, ring: Ring) -> Result<Watcher> {
+    /// `sink` is the output the stream may not leave, when there is one; `stream_index` is the
+    /// stream, whose volume the desktop's mixer may change.
+    fn start(sink: Option<(u32, String)>, stream_index: u32, ring: Ring, volume: Arc<SharedVolume>) -> Result<Watcher> {
         let (mut reader, version) = raw_connect()?;
         protocol::write_command_message(
             reader.get_mut(),
             2,
-            &protocol::Command::Subscribe(protocol::SubscriptionMask::SINK),
+            &protocol::Command::Subscribe(protocol::SubscriptionMask::SINK | protocol::SubscriptionMask::SINK_INPUT),
             version,
         )?;
         protocol::read_ack_message(&mut reader).context("subscribing to the sound server's outputs")?;
@@ -252,13 +439,23 @@ impl Watcher {
         std::thread::Builder::new().name("phonia-output-watch".into()).spawn(move || {
             loop {
                 match protocol::read_command_message(&mut reader, version) {
-                    Ok((_, protocol::Command::SubscribeEvent(event)))
-                        if event.event_facility == protocol::SubscriptionEventFacility::Sink
-                            && event.event_type == protocol::SubscriptionEventType::Removed
-                            && event.index == Some(sink_index) =>
-                    {
-                        ring.mark_gone(&format!("the output '{sink_name}' went away"));
-                        return;
+                    Ok((_, protocol::Command::SubscribeEvent(event))) => {
+                        use protocol::{SubscriptionEventFacility as Facility, SubscriptionEventType as Kind};
+                        match (event.event_facility, event.event_type) {
+                            (Facility::Sink, Kind::Removed)
+                                if sink.as_ref().is_some_and(|(index, _)| event.index == Some(*index)) =>
+                            {
+                                let name = sink.as_ref().map(|(_, name)| name.as_str()).unwrap_or_default();
+                                ring.mark_gone(&format!("the output '{name}' went away"));
+                                return;
+                            }
+                            (Facility::SinkInput, Kind::Changed) if event.index == Some(stream_index) => {
+                                if let Ok(current) = read_stream_volume(stream_index) {
+                                    volume.changed_outside(stream_index, current);
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                     Ok(_) => {}
                     Err(error) => {
@@ -340,11 +537,12 @@ pub struct SharedSinkFactory {
     target: Target,
     client: Mutex<Option<Client>>,
     on_report: Option<ReportHandler>,
+    volume: Arc<SharedVolume>,
 }
 
 impl SharedSinkFactory {
     pub fn new(target: Target) -> Self {
-        Self { target, client: Mutex::new(None), on_report: None }
+        Self { target, client: Mutex::new(None), on_report: None, volume: SharedVolume::new() }
     }
 
     /// Have every sink hand its report (which says it is not bit-perfect, and why) to `handler`
@@ -411,10 +609,15 @@ impl SharedSinkFactory {
 
         // A named output is what the user chose: if it goes away, the stream must not jump to the
         // speakers.
-        let flags = protocol::stream::StreamFlags { no_move: named, ..Default::default() };
+        // The stream starts at the volume that was set, so a new track never jumps in loudness.
+        let (cvolume, muted) = self.volume.channel_volume(spec.channels as u8);
+        let flags = protocol::stream::StreamFlags { no_move: named, start_muted: Some(muted), ..Default::default() };
+        // How the stream is found on the server afterwards, to set its volume.
+        let stream_id = NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed).to_string();
         let mut props = protocol::Props::new();
         props.set(protocol::Prop::ApplicationName, c"phonia");
         props.set(protocol::Prop::MediaRole, c"Music");
+        props.set_bytes(c"phonia.stream-id", CString::new(stream_id.as_str())?.to_bytes_with_nul());
         props.set_bytes(c"resample.quality", RESAMPLE_QUALITY.to_bytes_with_nul());
         let params = protocol::PlaybackStreamParams {
             sample_spec: protocol::SampleSpec {
@@ -423,6 +626,7 @@ impl SharedSinkFactory {
                 sample_rate: rate,
             },
             channel_map,
+            cvolume: Some(cvolume),
             sink_name: Some(if named { info.name.clone() } else { protocol::DEFAULT_SINK.to_owned() }),
             flags,
             props,
@@ -449,16 +653,22 @@ impl SharedSinkFactory {
             }
         };
 
-        let watcher = if named {
-            match Watcher::start(stream.sink(), output.description.clone(), ring.clone()) {
-                Ok(watcher) => Some(watcher),
-                Err(error) => {
-                    crate::warn!("phonia: not watching for the output going away: {error:#}");
-                    None
-                }
+        // Where the stream is on the server, so that its volume can be set and followed.
+        let attached = match find_stream(&stream_id) {
+            Ok((index, channels)) => Some((index, self.volume.attach(index, channels))),
+            Err(error) => {
+                crate::warn!("phonia: the volume can't be controlled for this stream: {error:#}");
+                None
             }
-        } else {
-            None
+        };
+        let generation = attached.map_or(0, |(_, generation)| generation);
+        let sink = named.then(|| (stream.sink(), output.description.clone()));
+        let watcher = match Watcher::start(sink, attached.map_or(u32::MAX, |(index, _)| index), ring.clone(), self.volume.clone()) {
+            Ok(watcher) => Some(watcher),
+            Err(error) => {
+                crate::warn!("phonia: not watching the output: {error:#}");
+                None
+            }
         };
 
         let route = SharedRoute {
@@ -473,7 +683,7 @@ impl SharedSinkFactory {
             .clone()
             .map(|handler| (handler, SinkReport::shared(spec, "S32LE".to_string(), route)));
         let server_target_frames = u64::from(rate * TARGET_NUM / TARGET_DEN);
-        let transport = PulseTransport { stream, _watcher: watcher };
+        let transport = PulseTransport { stream, _watcher: watcher, volume: self.volume.clone(), generation };
         Ok(Box::new(SharedSink::new(spec, ring, transport, prefix_frames, server_target_frames, report)))
     }
 }
@@ -481,6 +691,10 @@ impl SharedSinkFactory {
 impl SinkFactory for SharedSinkFactory {
     fn open(&self, spec: SourceSpec) -> Result<Box<dyn AudioSink>> {
         self.open_stream(spec)
+    }
+
+    fn volume(&self) -> Option<Arc<dyn VolumeControl>> {
+        Some(self.volume.clone())
     }
 }
 
@@ -566,6 +780,83 @@ mod tests {
         let mut p = protocol::Props::new();
         p.set(protocol::Prop::MediaRole, c"music");
         assert_eq!(props_of(&p).get("media.role").map(String::as_str), Some("music"));
+    }
+
+    #[test]
+    fn percentages_are_the_ones_the_desktop_mixers_show() {
+        assert_eq!(raw_from_percent(100), 65_536);
+        assert_eq!(raw_from_percent(0), 0);
+        assert_eq!(raw_from_percent(50), 32_768);
+        assert_eq!(raw_from_percent(200), 65_536, "phonia never boosts above unity gain");
+        for percent in 0..=100u8 {
+            assert_eq!(percent_from_raw(raw_from_percent(percent)), percent, "{percent}");
+        }
+        assert_eq!(percent_from_raw(98_304), 150, "a mixer may boost; it is reported as it is");
+    }
+
+    #[test]
+    fn a_new_stream_starts_at_the_volume_that_was_set() {
+        let volume = SharedVolume::new();
+        volume.set(Volume { percent: 30, muted: true }).unwrap();
+        let (channel_volume, muted) = volume.channel_volume(2);
+        assert_eq!(channel_volume.channels().iter().map(|v| v.as_u32()).collect::<Vec<_>>(), [raw_from_percent(30); 2]);
+        assert!(muted);
+        assert_eq!(volume.get(), Volume { percent: 30, muted: true });
+    }
+
+    #[test]
+    fn setting_more_than_unity_is_capped() {
+        let volume = SharedVolume::new();
+        volume.set(Volume { percent: 250, muted: false }).unwrap();
+        assert_eq!(volume.get().percent, 100);
+    }
+
+    #[test]
+    fn a_change_from_the_mixer_is_reported_once_and_only_for_the_stream_that_plays() {
+        let volume = SharedVolume::new();
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let seen = heard.clone();
+        volume.on_change(Arc::new(move |v| seen.lock().unwrap().push(v)));
+        let generation = volume.attach(7, 2);
+
+        volume.changed_outside(9, Volume { percent: 10, muted: false }); // some other stream
+        volume.changed_outside(7, Volume { percent: 40, muted: false });
+        volume.changed_outside(7, Volume { percent: 40, muted: false }); // nothing changed
+        assert_eq!(*heard.lock().unwrap(), [Volume { percent: 40, muted: false }]);
+        assert_eq!(volume.get().percent, 40);
+
+        volume.detach(generation);
+        volume.changed_outside(7, Volume { percent: 20, muted: false });
+        assert_eq!(heard.lock().unwrap().len(), 1, "the stream is gone");
+    }
+
+    #[test]
+    fn what_the_server_reports_right_after_phonia_set_the_volume_is_its_own_echo() {
+        let volume = SharedVolume::new();
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let seen = heard.clone();
+        volume.on_change(Arc::new(move |v| seen.lock().unwrap().push(v)));
+        // (Set before a stream is attached, so that nothing is sent to a real server.)
+        volume.set(Volume { percent: 45, muted: false }).unwrap();
+        volume.attach(7, 2);
+        volume.changed_outside(7, Volume { percent: 40, muted: false }); // an older value read back late
+        assert!(heard.lock().unwrap().is_empty());
+        assert_eq!(volume.get().percent, 45);
+
+        std::thread::sleep(OWN_CHANGE_ECHO + Duration::from_millis(50));
+        volume.changed_outside(7, Volume { percent: 20, muted: false }); // the mixer, later
+        assert_eq!(volume.get().percent, 20);
+    }
+
+    #[test]
+    fn an_older_stream_going_away_does_not_detach_a_newer_one() {
+        let volume = SharedVolume::new();
+        let old = volume.attach(1, 2);
+        let new = volume.attach(2, 2);
+        volume.detach(old);
+        volume.changed_outside(2, Volume { percent: 55, muted: false });
+        assert_eq!(volume.get().percent, 55, "the newer stream is still attached");
+        volume.detach(new);
     }
 
     // ---- against the real sound server -------------------------------------------------------
@@ -733,5 +1024,93 @@ mod tests {
         let spec = SourceSpec { sample_rate: 48_000, channels: 2, bits_per_sample: 24 };
         let error = SharedSinkFactory::new(Target::Named("no_such_output".into())).open(spec).err().unwrap();
         assert!(format!("{error:#}").contains("phonia devices"), "{error:#}");
+    }
+
+    fn pactl_output(args: &[&str]) -> String {
+        String::from_utf8_lossy(&std::process::Command::new("pactl").args(args).output().unwrap().stdout).to_string()
+    }
+
+    /// The server's index for the sink called `name`.
+    fn sink_index(name: &str) -> String {
+        let sinks = pactl_output(&["list", "short", "sinks"]);
+        sinks.lines().find(|line| line.split_whitespace().nth(1) == Some(name)).unwrap().split_whitespace().next().unwrap().to_string()
+    }
+
+    /// The volume line and mute of phonia's stream on the sink called `sink`. Tests run side by side
+    /// and each has a sink of its own, so the sink says which stream is ours.
+    fn server_volume(sink: &str) -> Option<(String, bool)> {
+        let wanted = format!("Sink: {}", sink_index(sink));
+        let text = pactl_output(&["list", "sink-inputs"]);
+        let block = text
+            .split("Sink Input #")
+            .skip(1)
+            .find(|block| block.contains("application.name = \"phonia\"") && block.lines().any(|line| line.trim() == wanted))?;
+        let volume = block.lines().find(|line| line.trim_start().starts_with("Volume:"))?.to_string();
+        let muted = block.lines().any(|line| line.trim() == "Mute: yes");
+        Some((volume, muted))
+    }
+
+    /// The index of the stream playing on the sink called `sink`.
+    fn stream_on(sink: &str) -> String {
+        let sink = sink_index(sink);
+        let streams = pactl_output(&["list", "short", "sink-inputs"]);
+        streams.lines().find(|line| line.split_whitespace().nth(1) == Some(sink.as_str())).unwrap().split_whitespace().next().unwrap().to_string()
+    }
+
+    #[test]
+    #[ignore = "needs a sound server and pactl"]
+    fn the_volume_and_mute_reach_the_stream_and_a_new_stream_starts_at_them() {
+        let sink_name = "phonia_test_volume";
+        let _null = NullSink::load(sink_name);
+        let spec = SourceSpec { sample_rate: 48_000, channels: 2, bits_per_sample: 24 };
+        let factory = SharedSinkFactory::new(Target::Named(sink_name.into()));
+        let control = factory.volume().expect("a shared output has a volume");
+        let mut sink = factory.open(spec).unwrap();
+        write_all(&mut *sink, &ramp(4_800), 2);
+
+        control.set(Volume { percent: 50, muted: false }).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let (volume, muted) = server_volume(sink_name).expect("phonia's stream is on the server");
+        assert!(volume.contains("50%") && !muted, "{volume}");
+
+        control.set(Volume { percent: 50, muted: true }).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(server_volume(sink_name).unwrap().1, "muted");
+
+        // The next track has another format: a new stream, at the same volume.
+        drop(sink);
+        let spec96 = SourceSpec { sample_rate: 96_000, ..spec };
+        let mut second = factory.open(spec96).unwrap();
+        write_all(&mut *second, &ramp(4_800), 2);
+        std::thread::sleep(Duration::from_millis(300));
+        let (volume, muted) = server_volume(sink_name).unwrap();
+        assert!(volume.contains("50%") && muted, "{volume} muted={muted}");
+    }
+
+    #[test]
+    #[ignore = "needs a sound server and pactl"]
+    fn a_change_made_in_the_desktops_mixer_is_followed() {
+        let sink_name = "phonia_test_mixer";
+        let _null = NullSink::load(sink_name);
+        let spec = SourceSpec { sample_rate: 48_000, channels: 2, bits_per_sample: 24 };
+        let factory = SharedSinkFactory::new(Target::Named(sink_name.into()));
+        let control = factory.volume().unwrap();
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let seen = heard.clone();
+        control.on_change(Arc::new(move |volume| seen.lock().unwrap().push(volume)));
+        let mut sink = factory.open(spec).unwrap();
+        write_all(&mut *sink, &ramp(4_800), 2);
+
+        let index = stream_on(sink_name);
+        std::process::Command::new("pactl").args(["set-sink-input-volume", &index, "30%"]).status().unwrap();
+        std::process::Command::new("pactl").args(["set-sink-input-mute", &index, "1"]).status().unwrap();
+        for _ in 0..50 {
+            if control.get() == (Volume { percent: 30, muted: true }) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(control.get(), Volume { percent: 30, muted: true });
+        assert!(!heard.lock().unwrap().is_empty(), "the handler was told");
     }
 }

@@ -102,10 +102,50 @@ pub trait SinkFactory: Send + Sync {
     /// Not called between two tracks of different formats, where the card stays reserved.
     fn release(&self) {}
 
+    /// The volume of this output, when it has one phonia can set: the stream's volume in shared
+    /// mode. An exclusive card has none (the DAC's own volume applies, and the audio is never
+    /// scaled).
+    fn volume(&self) -> Option<Arc<dyn VolumeControl>> {
+        None
+    }
+
     /// Installs the function to call when another program asks for the card. It blocks until the
     /// engine has answered, and returns whether the card was given up. Factories that don't reserve
     /// anything ignore it.
     fn on_release_request(&self, _handler: ReleaseHandler) {}
+}
+
+/// How loud, as a percentage of what the stream would play at unity gain (100), and whether it is
+/// muted. Digital: it scales the audio before the sound server mixes it, so it never touches the
+/// hardware volume. The scale is the one the desktop's mixers show, which is cubic in amplitude:
+/// 50% is about -18 dB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Volume {
+    pub percent: u8,
+    pub muted: bool,
+}
+
+impl Default for Volume {
+    fn default() -> Self {
+        Volume { percent: 100, muted: false }
+    }
+}
+
+/// The volume of the output the engine plays on. It outlives the streams: a new track with another
+/// format, or another output, starts at the volume that was set.
+/// Called when the volume changes from outside.
+pub type VolumeHandler = Arc<dyn Fn(Volume) + Send + Sync>;
+
+pub trait VolumeControl: Send + Sync {
+    fn get(&self) -> Volume;
+
+    /// Sets the volume, keeping it for streams that come later and applying it to the one that is
+    /// playing.
+    fn set(&self, volume: Volume) -> Result<()>;
+
+    /// Installs the function to call when something other than [`VolumeControl::set`] changes the
+    /// volume (the desktop's mixer).
+    fn on_change(&self, handler: VolumeHandler);
 }
 
 /// Another program asking for the card the engine is playing on.

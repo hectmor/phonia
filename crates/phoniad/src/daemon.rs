@@ -4,7 +4,7 @@
 //! ordered stream of events. The server in `server.rs` puts them on a socket.
 
 use crate::convert;
-use crate::outputs::Outputs;
+use crate::outputs::{Outputs, VolumeError};
 use futures_util::StreamExt;
 use futures_util::stream;
 use phonia_core::control::Controller;
@@ -65,6 +65,7 @@ impl Daemon {
     /// Must be called inside a tokio runtime.
     pub fn start(parts: DaemonParts) -> Result<Arc<Daemon>> {
         let queue = Queue::new(parts.opener.clone() as Arc<dyn TrackOpener>);
+        let first_sinks = parts.sinks.clone();
         let engine = Engine::spawn_with_options(tokio::runtime::Handle::current(), parts.sinks, queue.clone(), parts.engine)?;
         let controller = Controller::new(engine, queue);
 
@@ -85,6 +86,15 @@ impl Daemon {
                 pid: std::process::id(),
             },
         });
+
+        // The volume can be changed from the desktop's mixer too; the daemon follows and announces it.
+        let weak = Arc::downgrade(&daemon);
+        daemon.outputs.on_volume_change(Arc::new(move |volume| {
+            if let Some(daemon) = weak.upgrade() {
+                daemon.volume_changed_outside(volume);
+            }
+        }));
+        daemon.outputs.attach(first_sinks, false);
 
         tokio::spawn(daemon.clone().fan_in(parts.reports));
         Ok(daemon)
@@ -134,7 +144,7 @@ impl Daemon {
     fn state(&self) -> (ipc::Status, ipc::Queue) {
         let queue = self.controller.snapshot();
         (
-            convert::status_dto(&self.controller.status(), &queue, Some(self.outputs.route())),
+            convert::status_dto(&self.controller.status(), &queue, Some(self.outputs.route()), self.outputs.volume()),
             convert::queue_dto(&queue),
         )
     }
@@ -154,7 +164,7 @@ impl Daemon {
     }
 
     pub fn hello(&self) -> ipc::ServerHello {
-        ipc::ServerHello { protocol: ipc::PROTOCOL, server: self.info.clone(), capabilities: vec![ipc::CAP_OUTPUT_RELEASE.to_string(), ipc::CAP_OUTPUT_SELECT.to_string()] }
+        ipc::ServerHello { protocol: ipc::PROTOCOL, server: self.info.clone(), capabilities: vec![ipc::CAP_OUTPUT_RELEASE.to_string(), ipc::CAP_OUTPUT_SELECT.to_string(), ipc::CAP_VOLUME.to_string()] }
     }
 
     /// Flips to true when the daemon should stop.
@@ -213,11 +223,15 @@ impl Daemon {
         };
         // Taking a card or opening a Bluetooth speaker can take a while, and the audio thread
         // may be in the middle of a write.
-        let switched = tokio::task::block_in_place(|| self.controller.set_output(factory));
+        let switched = tokio::task::block_in_place(|| self.controller.set_output(factory.clone()));
         let entries = self.outputs.list().await;
-        self.outputs.switched_to(spec, &entries);
+        self.outputs.switched_to(spec, &entries, factory);
         let route = self.outputs.route();
         self.publish(|_| ipc::Event::OutputChanged { route });
+        // The new output starts at the volume that was set; the clients are told what it is.
+        if let Some(volume) = self.outputs.volume() {
+            self.publish(|_| ipc::Event::VolumeChanged { percent: volume.percent, muted: volume.muted });
+        }
         match switched {
             Ok(()) => Reply::Ok(Payload::Ack),
             Err(error) => self::error(ErrorCode::Internal, &format!("{error:#}")),
@@ -227,6 +241,28 @@ impl Daemon {
     /// Names the output the daemon started on the way the list of outputs does.
     pub async fn refresh_route(&self) {
         self.outputs.refresh().await;
+    }
+
+    /// Changes the volume and tells everyone. Refused for an output that has none to set.
+    fn change_volume(&self, change: impl FnOnce(&mut phonia_core::output::Volume)) -> Reply {
+        match self.outputs.set_volume(change) {
+            Ok(volume) => {
+                self.publish(|_| ipc::Event::VolumeChanged { percent: volume.percent, muted: volume.muted });
+                Reply::Ok(Payload::Ack)
+            }
+            Err(VolumeError::Unsupported) => self::error(
+                ErrorCode::Unsupported,
+                "this output has no volume to set: an exclusive card plays the audio unscaled, so use \
+                 the DAC's own volume, or switch to a shared output",
+            ),
+            Err(VolumeError::Failed(why)) => self::error(ErrorCode::Internal, &why),
+        }
+    }
+
+    /// The desktop's mixer changed the volume of the stream.
+    fn volume_changed_outside(&self, volume: phonia_core::output::Volume) {
+        self.outputs.volume_changed_outside(volume);
+        self.publish(|_| ipc::Event::VolumeChanged { percent: volume.percent, muted: volume.muted });
     }
 
     /// Outputs appeared or disappeared: tells subscribers to ask again.
@@ -253,6 +289,8 @@ impl Daemon {
             Request::Next => send(Command::Next),
             Request::Previous => send(Command::Previous),
             Request::Release => send(Command::Release),
+            Request::SetVolume { percent } => self.change_volume(|volume| volume.percent = percent),
+            Request::SetMute { mute } => self.change_volume(|volume| volume.muted = mute),
             Request::Seek { target } => send(Command::Seek(convert::seek_target(target))),
             Request::QueueRemove { ids } => {
                 let ids: Vec<ItemId> = ids.iter().map(|id| ItemId(id.0)).collect();

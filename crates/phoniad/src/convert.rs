@@ -87,7 +87,12 @@ fn entry_of(track: &engine::TrackRef, queue: &QueueSnapshot) -> (Option<ipc::Ite
     (Some(ipc::ItemId(id.0)), source)
 }
 
-pub fn status_dto(status: &engine::Status, queue: &QueueSnapshot, route: Option<ipc::Route>) -> ipc::Status {
+pub fn status_dto(
+    status: &engine::Status,
+    queue: &QueueSnapshot,
+    route: Option<ipc::Route>,
+    volume: Option<phonia_core::output::Volume>,
+) -> ipc::Status {
     ipc::Status {
         state: state(status.state),
         track: status.track.as_ref().map(|meta| {
@@ -103,6 +108,7 @@ pub fn status_dto(status: &engine::Status, queue: &QueueSnapshot, route: Option<
             OutputState::Released { by } => ipc::Output::Released { by: by.clone() },
         },
         route,
+        volume: volume.map(|volume| ipc::Volume { percent: volume.percent, muted: volume.muted }),
     }
 }
 
@@ -231,7 +237,7 @@ mod tests {
             duration: Some(Duration::from_secs(215)),
             output: OutputState::Released { by: Some("jackd".into()) },
         };
-        let dto = status_dto(&status, &snapshot(), None);
+        let dto = status_dto(&status, &snapshot(), None, None);
         let track = dto.track.unwrap();
         assert_eq!(track.item_id, Some(ipc::ItemId(7)));
         assert_eq!(track.source.as_deref(), Some("file:/m/a.flac"), "the wire names the source, never the engine's reference");
