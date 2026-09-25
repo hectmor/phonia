@@ -180,7 +180,7 @@ async fn main() -> ExitCode {
             }
         }
         Command::Ctl(args) => ctl::run(args, cli.config.as_deref()).await,
-        Command::Devices => device::list(std::path::Path::new(device::ASOUND)).map(|text| println!("{text}")),
+        Command::Devices => run_devices().await,
         Command::Config { action } => config_cmd::run(action, cli.config.as_deref()),
         Command::ProbeDevice { device } => {
             match settings(cli.config.as_deref(), Overrides { device, ..Overrides::default() })
@@ -214,7 +214,7 @@ async fn run_play_file(
     shuffle: bool,
     repeat: Repeat,
 ) -> Result<()> {
-    let device = settings.require_device()?;
+    let sinks = sinks_for(settings)?;
     let queue = Queue::new(Arc::new(DispatchOpener::new(None)));
     for path in paths {
         // Sources are absolute, so a file means the same thing wherever it is opened.
@@ -227,7 +227,7 @@ async fn run_play_file(
     }
     queue.set_shuffle(shuffle);
     queue.set_repeat(repeat);
-    player::run(queue, device, interactive, player_options(settings), reserver(settings)).await
+    player::run(queue, sinks, interactive, player_options(settings)).await
 }
 
 async fn run_play(
@@ -238,7 +238,7 @@ async fn run_play(
     shuffle: bool,
     repeat: Repeat,
 ) -> Result<()> {
-    let device = settings.require_device()?;
+    let sinks = sinks_for(settings)?;
     let store = auth::open_store(settings.session_store.value, auth::Interaction::Allow)?;
     let mut client = auth::load_client(&*store).await?;
     // Only to fail now, with a clear message, if the login no longer works.
@@ -262,7 +262,7 @@ async fn run_play(
     }
     queue.set_shuffle(shuffle);
     queue.set_repeat(repeat);
-    player::run(queue, device, interactive, player_options(settings), reserver(settings)).await
+    player::run(queue, sinks, interactive, player_options(settings)).await
 }
 
 /// What the settings say about how the engine treats the sound card.
@@ -277,6 +277,29 @@ fn player_options(settings: &phonia_core::config::Settings) -> phonia_core::engi
 fn probe_reserver(config_flag: Option<&std::path::Path>) -> Option<Arc<dyn phonia_core::output::reserve::DeviceReserver>> {
     let settings = settings(config_flag, Overrides::default()).ok()?;
     reserver(&settings)
+}
+
+/// `phonia devices`: the sound cards (exclusive) and the sound server's outputs (shared).
+async fn run_devices() -> Result<()> {
+    println!("{}\n", device::list(std::path::Path::new(device::ASOUND))?);
+    match phonia_core::output::shared::pulse::outputs().await {
+        Ok(outputs) => println!("{}", phonia_core::output::shared::pulse::format_outputs(&outputs)),
+        Err(error) => println!("PipeWire outputs (shared mode): not available ({error:#})."),
+    }
+    Ok(())
+}
+
+/// The output to play on, as the settings choose it, printing what each sink reports when it starts.
+fn sinks_for(settings: &Settings) -> Result<Arc<dyn phonia_core::output::SinkFactory>> {
+    Ok(phonia_core::output::factory_for(
+        &settings.output()?,
+        settings.reserve.value,
+        tokio::runtime::Handle::current(),
+        Arc::new(|report| {
+            println!();
+            println!("{}", report.to_text());
+        }),
+    ))
 }
 
 /// Asks the desktop for the sound card through D-Bus, unless `[output] reserve` is off.

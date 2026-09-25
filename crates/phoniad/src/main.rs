@@ -11,9 +11,6 @@ use phonia_core::config::{self, Overrides, Quality};
 use phonia_core::diag::{self, Level};
 use phonia_core::engine;
 use phonia_core::openers::{DispatchOpener, TidalOpener};
-use phonia_core::output::alsa::AlsaSinkFactory;
-use phonia_core::output::dbus::DbusReserver;
-use phonia_core::output::reserve;
 use phonia_core::{auth, tidal};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -67,7 +64,7 @@ async fn run(args: Args) -> Result<()> {
         },
         &loaded.file,
     );
-    let device = settings.require_device()?.to_string();
+    let output = settings.output()?;
 
     // A daemon has no terminal to talk to: what the library would print goes nowhere unless asked.
     diag::set_level(if settings.verbose.value { Level::All } else { Level::Silent });
@@ -87,16 +84,17 @@ async fn run(args: Args) -> Result<()> {
     let opener = Arc::new(DispatchOpener::new(Some(tidal_opener)));
 
     let (report_tx, reports) = mpsc::unbounded_channel();
-    let mut factory = AlsaSinkFactory::new(device.clone()).on_report(Arc::new(move |report| {
-        // Called on the audio thread: an unbounded send never blocks.
-        let _ = report_tx.send(report);
-    }));
-    if settings.reserve.value {
-        // Asks WirePlumber or PulseAudio for the card before opening it, and answers them when
-        // they ask for it back.
-        factory = factory.reserve(Arc::new(DbusReserver::new(tokio::runtime::Handle::current(), reserve::PRIORITY)));
-    }
-    let sinks = Arc::new(factory);
+    // In exclusive mode this asks WirePlumber or PulseAudio for the card before opening it, and
+    // answers them when they ask for it back; in shared mode it plays through the sound server.
+    let sinks = phonia_core::output::factory_for(
+        &output,
+        settings.reserve.value,
+        tokio::runtime::Handle::current(),
+        Arc::new(move |report| {
+            // Called on the audio thread: an unbounded send never blocks.
+            let _ = report_tx.send(report);
+        }),
+    );
     let daemon = Daemon::start(DaemonParts {
         sinks,
         opener,
@@ -113,7 +111,7 @@ async fn run(args: Args) -> Result<()> {
         Some(config) => eprintln!("phoniad: config {}", config.display()),
         None => eprintln!("phoniad: no config file, using the defaults"),
     }
-    eprintln!("phoniad: listening on {} (device {})", path.display(), device);
+    eprintln!("phoniad: listening on {} ({})", path.display(), output.describe());
 
     let mut interrupt = signal(SignalKind::interrupt()).context("installing the SIGINT handler")?;
     let mut terminate = signal(SignalKind::terminate()).context("installing the SIGTERM handler")?;

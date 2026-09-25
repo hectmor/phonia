@@ -174,7 +174,7 @@ pub fn list(asound: &Path) -> Result<String> {
     if playing.is_empty() {
         return Ok("No sound cards with playback were found.".to_string());
     }
-    let mut lines = vec!["Sound cards with playback (put the device in ~/.config/phonia/config.toml under [output]):".to_string()];
+    let mut lines = vec!["Sound cards, exclusive and bit-perfect (put the device in ~/.config/phonia/config.toml under [output]):".to_string()];
     for card in playing {
         let devices: Vec<String> = card.playback.iter().map(|device| format!("hw:{},{device}", card.id)).collect();
         lines.push(format!(
@@ -316,7 +316,7 @@ mod tests {
         let root = asound("list");
         assert_eq!(
             list(&root).unwrap(),
-            "Sound cards with playback (put the device in ~/.config/phonia/config.toml under [output]):\n\
+            "Sound cards, exclusive and bit-perfect (put the device in ~/.config/phonia/config.toml under [output]):\n\
              \x20 hw:NVidia,3 hw:NVidia,7 HDA NVidia  (card 0)\n\
              \x20 hw:DS2,0         Fosi Audio DS2  (card 1, USB)\n\
              \x20 hw:sofhdadsp,0 hw:sofhdadsp,31 sof-hda-dsp  (card 2)\n\

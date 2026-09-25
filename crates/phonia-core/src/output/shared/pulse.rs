@@ -1,0 +1,698 @@
+//! The real sound-server side of shared mode, over the PulseAudio protocol that PipeWire serves
+//! (`pipewire-pulse`) and PulseAudio speaks natively.
+//!
+//! The `pulseaudio` crate is a pure-Rust client with its own reactor thread, and its futures need
+//! no particular runtime, so the audio thread drives them with a plain `block_on`.
+
+use super::ring::Ring;
+use super::{SharedSink, Timing, Transport};
+use crate::output::alsa::{ReportHandler, SharedRoute, SinkReport};
+use crate::output::{AudioSink, SinkFactory};
+use crate::decode::SourceSpec;
+use anyhow::{Context, Result, anyhow, bail};
+use futures_executor::block_on;
+use pulseaudio::protocol;
+use pulseaudio::{Client, PlaybackStream};
+use std::collections::BTreeMap;
+use std::ffi::CString;
+use std::io::BufReader;
+use std::os::unix::net::UnixStream;
+use std::sync::Mutex;
+use std::time::Duration;
+
+/// How long a named output gets to appear (a card that phonia has just given back takes a moment to
+/// become an output again).
+const OUTPUT_WAIT: Duration = Duration::from_secs(3);
+const OUTPUT_POLL: Duration = Duration::from_millis(200);
+
+/// Fraction of a second of silence in front of a new stream. The server drops the first ~1024
+/// frames it is given, so this is what it drops.
+const PREFIX_DIVISOR: u32 = 10;
+/// How long the ring lets the audio thread run ahead of the server, in fractions of a second.
+const RING_DIVISOR: u32 = 4;
+/// What the server is asked to hold, and how often it asks for more, in fractions of a second.
+const TARGET_NUM: u32 = 2; // 0.4 s: 2/5
+const TARGET_DEN: u32 = 5;
+const REQUEST_DIVISOR: u32 = 50;
+/// The resampler quality PipeWire is asked for (0 to 14; its default is 4).
+const RESAMPLE_QUALITY: &CStr = c"10";
+
+use std::ffi::CStr;
+
+/// Which output to play on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    /// Wherever the desktop's default output is, following it when it changes.
+    Default,
+    /// One output by name, and never moved to another.
+    Named(String),
+}
+
+impl Target {
+    /// `None` or `"default"` mean the default output.
+    pub fn parse(sink: Option<&str>) -> Self {
+        match sink {
+            None | Some("default") => Target::Default,
+            Some(name) => Target::Named(name.to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputKind {
+    Usb,
+    Bluetooth,
+    Hdmi,
+    Internal,
+    Other,
+}
+
+impl OutputKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            OutputKind::Usb => "USB",
+            OutputKind::Bluetooth => "Bluetooth",
+            OutputKind::Hdmi => "HDMI",
+            OutputKind::Internal => "built-in",
+            OutputKind::Other => "output",
+        }
+    }
+}
+
+/// An output of the sound server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Output {
+    /// What goes in the config file.
+    pub name: String,
+    pub description: String,
+    pub kind: OutputKind,
+    /// The Bluetooth codec in use, when there is one.
+    pub codec: Option<String>,
+    /// Whether what reaches the speaker has lost information on the way (a Bluetooth link does).
+    pub lossy: bool,
+    pub rate: u32,
+    pub index: u32,
+    pub is_default: bool,
+}
+
+/// What kind of output a sink is, from the properties the server keeps on it.
+pub fn classify(name: &str, props: &BTreeMap<String, String>) -> (OutputKind, Option<String>, bool) {
+    let get = |key: &str| props.get(key).map(String::as_str);
+    if get("device.api") == Some("bluez5") || name.starts_with("bluez_") {
+        let codec = get("api.bluez5.codec").map(|codec| codec.to_uppercase());
+        return (OutputKind::Bluetooth, codec, true);
+    }
+    let lower = name.to_lowercase();
+    let kind = if get("device.bus") == Some("usb") || lower.contains(".usb-") || lower.contains("_usb-") {
+        OutputKind::Usb
+    } else if lower.contains("hdmi") || get("device.profile.description").is_some_and(|d| d.contains("HDMI")) {
+        OutputKind::Hdmi
+    } else if get("device.bus") == Some("pci") || lower.contains("pci-") {
+        OutputKind::Internal
+    } else {
+        OutputKind::Other
+    };
+    (kind, None, false)
+}
+
+fn props_of(props: &protocol::Props) -> BTreeMap<String, String> {
+    props
+        .iter()
+        .filter_map(|(key, value)| {
+            let value = value.strip_suffix(&[0]).unwrap_or(value);
+            Some((key.to_str().ok()?.to_string(), std::str::from_utf8(value).ok()?.to_string()))
+        })
+        .collect()
+}
+
+fn output_from(info: &protocol::SinkInfo, default_name: Option<&str>) -> Output {
+    let name = info.name.to_string_lossy().into_owned();
+    let (kind, codec, lossy) = classify(&name, &props_of(&info.props));
+    Output {
+        description: info.description.as_ref().map(|d| d.to_string_lossy().into_owned()).unwrap_or_else(|| name.clone()),
+        is_default: default_name == Some(name.as_str()),
+        rate: info.sample_spec.sample_rate,
+        index: info.index,
+        name,
+        kind,
+        codec,
+        lossy,
+    }
+}
+
+/// Connects to the sound server.
+pub fn connect() -> Result<Client> {
+    Client::from_env(c"phonia").map_err(|error| anyhow!("no sound server (PipeWire or PulseAudio) to connect to: {error}"))
+}
+
+/// Every output the sound server has.
+pub async fn list_outputs(client: &Client) -> Result<Vec<Output>> {
+    let default_name = client
+        .server_info()
+        .await
+        .context("asking the sound server about itself")?
+        .default_sink_name
+        .map(|name| name.to_string_lossy().into_owned());
+    let sinks = client.list_sinks().await.context("listing the sound server's outputs")?;
+    Ok(sinks.iter().map(|sink| output_from(sink, default_name.as_deref())).collect())
+}
+
+/// The list `phonia devices` shows: the outputs, with the text to put in the config file.
+pub fn format_outputs(outputs: &[Output]) -> String {
+    let mut lines = vec![
+        "PipeWire outputs, shared and NOT bit-perfect (set mode = \"shared\" and sink = \"<name>\" under [output]):"
+            .to_string(),
+    ];
+    if outputs.is_empty() {
+        lines.push("  (the sound server has no outputs)".to_string());
+        return lines.join("\n");
+    }
+    let width = outputs.iter().map(|output| output.name.len()).max().unwrap_or(0).max("default".len());
+    let default = outputs.iter().find(|output| output.is_default);
+    lines.push(format!(
+        "  {} {:<width$}  {}",
+        if default.is_some() { "*" } else { " " },
+        "default",
+        match default {
+            Some(default) => format!("the desktop's default output, now {}", default.description),
+            None => "the desktop's default output".to_string(),
+        }
+    ));
+    for output in outputs {
+        let mut details = vec![output.kind.label().to_string()];
+        details.extend(output.codec.clone());
+        if output.lossy {
+            details.push("lossy".to_string());
+        }
+        lines.push(format!("    {:<width$}  {}  ({})", output.name, output.description, details.join(", ")));
+    }
+    lines.push("A named output is never swapped for another if it goes away; \"default\" follows the desktop.".to_string());
+    lines.join("\n")
+}
+
+/// Connects and lists, for `phonia devices`.
+pub async fn outputs() -> Result<Vec<Output>> {
+    list_outputs(&connect()?).await
+}
+
+/// The real [`Transport`]: one playback stream on the server.
+struct PulseTransport {
+    stream: PlaybackStream,
+    /// Shuts the subscription connection when the stream goes.
+    _watcher: Option<Watcher>,
+}
+
+impl Transport for PulseTransport {
+    fn cork(&mut self, corked: bool) -> Result<()> {
+        let result = if corked { block_on(self.stream.cork()) } else { block_on(self.stream.uncork()) };
+        result.context("pausing or resuming the stream")
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        block_on(self.stream.flush()).context("flushing the stream")
+    }
+
+    fn timing(&mut self) -> Result<Timing> {
+        let timing = block_on(self.stream.timing_info()).context("asking the server for the stream's timing")?;
+        Ok(Timing {
+            queued_bytes: (timing.write_offset - timing.read_offset).max(0) as u64,
+            write_bytes: timing.write_offset.max(0) as u64,
+            read_bytes: timing.read_offset.max(0) as u64,
+            sink_latency: Duration::from_micros(timing.sink_usec + timing.source_usec),
+        })
+    }
+}
+
+impl Drop for PulseTransport {
+    fn drop(&mut self) {
+        // Ends the stream on the server; a failure only means it was already gone.
+        let _ = block_on(self.stream.clone().delete());
+    }
+}
+
+/// A second connection that listens for outputs coming and going, and tells the ring when the one
+/// the stream plays on is gone. A stream that is not allowed to move is not closed when its output
+/// disappears: it stays, silent, so nothing else would notice.
+struct Watcher {
+    socket: UnixStream,
+}
+
+impl Watcher {
+    fn start(sink_index: u32, sink_name: String, ring: Ring) -> Result<Watcher> {
+        let (mut reader, version) = raw_connect()?;
+        protocol::write_command_message(
+            reader.get_mut(),
+            2,
+            &protocol::Command::Subscribe(protocol::SubscriptionMask::SINK),
+            version,
+        )?;
+        protocol::read_ack_message(&mut reader).context("subscribing to the sound server's outputs")?;
+        let socket = reader.get_ref().try_clone().context("keeping a handle on the subscription")?;
+
+        std::thread::Builder::new().name("phonia-output-watch".into()).spawn(move || {
+            loop {
+                match protocol::read_command_message(&mut reader, version) {
+                    Ok((_, protocol::Command::SubscribeEvent(event)))
+                        if event.event_facility == protocol::SubscriptionEventFacility::Sink
+                            && event.event_type == protocol::SubscriptionEventType::Removed
+                            && event.index == Some(sink_index) =>
+                    {
+                        ring.mark_gone(&format!("the output '{sink_name}' went away"));
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        if !ring.is_closed() {
+                            ring.mark_gone(&format!("lost the connection to the sound server ({error})"));
+                        }
+                        return;
+                    }
+                }
+            }
+        })?;
+        Ok(Watcher { socket })
+    }
+}
+
+impl Drop for Watcher {
+    fn drop(&mut self) {
+        // Unblocks the thread's read so that it ends.
+        let _ = self.socket.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+fn raw_connect() -> Result<(BufReader<UnixStream>, u16)> {
+    let path = pulseaudio::socket_path_from_env().ok_or_else(|| anyhow!("no sound server socket"))?;
+    let mut sock = BufReader::new(UnixStream::connect(path).context("connecting to the sound server")?);
+    let cookie = pulseaudio::cookie_path_from_env().and_then(|path| std::fs::read(path).ok()).unwrap_or_default();
+    let auth = protocol::AuthParams { version: protocol::MAX_VERSION, supports_shm: false, supports_memfd: false, cookie };
+    protocol::write_command_message(sock.get_mut(), 0, &protocol::Command::Auth(auth), protocol::MAX_VERSION)?;
+    let (_, reply) = protocol::read_reply_message::<protocol::AuthReply>(&mut sock, protocol::MAX_VERSION)?;
+    let version = protocol::MAX_VERSION.min(reply.version);
+    let mut props = protocol::Props::new();
+    props.set(protocol::Prop::ApplicationName, c"phonia");
+    protocol::write_command_message(sock.get_mut(), 1, &protocol::Command::SetClientName(props), version)?;
+    protocol::read_reply_message::<protocol::SetClientNameReply>(&mut sock, version)?;
+    Ok((sock, version))
+}
+
+/// Opens streams on the sound server, for the engine.
+pub struct SharedSinkFactory {
+    target: Target,
+    client: Mutex<Option<Client>>,
+    on_report: Option<ReportHandler>,
+}
+
+impl SharedSinkFactory {
+    pub fn new(target: Target) -> Self {
+        Self { target, client: Mutex::new(None), on_report: None }
+    }
+
+    /// Have every sink hand its report (which says it is not bit-perfect, and why) to `handler`
+    /// when it starts playing.
+    pub fn on_report(mut self, handler: ReportHandler) -> Self {
+        self.on_report = Some(handler);
+        self
+    }
+
+    /// The connection, made when first needed and again if the server went away in between.
+    fn client(&self) -> Result<Client> {
+        let mut client = self.client.lock().unwrap();
+        if let Some(client) = client.as_ref() {
+            return Ok(client.clone());
+        }
+        let connected = connect()?;
+        *client = Some(connected.clone());
+        Ok(connected)
+    }
+
+    fn forget_client(&self) {
+        self.client.lock().unwrap().take();
+    }
+
+    /// The output to play on. A named one that is not there yet is waited for, since giving a card
+    /// back to the desktop is what makes it an output again.
+    fn resolve(&self, client: &Client) -> Result<protocol::SinkInfo> {
+        match &self.target {
+            Target::Default => {
+                let info = block_on(client.server_info()).context("asking the sound server about itself")?;
+                let name = info.default_sink_name.ok_or_else(|| anyhow!("the sound server has no default output"))?;
+                block_on(client.sink_info_by_name(name)).context("looking up the default output")
+            }
+            Target::Named(name) => {
+                let c_name = CString::new(name.as_str()).context("an output name can't contain a NUL")?;
+                let deadline = std::time::Instant::now() + OUTPUT_WAIT;
+                loop {
+                    match block_on(client.sink_info_by_name(c_name.clone())) {
+                        Ok(info) => return Ok(info),
+                        Err(_) if std::time::Instant::now() < deadline => std::thread::sleep(OUTPUT_POLL),
+                        Err(_) => bail!(
+                            "the sound server has no output named '{name}'. `phonia devices` lists them, and \
+                             a Bluetooth speaker has to be connected first"
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
+    fn open_stream(&self, spec: SourceSpec) -> Result<Box<dyn AudioSink>> {
+        let client = self.client()?;
+        let info = self.resolve(&client)?;
+        let output = output_from(&info, None);
+
+        let channel_map = match spec.channels {
+            1 => protocol::ChannelMap::mono(),
+            2 => protocol::ChannelMap::stereo(),
+            other => bail!("shared mode plays mono and stereo, not {other} channels"),
+        };
+        let rate = spec.sample_rate;
+        let frame_bytes = spec.channels * 4;
+        let named = matches!(self.target, Target::Named(_));
+
+        // A named output is what the user chose: if it goes away, the stream must not jump to the
+        // speakers.
+        let flags = protocol::stream::StreamFlags { no_move: named, ..Default::default() };
+        let mut props = protocol::Props::new();
+        props.set(protocol::Prop::ApplicationName, c"phonia");
+        props.set(protocol::Prop::MediaRole, c"Music");
+        props.set_bytes(c"resample.quality", RESAMPLE_QUALITY.to_bytes_with_nul());
+        let params = protocol::PlaybackStreamParams {
+            sample_spec: protocol::SampleSpec {
+                format: protocol::SampleFormat::S32Le,
+                channels: spec.channels as u8,
+                sample_rate: rate,
+            },
+            channel_map,
+            sink_name: Some(if named { info.name.clone() } else { protocol::DEFAULT_SINK.to_owned() }),
+            flags,
+            props,
+            buffer_attr: protocol::stream::BufferAttr {
+                max_length: u32::MAX,
+                target_length: rate * frame_bytes * TARGET_NUM / TARGET_DEN,
+                // The default waits for seconds of audio before it starts.
+                pre_buffering: 0,
+                minimum_request_length: rate * frame_bytes / REQUEST_DIVISOR,
+                fragment_size: u32::MAX,
+            },
+            ..Default::default()
+        };
+
+        let ring = Ring::new((rate / RING_DIVISOR) as usize, (rate / REQUEST_DIVISOR) as usize, spec.channels as usize);
+        let prefix_frames = u64::from(rate / PREFIX_DIVISOR);
+        ring.push_silence(prefix_frames as usize);
+        let stream = match block_on(client.create_playback_stream(params, ring.source())) {
+            Ok(stream) => stream,
+            Err(error) => {
+                // A dead connection is made again next time.
+                self.forget_client();
+                return Err(anyhow!(error)).context("creating the playback stream on the sound server");
+            }
+        };
+
+        let watcher = if named {
+            match Watcher::start(stream.sink(), output.description.clone(), ring.clone()) {
+                Ok(watcher) => Some(watcher),
+                Err(error) => {
+                    crate::warn!("phonia: not watching for the output going away: {error:#}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let route = SharedRoute {
+            sink: output.description.clone(),
+            sink_rate: output.rate,
+            kind: output.kind.label().to_string(),
+            codec: output.codec.clone(),
+            lossy: output.lossy,
+        };
+        let report = self
+            .on_report
+            .clone()
+            .map(|handler| (handler, SinkReport::shared(spec, "S32LE".to_string(), route)));
+        let server_target_frames = u64::from(rate * TARGET_NUM / TARGET_DEN);
+        let transport = PulseTransport { stream, _watcher: watcher };
+        Ok(Box::new(SharedSink::new(spec, ring, transport, prefix_frames, server_target_frames, report)))
+    }
+}
+
+impl SinkFactory for SharedSinkFactory {
+    fn open(&self, spec: SourceSpec) -> Result<Box<dyn AudioSink>> {
+        self.open_stream(spec)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    fn props(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn a_bluetooth_output_is_lossy_and_names_its_codec() {
+        let (kind, codec, lossy) = classify(
+            "bluez_output.AA_BB_CC.1",
+            &props(&[("device.api", "bluez5"), ("api.bluez5.codec", "ldac")]),
+        );
+        assert_eq!((kind, codec.as_deref(), lossy), (OutputKind::Bluetooth, Some("LDAC"), true));
+
+        let (kind, codec, lossy) = classify("bluez_output.AA_BB_CC.1", &props(&[]));
+        assert_eq!((kind, codec, lossy), (OutputKind::Bluetooth, None, true), "recognised by name too");
+    }
+
+    #[test]
+    fn cards_are_classified_by_bus_and_name() {
+        let usb = "alsa_output.usb-Speed_Dragon_Fosi_Audio_DS2_5000000001-01.analog-stereo";
+        assert_eq!(classify(usb, &props(&[])).0, OutputKind::Usb);
+        assert_eq!(classify("x", &props(&[("device.bus", "usb")])).0, OutputKind::Usb);
+        assert_eq!(classify("alsa_output.pci-0000_00_1f.3-platform-skl_hda_dsp_generic.HiFi__HDMI1__sink", &props(&[])).0, OutputKind::Hdmi);
+        assert_eq!(
+            classify("alsa_output.pci-0000_00_1f.3-platform-skl_hda_dsp_generic.HiFi__Speaker__sink", &props(&[])).0,
+            OutputKind::Internal
+        );
+        assert_eq!(classify("phonia_spike", &props(&[])), (OutputKind::Other, None, false));
+    }
+
+    #[test]
+    fn a_wired_output_is_not_lossy() {
+        assert!(!classify("alsa_output.usb-x", &props(&[])).2);
+    }
+
+    #[test]
+    fn the_output_list_shows_the_default_and_marks_bluetooth_as_lossy() {
+        let output = |name: &str, description: &str, kind, codec: Option<&str>, lossy, is_default| Output {
+            name: name.into(),
+            description: description.into(),
+            kind,
+            codec: codec.map(str::to_string),
+            lossy,
+            rate: 48_000,
+            index: 1,
+            is_default,
+        };
+        let text = format_outputs(&[
+            output("alsa_output.usb-DS2", "Fosi Audio DS2 Analog Stereo", OutputKind::Usb, None, false, true),
+            output("bluez_output.AA", "Soundcore Life P2", OutputKind::Bluetooth, Some("SBC"), true, false),
+        ]);
+        assert_eq!(
+            text,
+            "PipeWire outputs, shared and NOT bit-perfect (set mode = \"shared\" and sink = \"<name>\" under [output]):\n\
+             \x20 * default              the desktop's default output, now Fosi Audio DS2 Analog Stereo\n\
+             \x20   alsa_output.usb-DS2  Fosi Audio DS2 Analog Stereo  (USB)\n\
+             \x20   bluez_output.AA      Soundcore Life P2  (Bluetooth, SBC, lossy)\n\
+             A named output is never swapped for another if it goes away; \"default\" follows the desktop."
+        );
+    }
+
+    #[test]
+    fn an_empty_server_says_so() {
+        assert!(format_outputs(&[]).contains("no outputs"));
+    }
+
+    #[test]
+    fn the_target_names_the_default_or_one_output() {
+        assert_eq!(Target::parse(None), Target::Default);
+        assert_eq!(Target::parse(Some("default")), Target::Default);
+        assert_eq!(Target::parse(Some("bluez_output.AA")), Target::Named("bluez_output.AA".into()));
+    }
+
+    #[test]
+    fn server_properties_are_read_as_text_without_their_terminator() {
+        let mut p = protocol::Props::new();
+        p.set(protocol::Prop::MediaRole, c"music");
+        assert_eq!(props_of(&p).get("media.role").map(String::as_str), Some("music"));
+    }
+
+    // ---- against the real sound server -------------------------------------------------------
+    //
+    // These use a null sink they create and remove themselves and record what reaches it with
+    // `parec`, so nothing is ever played on a real output. They are ignored by default:
+    // `cargo test -p phonia-core -- --ignored shared::pulse` (needs PipeWire or PulseAudio, `pactl`
+    // and `parec`).
+
+    struct NullSink(String);
+
+    impl NullSink {
+        /// Every test has a sink of its own: they run side by side.
+        fn load(name: &str) -> Self {
+            let out = std::process::Command::new("pactl")
+                .args(["load-module", "module-null-sink", &format!("sink_name={name}"), "channels=2", "format=s32le", "rate=48000"])
+                .output()
+                .expect("pactl is needed for these tests");
+            assert!(out.status.success(), "could not load a null sink: {}", String::from_utf8_lossy(&out.stderr));
+            NullSink(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        }
+    }
+
+    impl Drop for NullSink {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("pactl").args(["unload-module", &self.0]).status();
+        }
+    }
+
+    /// A 24-bit ramp, left-justified in `i32`, nonzero and unique per frame.
+    fn ramp(frames: usize) -> Vec<i32> {
+        (0..frames).flat_map(|i| [((i as i32 + 1) & 0x7f_ffff) << 8, -(((i as i32 + 1) & 0x7f_ffff) << 8)]).collect()
+    }
+
+    /// Records what reaches the null sink until dropped.
+    struct Recorder {
+        child: std::process::Child,
+        path: std::path::PathBuf,
+    }
+
+    impl Recorder {
+        fn start(name: &str, sink: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("phonia-shared-test-{}-{name}.raw", std::process::id()));
+            let file = std::fs::File::create(&path).unwrap();
+            let child = std::process::Command::new("parec")
+                .args([&format!("--device={sink}.monitor"), "--format=s32le", "--rate=48000", "--channels=2", "--latency-msec=20", "--raw"])
+                .stdout(file)
+                .spawn()
+                .expect("parec is needed for these tests");
+            std::thread::sleep(Duration::from_millis(500));
+            Recorder { child, path }
+        }
+
+        /// The runs `(first frame, length)` of the ramp in what was recorded, ignoring silence.
+        fn runs(mut self) -> Vec<(i64, usize)> {
+            std::thread::sleep(Duration::from_millis(500));
+            // SIGINT makes parec flush what it has buffered before it exits; a kill would lose it.
+            // SAFETY: signalling a child process we started and still hold.
+            unsafe { libc::kill(self.child.id() as i32, libc::SIGINT) };
+            let _ = self.child.wait();
+            let bytes = std::fs::read(&self.path).unwrap();
+            let _ = std::fs::remove_file(&self.path);
+            let samples: Vec<i32> = bytes.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes(*c)).collect();
+            let mut runs: Vec<(i64, usize)> = Vec::new();
+            for frame in samples.as_chunks::<2>().0.iter().filter(|f| f[0] != 0 || f[1] != 0) {
+                let index = i64::from(frame[0] >> 8) - 1;
+                match runs.last_mut() {
+                    Some((start, len)) if *start + *len as i64 == index => *len += 1,
+                    _ => runs.push((index, 1)),
+                }
+            }
+            runs
+        }
+    }
+
+    fn write_all(sink: &mut dyn AudioSink, samples: &[i32], channels: usize) {
+        let mut done = 0;
+        while done < samples.len() {
+            done += sink.write(&samples[done..]).unwrap() * channels;
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a sound server, pactl and parec"]
+    fn audio_reaches_a_named_output_complete_and_in_order_across_a_pause() {
+        let sink_name = "phonia_test_pause";
+        let _null = NullSink::load(sink_name);
+        let recorder = Recorder::start("pause", sink_name);
+        let spec = SourceSpec { sample_rate: 48_000, channels: 2, bits_per_sample: 24 };
+        let factory = SharedSinkFactory::new(Target::Named(sink_name.into()));
+        let mut sink = factory.open(spec).unwrap();
+
+        let audio = ramp(24_000);
+        write_all(&mut *sink, &audio[..audio.len() / 2], 2);
+        sink.pause().unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(sink.delay_frames().unwrap() > 0, "audio is waiting while paused");
+        sink.resume().unwrap();
+        write_all(&mut *sink, &audio[audio.len() / 2..], 2);
+        sink.drain().unwrap();
+        assert!((sink.delay_frames().unwrap() as f64 / 48_000.0) < 0.2, "nothing is left after a drain");
+        drop(sink);
+
+        assert_eq!(recorder.runs(), [(0, 24_000)], "every frame, in order, none lost at the start (the silence prefix)");
+    }
+
+    #[test]
+    #[ignore = "needs a sound server, pactl and parec"]
+    fn the_stream_says_what_it_is_and_the_sink_is_reusable_after_a_drain() {
+        let sink_name = "phonia_test_reuse";
+        let _null = NullSink::load(sink_name);
+        let recorder = Recorder::start("reuse", sink_name);
+        let spec = SourceSpec { sample_rate: 48_000, channels: 2, bits_per_sample: 24 };
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let seen = reports.clone();
+        let factory = SharedSinkFactory::new(Target::Named(sink_name.into()))
+            .on_report(Arc::new(move |report| seen.lock().unwrap().push(report)));
+        let mut sink = factory.open(spec).unwrap();
+
+        let audio = ramp(12_000);
+        write_all(&mut *sink, &audio, 2);
+        sink.drain().unwrap();
+        let text = std::process::Command::new("pactl").args(["list", "sink-inputs"]).output().unwrap();
+        let text = String::from_utf8_lossy(&text.stdout).to_string();
+        assert!(text.contains("media.role = \"music\"") && text.contains("resample.quality = \"10\""), "{text}");
+
+        // The same sink takes the next track: the server would have ended a stream that was drained.
+        let more: Vec<i32> = ramp(24_000)[24_000..].to_vec();
+        write_all(&mut *sink, &more, 2);
+        sink.drain().unwrap();
+        drop(sink);
+        assert_eq!(recorder.runs(), [(0, 24_000)], "the two writes are one continuous ramp");
+
+        let reports = reports.lock().unwrap();
+        assert_eq!(reports.len(), 1);
+        assert!(!reports[0].bit_perfect());
+        assert!(reports[0].to_text().contains("SHARED (not bit-perfect)"), "{}", reports[0].to_text());
+    }
+
+    #[test]
+    #[ignore = "needs a sound server, pactl and parec"]
+    fn a_named_output_that_goes_away_is_reported_as_gone_and_never_replaced() {
+        let sink_name = "phonia_test_gone";
+        let null = NullSink::load(sink_name);
+        let spec = SourceSpec { sample_rate: 48_000, channels: 2, bits_per_sample: 24 };
+        let factory = SharedSinkFactory::new(Target::Named(sink_name.into()));
+        let mut sink = factory.open(spec).unwrap();
+        write_all(&mut *sink, &ramp(4_800), 2);
+
+        drop(null); // the output disappears under the stream
+        let audio = ramp(48_000);
+        let started = std::time::Instant::now();
+        let error = loop {
+            match sink.write(&audio) {
+                Ok(_) => assert!(started.elapsed() < Duration::from_secs(10), "the loss was never noticed"),
+                Err(error) => break error,
+            }
+        };
+        assert!(error.downcast_ref::<crate::output::OutputGone>().is_some(), "{error:#}");
+    }
+
+    #[test]
+    #[ignore = "needs a sound server"]
+    fn a_missing_named_output_is_an_error_that_says_how_to_find_the_names() {
+        let spec = SourceSpec { sample_rate: 48_000, channels: 2, bits_per_sample: 24 };
+        let error = SharedSinkFactory::new(Target::Named("no_such_output".into())).open(spec).err().unwrap();
+        assert!(format!("{error:#}").contains("phonia devices"), "{error:#}");
+    }
+}

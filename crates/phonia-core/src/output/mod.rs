@@ -11,6 +11,44 @@ pub mod dbus;
 pub mod device;
 pub mod fake;
 pub mod reserve;
+pub mod shared;
+
+/// The factory for the output the settings choose: a sound card of phonia's own, with the desktop
+/// asked to release it first unless `reserve` is off, or an output of the sound server.
+/// `rt` runs the D-Bus connection of the reservation.
+pub fn factory_for(
+    spec: &crate::config::OutputSpec,
+    reserve: bool,
+    rt: tokio::runtime::Handle,
+    on_report: alsa::ReportHandler,
+) -> Arc<dyn SinkFactory> {
+    use crate::config::OutputSpec;
+    match spec {
+        OutputSpec::Exclusive { device } => {
+            let mut factory = alsa::AlsaSinkFactory::new(device.clone()).on_report(on_report);
+            if reserve {
+                factory = factory.reserve(Arc::new(dbus::DbusReserver::new(rt, reserve::PRIORITY)));
+            }
+            Arc::new(factory)
+        }
+        OutputSpec::Shared { sink } => Arc::new(
+            shared::pulse::SharedSinkFactory::new(shared::pulse::Target::parse(sink.as_deref())).on_report(on_report),
+        ),
+    }
+}
+
+/// The output the engine was playing on has gone away (a Bluetooth speaker switched off, the sound
+/// server stopped). Typed so that a caller can tell it from other failures.
+#[derive(Debug)]
+pub struct OutputGone(pub String);
+
+impl std::fmt::Display for OutputGone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the audio output is gone: {}", self.0)
+    }
+}
+
+impl std::error::Error for OutputGone {}
 
 /// A destination for decoded audio. Samples are interleaved, left-justified `i32` (see
 /// `crate::decode`), exactly as the decoder produces them.
