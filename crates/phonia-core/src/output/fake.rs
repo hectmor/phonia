@@ -11,7 +11,7 @@
 //! point, which is what makes "stop/next in the middle of a track" deterministic to test.
 
 use super::reserve::{DeviceReserver, Reservation, ReserveError};
-use super::{AudioSink, OutputGone, ReleaseHandler, ReleaseRequest, SinkFactory};
+use super::{AudioSink, OutputGone, ReleaseHandler, ReleaseRequest, SinkFactory, Volume, VolumeControl, VolumeHandler};
 use crate::decode::SourceSpec;
 use anyhow::{Result, bail};
 use std::collections::VecDeque;
@@ -243,6 +243,7 @@ pub struct FakeSinkFactory {
     /// Errors the next opens fail with, oldest first.
     open_failures: Mutex<VecDeque<String>>,
     handler: Mutex<Option<ReleaseHandler>>,
+    volume: Option<Arc<FakeVolume>>,
 }
 
 impl FakeSinkFactory {
@@ -263,7 +264,19 @@ impl FakeSinkFactory {
             releases: Mutex::new(0),
             open_failures: Mutex::new(VecDeque::new()),
             handler: Mutex::new(None),
+            volume: None,
         }
+    }
+
+    /// Sinks whose output has a volume, as a shared one does.
+    pub fn with_volume(mut self: Arc<Self>) -> Arc<Self> {
+        Arc::get_mut(&mut self).expect("not shared yet").volume = Some(Arc::new(FakeVolume::default()));
+        self
+    }
+
+    /// The fake volume, when there is one.
+    pub fn fake_volume(&self) -> Option<Arc<FakeVolume>> {
+        self.volume.clone()
     }
 
     /// One handle per sink opened so far, oldest first.
@@ -308,7 +321,53 @@ impl SinkFactory for FakeSinkFactory {
         *self.releases.lock().unwrap() += 1;
     }
 
+    fn volume(&self) -> Option<Arc<dyn VolumeControl>> {
+        self.volume.clone().map(|volume| volume as Arc<dyn VolumeControl>)
+    }
+
     fn on_release_request(&self, handler: ReleaseHandler) {
+        *self.handler.lock().unwrap() = Some(handler);
+    }
+}
+
+/// A [`VolumeControl`] that remembers what it was set to, and can be changed "from outside".
+#[derive(Default)]
+pub struct FakeVolume {
+    state: Mutex<Volume>,
+    handler: Mutex<Option<VolumeHandler>>,
+    fail: Mutex<bool>,
+}
+
+impl FakeVolume {
+    /// The desktop's mixer changes the volume.
+    pub fn change_from_outside(&self, volume: Volume) {
+        *self.state.lock().unwrap() = volume;
+        let handler = self.handler.lock().unwrap().clone();
+        if let Some(handler) = handler {
+            handler(volume);
+        }
+    }
+
+    /// The next sets fail, as when the sound server is not answering.
+    pub fn fail_sets(&self) {
+        *self.fail.lock().unwrap() = true;
+    }
+}
+
+impl VolumeControl for FakeVolume {
+    fn get(&self) -> Volume {
+        *self.state.lock().unwrap()
+    }
+
+    fn set(&self, volume: Volume) -> Result<()> {
+        if *self.fail.lock().unwrap() {
+            bail!("the sound server did not answer");
+        }
+        *self.state.lock().unwrap() = volume;
+        Ok(())
+    }
+
+    fn on_change(&self, handler: VolumeHandler) {
         *self.handler.lock().unwrap() = Some(handler);
     }
 }

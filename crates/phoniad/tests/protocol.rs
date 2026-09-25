@@ -5,6 +5,7 @@ use phonia_core::config::OutputSpec;
 use phonia_core::openers::DispatchOpener;
 use phonia_core::output::catalog::{Entry, Mode};
 use phonia_core::output::alsa::{ProcReading, SinkReport};
+use phonia_core::output::VolumeControl as _;
 use phonia_core::output::fake::FakeSinkFactory;
 use phoniad::daemon::{Daemon, DaemonParts};
 use phoniad::outputs::{Build, Outputs};
@@ -38,7 +39,11 @@ async fn fixture(name: &str, blocking: bool) -> Fixture {
     let switched: Switched = Arc::default();
     let built = switched.clone();
     let build: Build = Arc::new(move |spec| {
-        let factory = FakeSinkFactory::blocking();
+        // A shared output has a volume of its own to set; an exclusive card has none.
+        let factory = match spec {
+            OutputSpec::Shared { .. } => FakeSinkFactory::blocking().with_volume(),
+            OutputSpec::Exclusive { .. } => FakeSinkFactory::blocking(),
+        };
         built.lock().unwrap().push((spec.id(), factory.clone()));
         factory
     });
@@ -587,6 +592,97 @@ async fn subscribers_hear_when_the_outputs_change() {
     f.daemon.outputs_changed();
     let (_, event) = next_event(&mut events).await;
     assert_eq!(event, Event::OutputsChanged);
+    f.finish().await;
+}
+
+// ---- volume --------------------------------------------------------------------------------
+
+/// Switches the daemon to `id` (idle: nothing is playing) and returns the factory built for it.
+async fn switch_to(f: &Fixture, client: &Client, id: &str) -> Arc<FakeSinkFactory> {
+    assert_eq!(client.request(Request::SetOutput { output: id.into() }).await.unwrap(), Payload::Ack);
+    f.switched.lock().unwrap().iter().rev().find(|(built, _)| built == id).unwrap().1.clone()
+}
+
+async fn volume_of(client: &Client) -> Option<Volume> {
+    client.status().await.unwrap().volume
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_exclusive_output_has_no_volume_and_says_why() {
+    let f = fixture("volume-exclusive", false).await;
+    let client = f.client().await;
+    assert!(client.server().capabilities.iter().any(|capability| capability == CAP_VOLUME));
+    assert_eq!(volume_of(&client).await, None);
+    for request in [Request::SetVolume { percent: 50 }, Request::SetMute { mute: true }] {
+        let error = client.request(request).await.unwrap_err();
+        assert_eq!(protocol_code(error), ErrorCode::Unsupported);
+    }
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_volume_of_a_shared_output_is_set_reported_and_announced() {
+    let f = fixture("volume-shared", false).await;
+    let client = f.client().await;
+    let shared = switch_to(&f, &client, "shared:speaker").await;
+    let control = shared.fake_volume().unwrap();
+    assert_eq!(volume_of(&client).await, Some(Volume { percent: 100, muted: false }));
+
+    let (_, mut events) = client.subscribe().await.unwrap();
+    assert_eq!(client.request(Request::SetVolume { percent: 40 }).await.unwrap(), Payload::Ack);
+    let (_, event) = next_event(&mut events).await;
+    assert_eq!(event, Event::VolumeChanged { percent: 40, muted: false });
+    assert_eq!(control.get(), phonia_core::output::Volume { percent: 40, muted: false });
+    assert_eq!(volume_of(&client).await, Some(Volume { percent: 40, muted: false }));
+
+    client.request(Request::SetMute { mute: true }).await.unwrap();
+    let (_, event) = next_event(&mut events).await;
+    assert_eq!(event, Event::VolumeChanged { percent: 40, muted: true }, "muting keeps the level");
+
+    client.request(Request::SetVolume { percent: 250 }).await.unwrap();
+    assert_eq!(volume_of(&client).await.unwrap().percent, 100, "never above unity gain");
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_volume_carries_over_to_the_next_output_and_is_told_to_clients() {
+    let f = fixture("volume-carry", false).await;
+    let client = f.client().await;
+    switch_to(&f, &client, "shared:speaker").await;
+    client.request(Request::SetVolume { percent: 35 }).await.unwrap();
+    client.request(Request::SetMute { mute: true }).await.unwrap();
+
+    let (_, mut events) = client.subscribe().await.unwrap();
+    let other = switch_to(&f, &client, "shared:headphones").await;
+    assert_eq!(other.fake_volume().unwrap().get(), phonia_core::output::Volume { percent: 35, muted: true });
+    let seen = events_until(&mut events, |event| matches!(event, Event::VolumeChanged { .. })).await;
+    assert!(matches!(seen.last(), Some((_, Event::VolumeChanged { percent: 35, muted: true }))), "{seen:?}");
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_change_from_the_desktops_mixer_is_announced_and_remembered() {
+    let f = fixture("volume-mixer", false).await;
+    let client = f.client().await;
+    let shared = switch_to(&f, &client, "shared:speaker").await;
+    let (_, mut events) = client.subscribe().await.unwrap();
+
+    shared.fake_volume().unwrap().change_from_outside(phonia_core::output::Volume { percent: 60, muted: false });
+    let (_, event) = next_event(&mut events).await;
+    assert_eq!(event, Event::VolumeChanged { percent: 60, muted: false });
+    assert_eq!(volume_of(&client).await, Some(Volume { percent: 60, muted: false }));
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sound_server_that_does_not_answer_is_an_internal_error_and_nothing_changes() {
+    let f = fixture("volume-fails", false).await;
+    let client = f.client().await;
+    let shared = switch_to(&f, &client, "shared:speaker").await;
+    shared.fake_volume().unwrap().fail_sets();
+    let error = client.request(Request::SetVolume { percent: 10 }).await.unwrap_err();
+    assert_eq!(protocol_code(error), ErrorCode::Internal);
+    assert_eq!(volume_of(&client).await, Some(Volume { percent: 100, muted: false }));
     f.finish().await;
 }
 

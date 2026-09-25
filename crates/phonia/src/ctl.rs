@@ -3,8 +3,8 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use phonia_ipc::{
-    AddAt, CAP_OUTPUT_RELEASE, CAP_OUTPUT_SELECT, Client, ClientError, ClientInfo, Event, ItemId, NewTrack, Output,
-    OutputInfo, OutputMode, Payload, Queue, ReleaseReason, Repeat, Request, SeekTarget, State, Status,
+    AddAt, CAP_OUTPUT_RELEASE, CAP_OUTPUT_SELECT, CAP_VOLUME, Client, ClientError, ClientInfo, Event, ItemId, NewTrack, Output,
+    OutputInfo, OutputMode, Payload, Queue, ReleaseReason, Repeat, Request, SeekTarget, State, Status, Volume,
 };
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -39,6 +39,15 @@ pub enum CtlCommand {
     /// Pauses and hands the DAC back to the desktop, so another program can use it. `resume`
     /// takes it again and carries on from the same place.
     Release,
+    /// Shows or sets the volume of a shared output: `volume 60` sets 60%, `volume +5` and
+    /// `volume -5` change it. The scale is the desktop mixer's (100% is unity gain, 50% about
+    /// -18 dB), never above 100%. An exclusive card has no volume: the audio is not scaled.
+    Volume {
+        #[arg(allow_hyphen_values = true)]
+        change: Option<String>,
+    },
+    /// Mutes (`on`), unmutes (`off`) or flips (`toggle`, the default) a shared output; the level is kept.
+    Mute { mode: Option<MuteMode> },
     /// Lists the outputs and shows which one is playing; `output set <n>` plays through another
     /// one from now on, keeping the track and the position. An exclusive card is bit-perfect;
     /// a shared output goes through the desktop's sound server and is not.
@@ -107,6 +116,13 @@ pub enum Switch {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+pub enum MuteMode {
+    On,
+    Off,
+    Toggle,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 pub enum RepeatMode {
     Off,
     One,
@@ -149,6 +165,8 @@ pub async fn run(args: CtlArgs, config_flag: Option<&Path>) -> Result<()> {
         CtlCommand::Prev => ack(&client, json, Request::Previous).await,
         CtlCommand::Stop => ack(&client, json, Request::Stop).await,
         CtlCommand::Seek { position } => ack(&client, json, Request::Seek { target: parse_seek(&position)? }).await,
+        CtlCommand::Volume { change } => volume(&client, json, change).await,
+        CtlCommand::Mute { mode } => mute(&client, json, mode.unwrap_or(MuteMode::Toggle)).await,
         CtlCommand::Output { action } => output(&client, json, action).await,
         CtlCommand::Queue { action } => queue(&client, json, action).await,
         CtlCommand::Shuffle { mode } => {
@@ -253,6 +271,40 @@ async fn queue(client: &Client, json: bool, action: QueueAction) -> Result<()> {
     }
 }
 
+/// The volume the output has now, or why it has none.
+async fn current_volume(client: &Client) -> Result<Volume> {
+    if !client.server().capabilities.iter().any(|capability| capability == CAP_VOLUME) {
+        bail!("this phoniad is too old to set the volume (protocol 1.2): restart it after updating");
+    }
+    client.status().await?.volume.ok_or_else(|| {
+        anyhow!(
+            "this output has no volume to set: an exclusive card plays the audio unscaled. Use the DAC's own \
+             volume, or `phonia ctl output set` a shared output"
+        )
+    })
+}
+
+async fn volume(client: &Client, json: bool, change: Option<String>) -> Result<()> {
+    let current = current_volume(client).await?;
+    match change {
+        None => print_payload(json, &Payload::Status(client.status().await?), || format_volume(&current)),
+        Some(change) => {
+            let percent = parse_volume(&change, current.percent)?;
+            ack(client, json, Request::SetVolume { percent }).await
+        }
+    }
+}
+
+async fn mute(client: &Client, json: bool, mode: MuteMode) -> Result<()> {
+    let current = current_volume(client).await?;
+    let mute = match mode {
+        MuteMode::On => true,
+        MuteMode::Off => false,
+        MuteMode::Toggle => !current.muted,
+    };
+    ack(client, json, Request::SetMute { mute }).await
+}
+
 async fn output(client: &Client, json: bool, action: Option<OutputAction>) -> Result<()> {
     if !client.server().capabilities.iter().any(|capability| capability == CAP_OUTPUT_SELECT) {
         bail!("this phoniad is too old to switch outputs (protocol 1.1): restart it after updating");
@@ -349,6 +401,28 @@ fn format_ms(ms: u64) -> String {
     }
 }
 
+/// `60` sets 60%, `+5` and `-5` change it, all within 0 to 100 (a `%` is fine).
+fn parse_volume(text: &str, current: u8) -> Result<u8> {
+    let text = text.trim().trim_end_matches('%').trim();
+    let bad = || anyhow!("{text:?} is not a volume: use 60, +5 or -5 (percent, 0 to 100)");
+    let (sign, digits) = match text.chars().next() {
+        Some('+') => (1i32, &text[1..]),
+        Some('-') => (-1, &text[1..]),
+        _ => (0, text),
+    };
+    let amount: u32 = digits.trim().parse().map_err(|_| bad())?;
+    let amount = i32::try_from(amount).map_err(|_| bad())?;
+    let target = match sign {
+        0 => amount,
+        _ => i32::from(current) + sign * amount,
+    };
+    Ok(target.clamp(0, 100) as u8)
+}
+
+fn format_volume(volume: &Volume) -> String {
+    if volume.muted { format!("Volume: {}% (muted)", volume.percent) } else { format!("Volume: {}%", volume.percent) }
+}
+
 /// The output a person meant: its number in the list, its id, or a part of its id or name that only
 /// one output has.
 fn resolve_output(wanted: &str, outputs: &[OutputInfo]) -> Result<String> {
@@ -441,6 +515,9 @@ fn format_status(status: &Status) -> String {
         };
         text.push_str(&format!("\nOutput:   {} [{how}]", route.description));
     }
+    if let Some(volume) = &status.volume {
+        text.push_str(&format!("\n{}", format_volume(volume).replacen("Volume: ", "Volume:   ", 1)));
+    }
     if let Some(spec) = status.spec {
         text.push_str(&format!("\nFormat:   {}-bit / {} Hz / {} ch", spec.bits_per_sample, spec.sample_rate, spec.channels));
     }
@@ -530,6 +607,9 @@ fn format_event(event: &Event) -> String {
         Event::OutputAcquired => "DAC taken again".to_string(),
         Event::OutputChanged { route } => format!("output now {} ({})", route.description, route.id),
         Event::OutputsChanged => "the outputs changed (`phonia ctl output` lists them)".to_string(),
+        Event::VolumeChanged { percent, muted } => {
+            format!("volume {percent}%{}", if *muted { " (muted)" } else { "" })
+        }
         Event::Error { message } => format!("error: {message}"),
         Event::ShuttingDown => "the daemon is shutting down".to_string(),
         Event::Resync { skipped, .. } => format!("resynced (missed {skipped} events)"),
@@ -629,10 +709,11 @@ mod tests {
             duration_ms: Some(348_680),
             output: Output::Open,
             route: None,
+            volume: None,
         };
         assert_eq!(format_status(&status), "State:    playing\nTrack:    Song\nPosition: 1:23 / 5:48\nFormat:   24-bit / 192000 Hz / 2 ch");
         let idle =
-            Status { state: State::Stopped, track: None, spec: None, position_ms: 0, duration_ms: None, output: Output::Closed, route: None };
+            Status { state: State::Stopped, track: None, spec: None, position_ms: 0, duration_ms: None, output: Output::Closed, route: None, volume: None };
         assert_eq!(format_status(&idle), "State:    stopped");
 
         let released = Status { state: State::Paused, output: Output::Released { by: Some("jackd".into()) }, ..idle.clone() };
@@ -736,8 +817,12 @@ mod tests {
                 mode: OutputMode::Shared,
                 description: "Soundcore Life P2".into(),
             }),
+            volume: Some(Volume { percent: 72, muted: false }),
         };
-        assert_eq!(format_status(&status), "State:    playing\nOutput:   Soundcore Life P2 [shared, not bit-perfect]");
+        assert_eq!(
+            format_status(&status),
+            "State:    playing\nOutput:   Soundcore Life P2 [shared, not bit-perfect]\nVolume:   72%"
+        );
     }
 
     #[test]
@@ -776,5 +861,25 @@ mod tests {
             format_event(&report(OutputMode::Exclusive, true, None, false, None)),
             "output Soundcore Life P2: S32LE BIT-PERFECT"
         );
+    }
+
+    #[test]
+    fn volumes_are_set_or_changed_within_zero_to_a_hundred() {
+        assert_eq!(parse_volume("60", 20).unwrap(), 60);
+        assert_eq!(parse_volume("60%", 20).unwrap(), 60);
+        assert_eq!(parse_volume("+5", 98).unwrap(), 100, "never above unity gain");
+        assert_eq!(parse_volume("-5", 3).unwrap(), 0);
+        assert_eq!(parse_volume("-10", 50).unwrap(), 40);
+        assert_eq!(parse_volume("250", 50).unwrap(), 100);
+        for bad in ["", "loud", "1.5", "+", "--3"] {
+            assert!(parse_volume(bad, 50).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_volume_and_volume_events_read_simply() {
+        assert_eq!(format_volume(&Volume { percent: 72, muted: false }), "Volume: 72%");
+        assert_eq!(format_volume(&Volume { percent: 72, muted: true }), "Volume: 72% (muted)");
+        assert_eq!(format_event(&Event::VolumeChanged { percent: 40, muted: true }), "volume 40% (muted)");
     }
 }

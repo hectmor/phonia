@@ -35,10 +35,11 @@ fn status() -> Status {
         duration_ms: Some(215_000),
         output: Output::Open,
         route: None,
+        volume: None,
     }
 }
 
-const STATUS_JSON: &str = r#"{"state":"playing","track":{"item_id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000},"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"position_ms":1234,"duration_ms":215000,"output":{"state":"open"},"route":null}"#;
+const STATUS_JSON: &str = r#"{"state":"playing","track":{"item_id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000},"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"position_ms":1234,"duration_ms":215000,"output":{"state":"open"},"route":null,"volume":null}"#;
 
 fn queue() -> Queue {
     Queue {
@@ -134,16 +135,16 @@ fn the_server_banner() {
         ServerMessage::Hello(ServerHello {
             protocol: PROTOCOL,
             server: ServerInfo { name: "phoniad".into(), version: "0.1.0".into(), pid: 1234 },
-            capabilities: vec![CAP_OUTPUT_RELEASE.into(), CAP_OUTPUT_SELECT.into()],
+            capabilities: vec![CAP_OUTPUT_RELEASE.into(), CAP_OUTPUT_SELECT.into(), CAP_VOLUME.into()],
         }),
-        r#"{"type":"hello","protocol":{"major":1,"minor":2},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select"]}"#,
+        r#"{"type":"hello","protocol":{"major":1,"minor":3},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume"]}"#,
     );
 }
 
 #[test]
 fn successful_responses() {
     response(1, Reply::Ok(Payload::Ack), r#"{"type":"response","id":1,"ok":{"type":"ack"}}"#);
-    response(2, Reply::Ok(Payload::Status(status())), &format!(r#"{{"type":"response","id":2,"ok":{{"type":"status","state":"playing","track":{},"spec":{},"position_ms":1234,"duration_ms":215000,"output":{{"state":"open"}},"route":null}}}}"#,
+    response(2, Reply::Ok(Payload::Status(status())), &format!(r#"{{"type":"response","id":2,"ok":{{"type":"status","state":"playing","track":{},"spec":{},"position_ms":1234,"duration_ms":215000,"output":{{"state":"open"}},"route":null,"volume":null}}}}"#,
         r#"{"item_id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000}"#, r#"{"sample_rate":96000,"channels":2,"bits_per_sample":24}"#));
     response(3, Reply::Ok(Payload::Removed { count: 2 }), r#"{"type":"response","id":3,"ok":{"type":"removed","count":2}}"#);
     response(
@@ -172,6 +173,7 @@ fn failed_responses() {
         (ErrorCode::BadRequest, "bad_request"),
         (ErrorCode::BadSource, "bad_source"),
         (ErrorCode::NotFound, "not_found"),
+        (ErrorCode::Unsupported, "unsupported"),
         (ErrorCode::EngineGone, "engine_gone"),
         (ErrorCode::Internal, "internal"),
     ] {
@@ -297,6 +299,25 @@ fn the_list_of_outputs_and_the_route_in_a_status() {
 }
 
 #[test]
+fn volume_requests_events_and_status() {
+    request(1, Request::SetVolume { percent: 40 }, r#"{"id":1,"request":{"type":"set_volume","percent":40}}"#);
+    request(2, Request::SetMute { mute: true }, r#"{"id":2,"request":{"type":"set_mute","mute":true}}"#);
+    event(
+        20,
+        Event::VolumeChanged { percent: 40, muted: false },
+        r#"{"type":"event","seq":20,"event":{"type":"volume_changed","percent":40,"muted":false}}"#,
+    );
+    let with_volume = Status { volume: Some(Volume { percent: 72, muted: true }), ..status() };
+    round_trip(&with_volume, &STATUS_JSON.replace(r#""volume":null"#, r#""volume":{"percent":72,"muted":true}"#));
+}
+
+#[test]
+fn a_1_2_status_has_no_volume() {
+    let old = r#"{"state":"paused","track":null,"spec":null,"position_ms":0,"duration_ms":null,"output":{"state":"open"},"route":null}"#;
+    assert_eq!(serde_json::from_str::<Status>(old).unwrap().volume, None);
+}
+
+#[test]
 fn output_selection_events_and_the_lost_reason() {
     event(
         16,
@@ -415,7 +436,7 @@ fn versions_are_compatible_across_minors_but_not_majors() {
     assert!(v(1, 0).compatible_with(v(1, 7)));
     assert!(v(1, 7).compatible_with(v(1, 0)));
     assert!(!v(1, 0).compatible_with(v(2, 0)));
-    assert_eq!(PROTOCOL, v(1, 2));
+    assert_eq!(PROTOCOL, v(1, 3));
 }
 
 #[test]

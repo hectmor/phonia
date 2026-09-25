@@ -9,8 +9,11 @@ pub const CAP_OUTPUT_RELEASE: &str = "output_release";
 /// Capability: the daemon lists its outputs and can switch between them (protocol 1.2).
 pub const CAP_OUTPUT_SELECT: &str = "output_select";
 
+/// Capability: the daemon has a volume it can set on outputs that allow it (protocol 1.3).
+pub const CAP_VOLUME: &str = "volume";
+
 /// The protocol version this crate speaks.
-pub const PROTOCOL: Version = Version { major: 1, minor: 2 };
+pub const PROTOCOL: Version = Version { major: 1, minor: 3 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Version {
@@ -115,6 +118,11 @@ pub enum Request {
     /// Plays through another output from now on, keeping the track and the position (since 1.2).
     /// `output` is an id from `outputs`.
     SetOutput { output: String },
+    /// Sets the volume, 0 to 100 (since 1.3). Refused for an output with no volume of its own to
+    /// set, which is an exclusive card.
+    SetVolume { percent: u8 },
+    /// Mutes or unmutes (since 1.3). Refused like `set_volume`.
+    SetMute { mute: bool },
     /// Adds tracks, resolving their titles and lengths first.
     QueueAdd {
         tracks: Vec<NewTrack>,
@@ -146,6 +154,8 @@ pub enum ErrorCode {
     BadSource,
     /// The entry the request names does not exist.
     NotFound,
+    /// The request is fine but this output can't do it (a volume on an exclusive card). Since 1.3.
+    Unsupported,
     /// The playback engine is gone.
     EngineGone,
     Internal,
@@ -220,6 +230,8 @@ pub enum Event {
     OutputChanged { route: Route },
     /// Outputs appeared or disappeared: ask `outputs` again (since 1.2).
     OutputsChanged,
+    /// The volume or the mute changed, from a request or from the desktop's mixer (since 1.3).
+    VolumeChanged { percent: u8, muted: bool },
     SinkReport(SinkReport),
     Error { message: String },
     /// The daemon is stopping.

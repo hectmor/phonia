@@ -154,6 +154,7 @@ phonia ctl queue list
 phonia ctl play                              # or `play 3` for entry 3
 phonia ctl pause | resume | toggle | next | prev | stop
 phonia ctl output                            # the outputs; `output set <n>` plays through another one
+phonia ctl volume 60 | +5 | -5   /   phonia ctl mute   # shared outputs only
 phonia ctl release                           # pause and hand the DAC back, so another program can use it
 phonia ctl seek 90                           # 1:30; `+10` / `-10` are relative
 phonia ctl shuffle on   /   phonia ctl repeat all
@@ -192,7 +193,7 @@ One connection carries requests, their responses and, once subscribed, events, a
 JSON, so `socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/phonia/phoniad.sock` is a working client:
 
 ```
-< {"type":"hello","protocol":{"major":1,"minor":2},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select"]}
+< {"type":"hello","protocol":{"major":1,"minor":3},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume"]}
 > {"id":1,"request":{"type":"hello","protocol":{"major":1,"minor":0},"client":{"name":"me","version":"0"}}}
 < {"type":"response","id":1,"ok":{"type":"ack"}}
 > {"id":2,"request":{"type":"subscribe"}}
@@ -312,7 +313,16 @@ sink = "bluez_output.AA_BB_CC_DD_EE_FF.1"   # from `phonia devices`; or "default
 - One limit: while phonia holds a card in exclusive mode the desktop has no output for it, so the
   card's shared output is not in the list. `phonia ctl release` gives the card back and it
   reappears.
-- Volume comes in the next step of this feature.
+- **Volume and mute** (shared mode only): `phonia ctl volume` shows it, `phonia ctl volume 60` sets
+  60%, `volume +5` / `volume -5` change it, and `phonia ctl mute [on|off|toggle]` mutes without
+  losing the level. It is digital and applies to phonia's own stream before the sound server
+  mixes it, so it never touches the hardware volume of the card or of the Bluetooth speaker. The
+  scale is the one the desktop's mixers show: 100% is unity gain (never more) and it is cubic in
+  amplitude, so 50% is about -18 dB. The volume you set stays across tracks (a new format is a new
+  stream), across pauses and when you switch to another shared output; and if you move phonia's
+  slider in the desktop's mixer, `phonia ctl status` and `watch` follow. **An exclusive card has
+  no volume**: the audio reaches the DAC unscaled, which is the point, so `volume` there says to use
+  the DAC's own control or to switch to a shared output.
 
 ## Phase 0 status
 
