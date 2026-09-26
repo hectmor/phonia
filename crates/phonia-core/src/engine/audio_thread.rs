@@ -5,12 +5,12 @@
 //! Everything that can be slow (asking TIDAL for a track) runs on the runtime and comes back as a
 //! message, so this loop has a single place to wait.
 
-use super::PREVIOUS_RESTART_AFTER;
-use super::supplier::{Advance, LoadedTrack, SeekMode, TrackMedia, TrackSupplier};
+use super::supplier::{Advance, LoadedTrack, Peek, SeekMode, TrackMedia, TrackSupplier};
 use super::types::{
     Command, EndReason, Event, OutputState, ReleaseReason, SeekTarget, State, Status, TrackMeta,
     TrackRef,
 };
+use super::{PREFETCH_LEAD, PREVIOUS_RESTART_AFTER};
 use crate::decode::{Decoder, SourceSpec, duration_to_frames, frames_to_duration};
 use crate::output::{AudioSink, OutputGone, ReleaseHandler, SinkFactory};
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -32,6 +32,9 @@ pub(super) struct Prepared {
     source: Source,
     seek: SeekMode,
     start: Duration,
+    /// The first chunk of audio, already decoded, for a track opened ahead of its turn (empty
+    /// otherwise): it proves the track decodes, and is what gets written first.
+    first_chunk: Vec<i32>,
 }
 
 impl Prepared {
@@ -47,6 +50,7 @@ impl Prepared {
             },
             seek: SeekMode::None,
             start: Duration::ZERO,
+            first_chunk: Vec::new(),
         }
     }
 }
@@ -68,7 +72,25 @@ async fn prepare(track: LoadedTrack) -> Result<Prepared> {
         source,
         seek,
         start,
+        first_chunk: Vec::new(),
     })
+}
+
+/// Opens the track that comes after the current one and decodes its first chunk, so that it is
+/// known to play and can be written the instant the current one ends.
+async fn prefetch(supplier: Arc<dyn TrackSupplier>, track: TrackRef) -> Result<Prepared> {
+    let loaded = supplier.open_ahead(track).await?;
+    let mut prepared = prepare(loaded).await?;
+    tokio::task::spawn_blocking(move || {
+        let mut chunk = Vec::new();
+        if !prepared.source.next_chunk_into(&mut chunk)? {
+            chunk.clear();
+        }
+        prepared.first_chunk = chunk;
+        Ok(prepared)
+    })
+    .await
+    .map_err(|error| anyhow!("decoding the next track was interrupted: {error}"))?
 }
 
 fn open_source(media: TrackMedia) -> Result<Source> {
@@ -94,6 +116,11 @@ pub(super) enum Msg {
     LoadFailed {
         generation: u64,
         error: String,
+    },
+    /// The track opened ahead of its turn is ready, or could not be.
+    Prefetched {
+        generation: u64,
+        result: Result<Box<Prepared>, String>,
     },
     QueueExhausted {
         generation: u64,
@@ -124,6 +151,7 @@ pub(super) struct Context {
     pub status: watch::Sender<Status>,
     pub position_interval: Duration,
     pub release_after_pause: Option<Duration>,
+    pub gapless: bool,
 }
 
 pub(super) fn run(ctx: Context) {
@@ -138,6 +166,12 @@ pub(super) fn run(ctx: Context) {
         release_when_ready: None,
         paused_at: None,
         current: None,
+        outgoing: None,
+        next: None,
+        prefetch_generation: 0,
+        waiting_until: None,
+        adopting: false,
+        polling: false,
     }
     .run();
 }
@@ -253,7 +287,45 @@ struct Playing {
     /// What the listener had heard when the position was last reported.
     position: Duration,
     last_position_at: Instant,
+    /// Frames of the track before this one that are counted in `frames_written`: this track was
+    /// joined to it without a gap, so the sink's counter runs on across the boundary.
+    lead_in: u64,
+    /// The source has nothing more to give; what is left is to see the track out.
+    source_done: bool,
 }
+
+/// The track that was playing when its successor was joined to it, until the listener has heard
+/// its last frame. Everything reported to the outside is about this track in the meantime.
+struct Outgoing {
+    meta: TrackMeta,
+    spec: SourceSpec,
+    duration: Option<Duration>,
+    /// Where in the track its last written frame ends.
+    end_position: Duration,
+    /// What the listener has heard of it.
+    position: Duration,
+}
+
+/// The track opened ahead of its turn.
+struct Next {
+    track: TrackRef,
+    generation: u64,
+    task: JoinHandle<()>,
+    phase: NextPhase,
+}
+
+enum NextPhase {
+    Opening,
+    Ready(Box<Prepared>),
+    Failed,
+}
+
+/// How much earlier than the last audio of a track ends the wait for the next one is given up.
+const WAIT_MARGIN: Duration = Duration::from_millis(50);
+
+/// How often the audio thread looks again while it waits for something without a message to say
+/// it is done (the listener reaching a boundary, a track opening).
+const POLL: Duration = Duration::from_millis(10);
 
 struct AudioThread {
     ctx: Context,
@@ -273,6 +345,20 @@ struct AudioThread {
     /// When the current pause began.
     paused_at: Option<Instant>,
     current: Option<Playing>,
+    /// Set while the next track was joined to the current one and the listener has not yet heard
+    /// the end of the previous track (see [`Outgoing`]).
+    outgoing: Option<Outgoing>,
+    /// The next track, opened ahead of its turn.
+    next: Option<Next>,
+    /// Bumped for each track opened ahead, so a late answer for an abandoned one is recognised.
+    prefetch_generation: u64,
+    /// The current track ended and the next is still opening: waiting for it, until this moment.
+    waiting_until: Option<Instant>,
+    /// The wait was given up, the sink drained and the engine is `Loading`: the track still
+    /// opening will be started as it arrives, instead of asking for it a second time.
+    adopting: bool,
+    /// Something is being waited for: look again soon instead of writing.
+    polling: bool,
 }
 
 /// A request to hand the audio device back.
@@ -296,7 +382,14 @@ impl AudioThread {
         loop {
             // While playing, poll for messages between writes; otherwise (stopped, loading or
             // paused) sleep until one comes instead of spinning.
-            let msg = if self.state == State::Playing {
+            let msg = if self.state == State::Playing && self.polling {
+                // Waiting for something that sends no message: look again in a moment.
+                match self.ctx.rx.recv_timeout(POLL) {
+                    Ok(msg) => Some(msg),
+                    Err(RecvTimeoutError::Timeout) => None,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+            } else if self.state == State::Playing {
                 match self.ctx.rx.try_recv() {
                     Ok(msg) => Some(msg),
                     Err(TryRecvError::Empty) => None,
@@ -412,6 +505,7 @@ impl AudioThread {
                 self.emit(Event::QueueExhausted);
                 self.stop();
             }
+            Msg::Prefetched { generation, result } => self.prefetched(generation, result),
             Msg::Loaded { .. } | Msg::LoadFailed { .. } | Msg::QueueExhausted { .. } => {}
             Msg::SetOutput { sinks, done } => self.set_output(sinks, done),
             Msg::Shutdown => {
@@ -428,9 +522,14 @@ impl AudioThread {
 
     /// Writes at most one period of the current track to the sink.
     fn play_step(&mut self) -> Result<()> {
+        self.polling = false;
+        self.check_crossing();
         let Some(playing) = self.current.as_mut() else {
             return Ok(());
         };
+        if playing.source_done {
+            return self.source_finished();
+        }
         let Some(sink) = self.sink.as_mut() else {
             return Err(anyhow!("playing without an audio output"));
         };
@@ -440,8 +539,8 @@ impl AudioThread {
 
         if playing.offset >= playing.pending.len() {
             if !source.next_chunk_into(&mut playing.pending)? {
-                self.track_completed();
-                return Ok(());
+                playing.source_done = true;
+                return self.source_finished();
             }
             playing.offset = 0;
         }
@@ -468,12 +567,16 @@ impl AudioThread {
 
         if playing.last_position_at.elapsed() >= self.ctx.position_interval {
             self.emit_position();
+            self.maybe_prefetch();
         }
         Ok(())
     }
 
     /// What the listener has actually heard: everything handed to the device except what it has
     /// not played yet. Counting only what was written would run ahead by the device's buffer.
+    ///
+    /// While a track that was joined to the one before it has not started to be heard, that is
+    /// the position in the one before.
     fn heard_position(&mut self) -> Duration {
         let Some(playing) = self.current.as_ref() else {
             return Duration::ZERO;
@@ -484,7 +587,17 @@ impl AudioThread {
             .as_mut()
             .map_or(0, |sink| sink.delay_frames().unwrap_or(0));
         let heard = playing.frames_written.saturating_sub(queued);
-        playing.base + frames_to_duration(heard, playing.spec.sample_rate)
+        if let Some(outgoing) = &self.outgoing {
+            let remaining = playing.lead_in.saturating_sub(heard);
+            return outgoing
+                .end_position
+                .saturating_sub(frames_to_duration(remaining, playing.spec.sample_rate));
+        }
+        playing.base
+            + frames_to_duration(
+                heard.saturating_sub(playing.lead_in),
+                playing.spec.sample_rate,
+            )
     }
 
     fn emit_position(&mut self) {
@@ -492,19 +605,27 @@ impl AudioThread {
         let Some(playing) = self.current.as_mut() else {
             return;
         };
-        playing.position = position;
         playing.last_position_at = Instant::now();
+        if let Some(outgoing) = self.outgoing.as_mut() {
+            outgoing.position = position;
+            let duration = outgoing.duration;
+            self.publish_status();
+            self.emit(Event::Position { position, duration });
+            return;
+        }
+        playing.position = position;
         let duration = playing.duration;
         self.publish_status();
         self.emit(Event::Position { position, duration });
     }
 
-    fn track_completed(&mut self) {
+    /// Drains the sink and ends the current track as completed. `false` if the drain failed.
+    fn finish_track_completed(&mut self) -> bool {
         if let Some(sink) = self.sink.as_mut()
             && let Err(error) = sink.drain()
         {
             self.failed(error.context("draining the audio output"));
-            return;
+            return false;
         }
         self.emit_position();
         if let Some(playing) = self.current.take() {
@@ -513,7 +634,311 @@ impl AudioThread {
                 reason: EndReason::Completed,
             });
         }
-        self.request_load(LoadTarget::Advance(Advance::Auto));
+        true
+    }
+
+    /// The track ended and nothing was joined to it: drain, and load what comes next.
+    fn track_completed(&mut self) {
+        if self.finish_track_completed() {
+            self.request_load(LoadTarget::Advance(Advance::Auto));
+        }
+    }
+
+    // ---- gapless ------------------------------------------------------------------------
+
+    /// The source of the current track has nothing more to give.
+    fn source_finished(&mut self) -> Result<()> {
+        if self.outgoing.is_some() {
+            // This track ended before the listener heard the end of the one before it, which
+            // only happens with a track shorter than the device's buffer. One boundary at a
+            // time: wait for that one.
+            self.polling = true;
+            return Ok(());
+        }
+        if self.ctx.gapless {
+            self.end_of_source();
+        } else {
+            self.track_completed();
+        }
+        Ok(())
+    }
+
+    /// The current track has been written in full. If the next one is (or is about to be) open,
+    /// joins it on without a gap; otherwise the old way: drain, then load.
+    fn end_of_source(&mut self) {
+        let Peek::Next(wanted) = self.ctx.supplier.peek(Advance::Auto) else {
+            self.drop_next();
+            self.track_completed();
+            return;
+        };
+        if self.next.as_ref().is_some_and(|next| next.track != wanted) {
+            self.drop_next();
+        }
+        if self.next.is_none() {
+            // The length was not known, so nothing was opened ahead: it starts now, and the
+            // sink still holds up to a buffer of audio to cover it.
+            self.start_prefetch(wanted);
+        }
+        match self.next.as_ref().map(|next| &next.phase) {
+            Some(NextPhase::Ready(_)) => self.join_next(),
+            Some(NextPhase::Opening) => self.wait_for_next(),
+            Some(NextPhase::Failed) | None => {
+                // Opening it ahead failed; asking again the ordinary way is the one retry.
+                self.drop_next();
+                self.track_completed();
+            }
+        }
+    }
+
+    /// The next track is ready. With the sink's format, it is written right after the last frame
+    /// of the current one; with another, the sink is drained and reopened for it.
+    fn join_next(&mut self) {
+        let Some(Next {
+            phase: NextPhase::Ready(prepared),
+            ..
+        }) = self.next.take()
+        else {
+            return;
+        };
+        self.waiting_until = None;
+        let same_format = self
+            .sink
+            .as_ref()
+            .is_some_and(|sink| sink.spec() == prepared.source.spec());
+        if same_format {
+            self.handover(*prepared);
+        } else if self.finish_track_completed() {
+            self.start_opened_ahead(*prepared);
+        }
+    }
+
+    /// The next track is still opening while the last audio of this one plays out. Waits until
+    /// that audio is nearly gone; then gives up, drains, and starts the next track as it arrives.
+    fn wait_for_next(&mut self) {
+        let deadline = match self.waiting_until {
+            Some(deadline) => deadline,
+            None => {
+                let queued = self
+                    .sink
+                    .as_mut()
+                    .map_or(0, |sink| sink.delay_frames().unwrap_or(0));
+                let rate = self.current.as_ref().map_or(1, |p| p.spec.sample_rate);
+                let deadline =
+                    Instant::now() + frames_to_duration(queued, rate).saturating_sub(WAIT_MARGIN);
+                self.waiting_until = Some(deadline);
+                deadline
+            }
+        };
+        if Instant::now() < deadline {
+            self.polling = true;
+            return;
+        }
+        crate::note!("the next track was not ready in time: not gapless");
+        self.waiting_until = None;
+        if self.finish_track_completed() {
+            self.adopting = true;
+            self.set_state(State::Loading);
+        }
+    }
+
+    /// Writes `next` right after the last frame of the current track, which keeps playing out of
+    /// the device's buffer. Nothing is drained, flushed or reopened.
+    fn handover(&mut self, next: Prepared) {
+        let Some(previous) = self.current.take() else {
+            return;
+        };
+        let spec = previous.spec;
+        let end_position = previous.base
+            + frames_to_duration(
+                previous.frames_written.saturating_sub(previous.lead_in),
+                spec.sample_rate,
+            );
+        let Prepared {
+            meta,
+            source,
+            seek,
+            start,
+            first_chunk,
+        } = next;
+        let duration = meta.duration.or_else(|| source.duration());
+        self.outgoing = Some(Outgoing {
+            meta: previous.meta,
+            spec,
+            duration: previous.duration,
+            end_position,
+            position: previous.position,
+        });
+        self.current = Some(Playing {
+            meta,
+            spec,
+            source: Some(source),
+            seek,
+            pending: first_chunk,
+            offset: 0,
+            // One continuous stream of samples: what the sink still holds of the previous track
+            // is followed by this one.
+            recent: previous.recent,
+            sink_paused: previous.sink_paused,
+            frames_written: previous.frames_written,
+            base: start,
+            duration,
+            position: start,
+            last_position_at: previous.last_position_at,
+            lead_in: previous.frames_written,
+            source_done: false,
+        });
+        self.check_crossing();
+    }
+
+    /// Whether the listener has now heard the last of the previous track, and if so, moves on:
+    /// the previous track ends and the new one starts, at the moment it is actually heard.
+    fn check_crossing(&mut self) {
+        if self.outgoing.is_none() {
+            return;
+        }
+        let (Some(playing), Some(sink)) = (self.current.as_ref(), self.sink.as_mut()) else {
+            return;
+        };
+        let queued = sink.delay_frames().unwrap_or(0);
+        if playing.frames_written.saturating_sub(queued) < playing.lead_in {
+            return;
+        }
+        let Some(outgoing) = self.outgoing.take() else {
+            return;
+        };
+        self.emit(Event::Position {
+            position: outgoing.end_position,
+            duration: outgoing.duration,
+        });
+        self.emit(Event::TrackEnded {
+            meta: outgoing.meta,
+            reason: EndReason::Completed,
+        });
+
+        let Some(track) = self.current.as_ref().map(|p| p.meta.track.clone()) else {
+            return;
+        };
+        if !self.ctx.supplier.started(&track) {
+            // It was removed from the queue while it waited: skip what was written of it.
+            self.current = None;
+            self.flush_sink();
+            self.request_load(LoadTarget::Advance(Advance::Next));
+            return;
+        }
+        if let Some(playing) = self.current.as_ref() {
+            let (meta, spec) = (playing.meta.clone(), playing.spec);
+            self.publish_status();
+            self.emit(Event::TrackStarted {
+                meta,
+                spec,
+                gapless: true,
+            });
+        }
+        self.emit_position();
+    }
+
+    /// Starts opening the track that follows the current one, if it is time: the last stretch of
+    /// the current track begins. Also checks that what was opened is still what comes next.
+    fn maybe_prefetch(&mut self) {
+        if !self.ctx.gapless || self.state != State::Playing || self.outgoing.is_some() {
+            return;
+        }
+        let Some(playing) = self.current.as_ref() else {
+            return;
+        };
+        let peeked = self.ctx.supplier.peek(Advance::Auto);
+        let remaining = playing.duration.map(|duration| {
+            let played = playing.base
+                + frames_to_duration(
+                    playing.frames_written.saturating_sub(playing.lead_in),
+                    playing.spec.sample_rate,
+                );
+            duration.saturating_sub(played)
+        });
+        if let Some(next) = &self.next {
+            // The queue changed, or the listener went back: what was opened is no longer wanted.
+            let changed = peeked != Peek::Next(next.track.clone());
+            let too_early = remaining.is_some_and(|remaining| remaining > PREFETCH_LEAD * 3 / 2);
+            if changed || too_early {
+                self.drop_next();
+            } else {
+                return;
+            }
+        }
+        if let (Peek::Next(track), Some(remaining)) = (peeked, remaining)
+            && remaining <= PREFETCH_LEAD
+        {
+            self.start_prefetch(track);
+        }
+    }
+
+    /// Opens `track` in the background, to be played after the current one.
+    fn start_prefetch(&mut self, track: TrackRef) {
+        self.prefetch_generation += 1;
+        let generation = self.prefetch_generation;
+        let supplier = self.ctx.supplier.clone();
+        let tx = self.ctx.tx.clone();
+        let wanted = track.clone();
+        let task = self.ctx.rt.spawn(async move {
+            let result = prefetch(supplier, wanted)
+                .await
+                .map(Box::new)
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.send(Msg::Prefetched { generation, result });
+        });
+        self.next = Some(Next {
+            track,
+            generation,
+            task,
+            phase: NextPhase::Opening,
+        });
+    }
+
+    /// Forgets the track that was being opened ahead, and stops opening it.
+    fn drop_next(&mut self) {
+        if let Some(next) = self.next.take() {
+            next.task.abort();
+        }
+        self.waiting_until = None;
+        self.adopting = false;
+    }
+
+    /// The track opened ahead is ready, or failed.
+    fn prefetched(&mut self, generation: u64, result: Result<Box<Prepared>, String>) {
+        let Some(next) = self.next.as_mut() else {
+            return;
+        };
+        if next.generation != generation {
+            return;
+        }
+        match result {
+            Ok(prepared) if self.adopting => {
+                // The wait was given up: this is the track the engine is loading.
+                self.next = None;
+                self.adopting = false;
+                self.start_opened_ahead(*prepared);
+            }
+            Ok(prepared) => next.phase = NextPhase::Ready(prepared),
+            Err(_) if self.adopting => {
+                // Opening it failed: ask for it once more, the ordinary way.
+                self.next = None;
+                self.adopting = false;
+                self.request_load(LoadTarget::Advance(Advance::Auto));
+            }
+            Err(_) => next.phase = NextPhase::Failed,
+        }
+    }
+
+    /// Starts a track that was opened ahead, now that its turn has come and nothing is playing.
+    fn start_opened_ahead(&mut self, prepared: Prepared) {
+        if !self.ctx.supplier.started(&prepared.meta.track) {
+            // Removed from the queue meanwhile: move on to what follows.
+            self.request_load(LoadTarget::Advance(Advance::Next));
+            return;
+        }
+        if let Err(error) = self.start_track(prepared) {
+            self.fail(error);
+        }
     }
 
     fn start_track(&mut self, track: Prepared) -> Result<()> {
@@ -522,7 +947,10 @@ impl AudioThread {
             source,
             seek,
             start,
+            first_chunk,
         } = track;
+        self.waiting_until = None;
+        self.polling = false;
 
         let spec = source.spec();
         let duration = meta.duration.or_else(|| source.duration());
@@ -535,7 +963,7 @@ impl AudioThread {
             spec,
             source: Some(source),
             seek,
-            pending: Vec::new(),
+            pending: first_chunk,
             offset: 0,
             recent: Vec::new(),
             sink_paused: false,
@@ -544,8 +972,14 @@ impl AudioThread {
             duration,
             position: start,
             last_position_at: Instant::now(),
+            lead_in: 0,
+            source_done: false,
         });
-        self.emit(Event::TrackStarted { meta, spec });
+        self.emit(Event::TrackStarted {
+            meta,
+            spec,
+            gapless: false,
+        });
         let state = if self.pause_when_ready {
             State::Paused
         } else {
@@ -587,6 +1021,10 @@ impl AudioThread {
     }
 
     fn seek(&mut self, target: SeekTarget) {
+        if self.outgoing.is_some() {
+            self.seek_during_handover(target);
+            return;
+        }
         if !matches!(self.state, State::Playing | State::Paused | State::Seeking)
             || self.current.is_none()
         {
@@ -642,6 +1080,51 @@ impl AudioThread {
             });
         }
         self.request_load(LoadTarget::Advance(Advance::Auto));
+    }
+
+    /// A seek while the next track is already written behind the one still being heard: it is the
+    /// track being heard that moves. Its source is spent, so it is opened again at the target, like
+    /// a stream that can't rewind; the next track, never announced, is dropped.
+    fn seek_during_handover(&mut self, target: SeekTarget) {
+        let from = self.heard_position();
+        let at = match target {
+            SeekTarget::Absolute(at) => at,
+            SeekTarget::Forward(by) => from.saturating_add(by),
+            SeekTarget::Backward(by) => from.saturating_sub(by),
+        };
+        let was_paused = self.state == State::Paused;
+        let Some(outgoing) = self.outgoing.take() else {
+            return;
+        };
+        self.current = None;
+        self.drop_next();
+        if outgoing.duration.is_some_and(|duration| at >= duration) {
+            self.flush_sink();
+            self.emit(Event::TrackEnded {
+                meta: outgoing.meta,
+                reason: EndReason::Completed,
+            });
+            self.request_load(LoadTarget::Advance(Advance::Auto));
+            return;
+        }
+        self.current = Some(Playing {
+            meta: outgoing.meta,
+            spec: outgoing.spec,
+            source: None,
+            seek: SeekMode::Reopen,
+            pending: Vec::new(),
+            offset: 0,
+            recent: Vec::new(),
+            sink_paused: false,
+            frames_written: 0,
+            base: at,
+            duration: outgoing.duration,
+            position: at,
+            last_position_at: Instant::now(),
+            lead_in: 0,
+            source_done: false,
+        });
+        self.seek_reopen(at, was_paused);
     }
 
     /// The source can be repositioned directly.
@@ -702,6 +1185,7 @@ impl AudioThread {
 
     /// The listener's position is now `position`, with nothing queued in the device.
     fn rebase(&mut self, position: Duration) {
+        self.waiting_until = None;
         if let Some(playing) = self.current.as_mut() {
             playing.base = position;
             playing.frames_written = 0;
@@ -709,6 +1193,8 @@ impl AudioThread {
             playing.offset = 0;
             playing.recent.clear();
             playing.position = position;
+            playing.lead_in = 0;
+            playing.source_done = false;
             // The flush that always precedes this also unpaused the device; while the engine is
             // paused nothing is written until it resumes, so there is nothing to resume in it.
             playing.sink_paused = false;
@@ -819,6 +1305,18 @@ impl AudioThread {
     /// Cuts the current track short, discarding whatever is queued in the device so it is never
     /// heard. The sink stays open for the next track.
     fn interrupt_current(&mut self) {
+        if let Some(outgoing) = self.outgoing.take() {
+            // The next track was already written behind this one, but it was never announced: to
+            // the listener the track that is still playing is the one that is cut short.
+            self.current = None;
+            self.drop_next();
+            self.flush_sink();
+            self.emit(Event::TrackEnded {
+                meta: outgoing.meta,
+                reason: EndReason::Interrupted,
+            });
+            return;
+        }
         let Some(playing) = self.current.take() else {
             return;
         };
@@ -843,6 +1341,7 @@ impl AudioThread {
     /// Stops everything and releases the audio device.
     fn stop(&mut self) {
         self.interrupt_current();
+        self.drop_next();
         self.cancel_load();
         self.pause_when_ready = false;
         self.close_output();
@@ -863,6 +1362,7 @@ impl AudioThread {
 
     /// The output went away while a track was loaded.
     fn output_lost(&mut self, error: anyhow::Error) {
+        self.drop_next();
         self.emit(Event::Error {
             message: format!("{error:#}"),
         });
@@ -885,6 +1385,7 @@ impl AudioThread {
 
     /// Plays through `sinks` from now on, keeping the track and the exact position.
     fn set_output(&mut self, sinks: Arc<dyn SinkFactory>, done: Sender<Result<(), String>>) {
+        self.drop_next();
         let was_playing = self.state == State::Playing;
         if matches!(self.state, State::Playing | State::Paused) && self.sink.is_some() {
             self.pause();
@@ -966,6 +1467,7 @@ impl AudioThread {
                     request.answer(true);
                     return;
                 }
+                self.drop_next();
                 self.set_aside_unheard();
                 self.sink = None;
                 self.ctx.sinks.release();
@@ -984,6 +1486,10 @@ impl AudioThread {
     /// Moves what the device holds but the listener has not heard back into `pending`, and
     /// rebases the position on what has been heard.
     fn set_aside_unheard(&mut self) {
+        // Whether the listener has just heard the end of the previous track decides how the
+        // counters are rebased.
+        self.check_crossing();
+        let joined = self.outgoing.is_some();
         let (Some(playing), Some(sink)) = (self.current.as_mut(), self.sink.as_mut()) else {
             return;
         };
@@ -997,10 +1503,18 @@ impl AudioThread {
         carried.extend_from_slice(&playing.pending[playing.offset.min(playing.pending.len())..]);
         playing.pending = carried;
         playing.offset = 0;
-        playing.base += frames_to_duration(
-            playing.frames_written - keep as u64,
-            playing.spec.sample_rate,
-        );
+        let heard = playing.frames_written - keep as u64;
+        if joined {
+            // Still hearing the end of the previous track: what was set aside is its tail and
+            // the head of this one, so what remains of the lead-in is the tail.
+            playing.lead_in = playing.lead_in.saturating_sub(heard);
+        } else {
+            playing.base += frames_to_duration(
+                heard.saturating_sub(playing.lead_in),
+                playing.spec.sample_rate,
+            );
+            playing.lead_in = 0;
+        }
         playing.frames_written = 0;
         playing.recent.clear();
         playing.sink_paused = false;
@@ -1011,12 +1525,20 @@ impl AudioThread {
         self.emit(Event::Error {
             message: format!("{error:#}"),
         });
+        if let Some(outgoing) = self.outgoing.take() {
+            self.emit(Event::TrackEnded {
+                meta: outgoing.meta,
+                reason: EndReason::Failed,
+            });
+            self.current = None;
+        }
         if let Some(playing) = self.current.take() {
             self.emit(Event::TrackEnded {
                 meta: playing.meta,
                 reason: EndReason::Failed,
             });
         }
+        self.drop_next();
         self.cancel_load();
         self.pause_when_ready = false;
         self.close_output();
@@ -1044,6 +1566,8 @@ impl AudioThread {
         pause_when_ready: bool,
     ) {
         self.cancel_load();
+        // Whatever was being opened ahead is stale once another track is asked for.
+        self.drop_next();
         if let Some(pending) = self.release_when_ready.take() {
             // Asking for a track again means the device is wanted.
             pending.answer(false);
@@ -1096,12 +1620,23 @@ impl AudioThread {
 
     fn publish_status(&self) {
         let playing = self.current.as_ref();
+        // Until the listener hears the joined track, everything is still about the one before.
+        let (track, spec, position, duration) = match (&self.outgoing, playing) {
+            (Some(outgoing), _) => (
+                Some(outgoing.meta.clone()),
+                Some(outgoing.spec),
+                outgoing.position,
+                outgoing.duration,
+            ),
+            (None, Some(p)) => (Some(p.meta.clone()), Some(p.spec), p.position, p.duration),
+            (None, None) => (None, None, Duration::ZERO, None),
+        };
         self.ctx.status.send_replace(Status {
             state: self.state,
-            track: playing.map(|p| p.meta.clone()),
-            spec: playing.map(|p| p.spec),
-            position: playing.map_or(Duration::ZERO, |p| p.position),
-            duration: playing.and_then(|p| p.duration),
+            track,
+            spec,
+            position,
+            duration,
             output: match (&self.sink, &self.released) {
                 (Some(_), _) => OutputState::Open,
                 (None, Some(by)) => OutputState::Released { by: by.clone() },

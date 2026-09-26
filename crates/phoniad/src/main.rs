@@ -127,6 +127,7 @@ async fn run(args: Args) -> Result<()> {
         reports,
         engine: engine::Options {
             release_after_pause: settings.release_after_pause.value.duration(),
+            gapless: settings.gapless.value,
             ..engine::Options::default()
         },
     })?;

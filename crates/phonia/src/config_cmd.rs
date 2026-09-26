@@ -120,6 +120,11 @@ fn format_settings(
             settings.verbose.value.to_string(),
             settings.verbose.origin,
         ),
+        (
+            "playback.gapless",
+            settings.gapless.value.to_string(),
+            settings.gapless.origin,
+        ),
     ];
     let key_width = rows.iter().map(|row| row.0.len()).max().unwrap_or(0);
     let value_width = rows.iter().map(|row| row.1.len()).max().unwrap_or(0);
@@ -163,7 +168,8 @@ mod tests {
              \x20 tidal.max_quality           hires                               (default)\n\
              \x20 tidal.session_store         keyring                             (default)\n\
              \x20 daemon.socket               /run/user/1000/phonia/phoniad.sock  (default)\n\
-             \x20 daemon.verbose              false                               (default)"
+             \x20 daemon.verbose              false                               (default)\n\
+             \x20 playback.gapless            true                                (default)"
         );
     }
 
@@ -194,8 +200,8 @@ mod tests {
         assert!(text.contains("lossless"), "{text}");
         assert_eq!(
             text.matches("(default)").count(),
-            7,
-            "mode, sink, reserve, release_after_pause, session_store, socket and verbose were not written"
+            8,
+            "mode, sink, reserve, release_after_pause, session_store, socket, verbose and gapless were not written"
         );
     }
 

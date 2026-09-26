@@ -332,6 +332,7 @@ async fn run_play(
 fn player_options(settings: &phonia_core::config::Settings) -> phonia_core::engine::Options {
     phonia_core::engine::Options {
         release_after_pause: settings.release_after_pause.value.duration(),
+        gapless: settings.gapless.value,
         ..phonia_core::engine::Options::default()
     }
 }

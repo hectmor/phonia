@@ -8,8 +8,8 @@
 mod file;
 
 pub use file::{
-    ConfigFile, Daemon, Output, OutputMode, Quality, ReleaseAfterPause, SessionStoreKind, Tidal,
-    parse,
+    ConfigFile, Daemon, Output, OutputMode, Playback, Quality, ReleaseAfterPause, SessionStoreKind,
+    Tidal, parse,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -172,6 +172,8 @@ pub struct Settings {
     /// `None` means "the default socket path", which only the binaries know.
     pub socket: Sourced<Option<PathBuf>>,
     pub verbose: Sourced<bool>,
+    /// Whether tracks of the same format are joined without a gap.
+    pub gapless: Sourced<bool>,
 }
 
 /// Decides every setting: command line over file over default.
@@ -214,6 +216,7 @@ pub fn resolve(overrides: Overrides, file: &ConfigFile) -> Settings {
             None,
         ),
         verbose: Sourced::pick(overrides.verbose, file.daemon.verbose, false),
+        gapless: Sourced::pick(None, file.playback.gapless, true),
     }
 }
 
@@ -436,6 +439,7 @@ mod tests {
                 socket: socket.map(PathBuf::from),
                 verbose,
             },
+            ..ConfigFile::default()
         }
     }
 

@@ -32,6 +32,9 @@ const RELEASE_ANSWER_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long switching outputs may take before the caller gives up waiting for the answer.
 const SET_OUTPUT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long before the end of a track the next one starts opening, for gapless playback.
+pub const PREFETCH_LEAD: Duration = Duration::from_secs(30);
+
 /// `Previous` restarts the current track instead of going back once it has played this long.
 pub const PREVIOUS_RESTART_AFTER: Duration = Duration::from_secs(3);
 
@@ -56,6 +59,10 @@ pub struct Options {
     /// How long a pause lasts before the audio device is handed back to the desktop. `None`
     /// keeps it for as long as the engine has a track; zero hands it back on every pause.
     pub release_after_pause: Option<Duration>,
+    /// Join a track to the next one of the same format with no gap: the next is opened while the
+    /// current plays, and its first sample is written right after the last of the current one.
+    /// Off, the sink is drained and the next track loaded when one ends.
+    pub gapless: bool,
 }
 
 impl Default for Options {
@@ -63,6 +70,7 @@ impl Default for Options {
         Self {
             position_interval: POSITION_INTERVAL,
             release_after_pause: Some(RELEASE_AFTER_PAUSE),
+            gapless: true,
         }
     }
 }
@@ -145,6 +153,7 @@ impl Engine {
             status: status_tx,
             position_interval: options.position_interval,
             release_after_pause: options.release_after_pause,
+            gapless: options.gapless,
         };
         let thread = std::thread::Builder::new()
             .name("phonia-audio".into())
