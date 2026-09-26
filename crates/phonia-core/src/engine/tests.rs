@@ -660,16 +660,14 @@ fn a_newer_request_supersedes_a_slow_load() {
 #[test]
 fn load_results_nobody_asked_for_are_ignored() {
     let mut h = Harness::new(vec![], FakeSinkFactory::autoplay());
-    let unsolicited = LoadedTrack::new(
+    let unsolicited = super::audio_thread::Prepared::for_tests(
         TrackMeta {
             track: TrackRef("ghost".into()),
             title: None,
             duration: None,
         },
-        TrackMedia::RawPcm {
-            samples: ramp(100),
-            spec: SPEC_48K,
-        },
+        ramp(100),
+        SPEC_48K,
     );
     h.engine
         .tx

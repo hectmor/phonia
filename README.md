@@ -470,6 +470,10 @@ plain `cargo test`:
   (needs only that binary; also run by CI).
 - `cargo test -p phonia-core -- --ignored shared::pulse` -- shared mode against the real sound
   server, using a null sink they create and remove (needs PipeWire or PulseAudio, `pactl`, `parec`).
+- `cargo test -p phonia-core -- --ignored a_tidal_dash_track` -- streams a whole HiRes track from
+  TIDAL (about 90 MB, a minute, no sound) and checks that it decodes to exactly the number of
+  frames its manifest declares, which gapless playback relies on. Needs your TIDAL login;
+  `TIDAL_TRACK=<id>` picks another track.
 - The tests that open a sound card (`output::alsa`) are ignored too, and are run by hand with the
   DAC connected. **Do not run `cargo test --workspace -- --include-ignored`**: it runs those.
 

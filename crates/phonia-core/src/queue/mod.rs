@@ -9,10 +9,10 @@
 
 mod inner;
 
-use crate::engine::{Advance, LoadedTrack, TrackMeta, TrackOpener, TrackRef, TrackSupplier};
+use crate::engine::{Advance, LoadedTrack, Peek, TrackMeta, TrackOpener, TrackRef, TrackSupplier};
 use anyhow::{Result, anyhow};
 use futures_util::future::BoxFuture;
-use inner::Inner;
+use inner::{Inner, Peeked};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tokio::sync::watch;
@@ -178,15 +178,50 @@ impl TrackSupplier for Queue {
     }
 
     fn open(&self, track: TrackRef, at: Duration) -> BoxFuture<'static, Result<LoadedTrack>> {
+        // The entry becomes the current one as it is opened, not when it was offered: an offer
+        // can be abandoned before anything is opened.
+        self.open_entry(track, at, true)
+    }
+
+    fn peek(&self, how: Advance) -> Peek {
+        match self.inner.lock().unwrap().peek(how) {
+            Peeked::Next(id) => Peek::Next(id.track_ref()),
+            Peeked::End => Peek::End,
+            Peeked::Unknown => Peek::Unknown,
+        }
+    }
+
+    fn open_ahead(&self, track: TrackRef) -> BoxFuture<'static, Result<LoadedTrack>> {
+        // Opened, but not yet the current one: it may never be played (the queue can change
+        // before its turn comes).
+        self.open_entry(track, Duration::ZERO, false)
+    }
+
+    fn started(&self, track: &TrackRef) -> bool {
+        match ItemId::from_ref(track) {
+            Some(id) => self.mutate(|inner| inner.commit(id)),
+            None => false,
+        }
+    }
+}
+
+impl Queue {
+    /// Opens an entry. With `commit` it becomes the current one as it is opened.
+    fn open_entry(
+        &self,
+        track: TrackRef,
+        at: Duration,
+        commit: bool,
+    ) -> BoxFuture<'static, Result<LoadedTrack>> {
         let Some(id) = ItemId::from_ref(&track) else {
             return Box::pin(async move { Err(anyhow!("{:?} is not a queue entry", track.0)) });
         };
-        // The entry becomes the current one as it is opened, not when it was offered: an offer
-        // can be abandoned before anything is opened.
-        let Some(item) = self
-            .mutate(|inner| inner.commit(id).then(|| inner.item(id).cloned()))
-            .flatten()
-        else {
+        let Some(item) = self.mutate(|inner| {
+            if commit && !inner.commit(id) {
+                return None;
+            }
+            inner.item(id).cloned()
+        }) else {
             return Box::pin(
                 async move { Err(anyhow!("the queue entry {} no longer exists", id.0)) },
             );

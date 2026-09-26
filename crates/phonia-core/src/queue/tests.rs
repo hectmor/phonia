@@ -700,3 +700,115 @@ fn invariants_hold_under_random_edit_scripts() {
         }
     }
 }
+
+// ---- peeking -------------------------------------------------------------------------------
+
+use super::inner::Peeked;
+
+/// The queue's whole observable state: what a peek must leave exactly as it was.
+fn state_of(inner: &mut Inner) -> (u64, Option<ItemId>, usize, Vec<ItemId>) {
+    let snapshot = inner.snapshot();
+    (
+        snapshot.version,
+        snapshot.current,
+        inner.history_len(),
+        snapshot.order,
+    )
+}
+
+#[test]
+fn a_peek_answers_what_advance_would_and_changes_nothing() {
+    for repeat in [Repeat::Off, Repeat::One, Repeat::All] {
+        for current in 0..3 {
+            for how in [Advance::Auto, Advance::Next, Advance::Restart] {
+                let (mut inner, _) = positioned(repeat, current);
+                let before = state_of(&mut inner);
+                let peeked = inner.peek(how);
+                assert_eq!(state_of(&mut inner), before, "{repeat:?} {current} {how:?}");
+
+                let advanced = inner.advance(how);
+                match peeked {
+                    Peeked::Next(id) => {
+                        assert_eq!(advanced, Some(id), "{repeat:?} {current} {how:?}")
+                    }
+                    Peeked::End => assert_eq!(advanced, None, "{repeat:?} {current} {how:?}"),
+                    Peeked::Unknown => panic!("nothing is unknown without shuffle"),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_peek_does_not_touch_what_advance_last_offered() {
+    let (mut inner, ids) = positioned(Repeat::Off, 0);
+    assert_eq!(inner.advance(Advance::Next), Some(ids[1])); // offered, not opened
+    // The peek measures from the current entry, so it still says b, and the offer is intact:
+    assert_eq!(inner.peek(Advance::Auto), Peeked::Next(ids[1]));
+    assert_eq!(
+        inner.advance(Advance::Next),
+        Some(ids[2]),
+        "the offer chained on from b"
+    );
+}
+
+#[test]
+fn the_end_of_the_queue_and_repeat_wrapping_are_peeked_too() {
+    let (inner, ids) = positioned(Repeat::Off, 2);
+    assert_eq!(inner.peek(Advance::Auto), Peeked::End);
+
+    let (inner, ids_all) = positioned(Repeat::All, 2);
+    assert_eq!(inner.peek(Advance::Auto), Peeked::Next(ids_all[0]));
+    assert_ne!(ids, Vec::new());
+}
+
+#[test]
+fn repeat_one_peeks_the_same_entry_and_a_skip_moves_on() {
+    let (inner, ids) = positioned(Repeat::One, 1);
+    assert_eq!(inner.peek(Advance::Auto), Peeked::Next(ids[1]));
+    assert_eq!(inner.peek(Advance::Next), Peeked::Next(ids[2]));
+}
+
+#[test]
+fn a_shuffled_queue_that_would_start_a_new_cycle_cannot_be_peeked_without_reshuffling() {
+    let mut inner = Inner::new(7);
+    let ids = inner.add(["a", "b", "c"].map(track));
+    inner.set_shuffle(true);
+    inner.set_repeat(Repeat::All);
+    // Play through the whole shuffled order.
+    for _ in 0..3 {
+        play(&mut inner, Advance::Auto);
+    }
+    let before = state_of(&mut inner);
+    assert_eq!(inner.peek(Advance::Auto), Peeked::Unknown);
+    assert_eq!(state_of(&mut inner), before, "and it did not reshuffle");
+    assert_eq!(ids.len(), 3);
+
+    // In the middle of a cycle the next entry is known.
+    let mut inner = Inner::new(7);
+    inner.add(["a", "b", "c"].map(track));
+    inner.set_shuffle(true);
+    play(&mut inner, Advance::Auto);
+    assert!(matches!(inner.peek(Advance::Auto), Peeked::Next(_)));
+}
+
+#[test]
+fn peeking_after_the_current_entry_was_removed_finds_what_took_its_place() {
+    let (mut inner, ids) = positioned(Repeat::Off, 1);
+    inner.remove(&[ids[1]]);
+    assert_eq!(inner.peek(Advance::Auto), Peeked::Next(ids[2]));
+    assert_eq!(inner.advance(Advance::Auto), Some(ids[2]));
+}
+
+#[test]
+fn an_empty_queue_and_nothing_playing_peek_sensibly() {
+    let mut inner = Inner::new(1);
+    assert_eq!(inner.peek(Advance::Auto), Peeked::End);
+    let ids = inner.add(["a", "b"].map(track));
+    assert_eq!(
+        inner.peek(Advance::Auto),
+        Peeked::Next(ids[0]),
+        "nothing has played: the first entry"
+    );
+    assert_eq!(inner.peek(Advance::Previous), Peeked::Unknown);
+}

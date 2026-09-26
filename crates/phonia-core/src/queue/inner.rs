@@ -10,6 +10,14 @@ use rand::seq::SliceRandom;
 /// How many played entries `Previous` can walk back through.
 const HISTORY_LIMIT: usize = 200;
 
+/// The answer to [`Inner::peek`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Peeked {
+    Next(ItemId),
+    End,
+    Unknown,
+}
+
 /// Where `advance` measures from.
 enum Base {
     /// An entry that is (or is about to be) playing, and its place in the play order.
@@ -311,6 +319,45 @@ impl Inner {
         self.pending = target;
         self.pending_backward = how == Advance::Previous && target.is_some();
         target
+    }
+
+    /// What [`Inner::advance`] would answer for `how`, changing nothing. It measures from the
+    /// entry that is current, not from what `advance` last offered (which it must not touch).
+    ///
+    /// A shuffled order that has run out would start a new cycle by reshuffling, which is a
+    /// decision, not a question: that answer is [`Peeked::Unknown`].
+    pub(super) fn peek(&self, how: Advance) -> Peeked {
+        let base = || match self.current.and_then(|id| self.position(id)) {
+            Some(position) => Base::At(position),
+            None => self.vacated.map_or(Base::Nothing, Base::Vacated),
+        };
+        let forward = |wrap: bool| {
+            let next = match base() {
+                Base::At(position) => position + 1,
+                Base::Vacated(slot) => slot,
+                Base::Nothing => 0,
+            };
+            match self.order.get(next) {
+                Some(id) => Peeked::Next(*id),
+                None if wrap && self.shuffle && !self.order.is_empty() => Peeked::Unknown,
+                None if wrap && !self.order.is_empty() => Peeked::Next(self.order[0]),
+                None => Peeked::End,
+            }
+        };
+        match how {
+            Advance::Restart => self.current.map_or(Peeked::End, Peeked::Next),
+            Advance::Auto => match self.repeat {
+                Repeat::One => match self.current.or_else(|| self.order.first().copied()) {
+                    Some(id) => Peeked::Next(id),
+                    None => Peeked::End,
+                },
+                Repeat::Off => forward(false),
+                Repeat::All => forward(true),
+            },
+            Advance::Next => forward(self.repeat != Repeat::Off),
+            // What was played before is not decided by a question either way.
+            Advance::Previous => Peeked::Unknown,
+        }
     }
 
     fn forward(&mut self, wrap: bool) -> Option<ItemId> {

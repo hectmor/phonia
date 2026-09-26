@@ -24,12 +24,72 @@ use tokio::task::JoinHandle;
 /// Frames handed to the sink per chunk when the media is already raw PCM.
 const RAW_CHUNK_FRAMES: usize = 4096;
 
+/// A loaded track whose decoder is already open. Probing a stream (the first segments of a TIDAL
+/// track have to arrive) can take a while, so it is done by the task that loads the track, and the
+/// audio thread only ever starts a track that is ready.
+pub(super) struct Prepared {
+    meta: TrackMeta,
+    source: Source,
+    seek: SeekMode,
+    start: Duration,
+}
+
+impl Prepared {
+    /// A track of raw samples, ready to start, for tests that hand the audio thread a result.
+    #[cfg(test)]
+    pub(super) fn for_tests(meta: TrackMeta, samples: Vec<i32>, spec: SourceSpec) -> Self {
+        Self {
+            meta,
+            source: Source::Raw {
+                samples,
+                next: 0,
+                spec,
+            },
+            seek: SeekMode::None,
+            start: Duration::ZERO,
+        }
+    }
+}
+
+/// Opens the decoder of a loaded track. Blocks while the stream is probed, so it runs on a
+/// blocking thread, never on the audio thread or a runtime worker.
+async fn prepare(track: LoadedTrack) -> Result<Prepared> {
+    let LoadedTrack {
+        meta,
+        media,
+        seek,
+        start,
+    } = track;
+    let source = tokio::task::spawn_blocking(move || open_source(media))
+        .await
+        .map_err(|error| anyhow!("opening the decoder was interrupted: {error}"))??;
+    Ok(Prepared {
+        meta,
+        source,
+        seek,
+        start,
+    })
+}
+
+fn open_source(media: TrackMedia) -> Result<Source> {
+    Ok(match media {
+        TrackMedia::Encoded { source, extension } => Source::Decoder(
+            Decoder::open_boxed(source, extension.as_deref()).context("opening the decoder")?,
+        ),
+        TrackMedia::RawPcm { samples, spec } => Source::Raw {
+            samples,
+            next: 0,
+            spec,
+        },
+    })
+}
+
 /// Everything the audio thread can be told, from callers and from its own load tasks.
 pub(super) enum Msg {
     Command(Command),
     Loaded {
         generation: u64,
-        track: Box<LoadedTrack>,
+        track: Box<Prepared>,
     },
     LoadFailed {
         generation: u64,
@@ -456,27 +516,13 @@ impl AudioThread {
         self.request_load(LoadTarget::Advance(Advance::Auto));
     }
 
-    fn open_source(media: TrackMedia) -> Result<Source> {
-        Ok(match media {
-            TrackMedia::Encoded { source, extension } => Source::Decoder(
-                Decoder::open_boxed(source, extension.as_deref()).context("opening the decoder")?,
-            ),
-            TrackMedia::RawPcm { samples, spec } => Source::Raw {
-                samples,
-                next: 0,
-                spec,
-            },
-        })
-    }
-
-    fn start_track(&mut self, track: LoadedTrack) -> Result<()> {
-        let LoadedTrack {
+    fn start_track(&mut self, track: Prepared) -> Result<()> {
+        let Prepared {
             meta,
-            media,
+            source,
             seek,
             start,
         } = track;
-        let source = Self::open_source(media)?;
 
         let spec = source.spec();
         let duration = meta.duration.or_else(|| source.duration());
@@ -676,11 +722,13 @@ impl AudioThread {
     }
 
     /// The reopened track has arrived: skip to the exact target within it and carry on.
-    fn finish_seek(&mut self, track: LoadedTrack) -> Result<()> {
-        let LoadedTrack {
-            media, seek, start, ..
+    fn finish_seek(&mut self, track: Prepared) -> Result<()> {
+        let Prepared {
+            mut source,
+            seek,
+            start,
+            ..
         } = track;
-        let mut source = Self::open_source(media)?;
         let Some(playing) = self.current.as_mut() else {
             return Ok(());
         };
@@ -1013,16 +1061,22 @@ impl AudioThread {
             };
             let msg = match track {
                 None => Msg::QueueExhausted { generation },
-                Some(track) => match supplier.open(track, at).await {
-                    Ok(track) => Msg::Loaded {
-                        generation,
-                        track: Box::new(track),
-                    },
-                    Err(error) => Msg::LoadFailed {
-                        generation,
-                        error: format!("{error:#}"),
-                    },
-                },
+                Some(track) => {
+                    let prepared = match supplier.open(track, at).await {
+                        Ok(loaded) => prepare(loaded).await,
+                        Err(error) => Err(error),
+                    };
+                    match prepared {
+                        Ok(track) => Msg::Loaded {
+                            generation,
+                            track: Box::new(track),
+                        },
+                        Err(error) => Msg::LoadFailed {
+                            generation,
+                            error: format!("{error:#}"),
+                        },
+                    }
+                }
             };
             let _ = tx.send(msg);
         }));
