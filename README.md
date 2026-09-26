@@ -76,6 +76,9 @@ session_store = "keyring"  # where the TIDAL login is kept: keyring | file (see 
 [daemon]
 socket = "/run/user/1000/phonia/phoniad.sock"   # default: $XDG_RUNTIME_DIR/phonia/phoniad.sock
 verbose = false
+
+[playback]
+gapless = true          # join a track to the next one of the same format with no gap
 ```
 
 - **Name the card, not its number.** ALSA numbers cards in the order the kernel finds them, so a USB
@@ -265,6 +268,35 @@ run.
   the card as it always did, so the desktop must not be using it (mute the card's profile in
   PipeWire while using phonia).
 
+## Gapless playback
+
+Albums that run into each other (live records, DJ mixes, classical movements) need the next track to
+start on the very sample after the last one. With `[playback] gapless = true` (the default) phonia
+opens the next track about 30 seconds before the current one ends (asking TIDAL, probing the
+stream and decoding its first chunk) and, when the current one runs out, writes the next one's first
+sample right behind the last one's: the sound card is not drained, stopped or reopened, and in
+shared mode the 100 ms of silence that follows a restart is not added either. Nothing about the
+samples changes, so it is as bit-perfect as before.
+
+- **The boundary is announced when it is heard**, not when it is written: the sound card still holds
+  up to half a second of the old track after phonia has started writing the new one, so the old
+  track ends, and the new one starts, at the moment the listener crosses from one to the other, and
+  positions until then are the old track's. `Next`, `Stop` and a seek during that moment act on the
+  track that is being heard, and moving to another output or handing the card back in the middle of
+  it loses and repeats nothing.
+- **When it can't be gapless it says so and falls back**, never plays wrong: if the next track has a
+  different sample rate or bit depth the card is drained and reopened for it (a short gap, but no
+  wait for the network, since it was opened ahead); if TIDAL hasn't answered by the time the last
+  audio plays out, the engine waits for that answer instead of asking twice; a track that fails to
+  open ahead is tried again the ordinary way. A shuffled queue that starts a new round reshuffles,
+  and that one boundary is a normal one.
+- Repeat-one loops a track without a gap. Removing or moving the next track while it is being
+  opened just opens the right one instead.
+- Gapless is exact for FLAC (local files and TIDAL's DASH streams, which decode to exactly the
+  frames their manifest declares). Lossy formats have encoder padding at the ends that phonia does
+  not trim.
+- `gapless = false` gives the old behaviour: drain, then load the next track.
+
 ## Shared mode: any output, not bit-perfect
 
 Exclusive mode is the point of phonia, but it only works on a sound card that phonia can have for
@@ -330,8 +362,8 @@ sink = "bluez_output.AA_BB_CC_DD_EE_FF.1"   # from `phonia devices`; or "default
 - Since then: DASH segments are streamed on demand, playback runs through an engine with pause,
   seek, next/previous and a heard-position report (issue #10), and tracks are played from an
   in-memory queue with shuffle and repeat (issue #11).
-- What's still out of scope (coming in later phases): TUI, daemon, gapless playback, `%0Nd` in
-  DASH segment templates, manifest encryption support.
+- What's still out of scope (coming in later phases): TUI, `%0Nd` in DASH segment templates,
+  manifest encryption support.
 
 ## Tech stack
 

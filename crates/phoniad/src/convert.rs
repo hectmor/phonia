@@ -188,7 +188,11 @@ pub fn sink_report(report: &SinkReport) -> ipc::SinkReport {
 pub fn event(event: &engine::Event, queue: &QueueSnapshot) -> ipc::Event {
     match event {
         engine::Event::StateChanged(new) => ipc::Event::StateChanged { state: state(*new) },
-        engine::Event::TrackStarted { meta, spec: format } => {
+        engine::Event::TrackStarted {
+            meta,
+            spec: format,
+            gapless: _,
+        } => {
             let (item_id, source) = entry_of(&meta.track, queue);
             ipc::Event::TrackStarted {
                 item_id,

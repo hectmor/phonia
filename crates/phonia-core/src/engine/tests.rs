@@ -130,6 +130,10 @@ impl TestTrack {
 struct TestSupplier {
     tracks: Vec<TestTrack>,
     cursor: Mutex<Option<usize>>,
+    /// Every opening, by track id, and whether it was opened ahead of its turn.
+    openings: Mutex<Vec<(String, bool)>>,
+    /// Tracks that were removed from the "queue": `started` says so.
+    removed: Mutex<Vec<String>>,
 }
 
 impl TestSupplier {
@@ -137,7 +141,31 @@ impl TestSupplier {
         Arc::new(Self {
             tracks,
             cursor: Mutex::new(None),
+            openings: Mutex::new(Vec::new()),
+            removed: Mutex::new(Vec::new()),
         })
+    }
+
+    /// How many times `id` was opened, in either way.
+    fn opened(&self, id: &str) -> usize {
+        self.openings
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(opened, _)| opened == id)
+            .count()
+    }
+
+    fn remove(&self, id: &str) {
+        self.removed.lock().unwrap().push(id.to_string());
+    }
+
+    /// The track after the cursor that has not been removed.
+    fn next_index(&self) -> Option<usize> {
+        let cursor = *self.cursor.lock().unwrap();
+        let removed = self.removed.lock().unwrap();
+        (cursor.map_or(0, |index| index + 1)..self.tracks.len())
+            .find(|index| !removed.contains(&self.tracks[*index].id.to_string()))
     }
 }
 
@@ -145,7 +173,7 @@ impl TrackSupplier for TestSupplier {
     fn advance(&self, how: Advance) -> Option<TrackRef> {
         let cursor = *self.cursor.lock().unwrap();
         let target = match how {
-            Advance::Auto | Advance::Next => Some(cursor.map_or(0, |index| index + 1)),
+            Advance::Auto | Advance::Next => self.next_index(),
             Advance::Previous => cursor.and_then(|index| index.checked_sub(1)),
             Advance::Restart => cursor,
         };
@@ -154,15 +182,54 @@ impl TrackSupplier for TestSupplier {
             .map(|track| TrackRef(track.id.to_string()))
     }
 
+    fn peek(&self, how: Advance) -> Peek {
+        match how {
+            Advance::Auto | Advance::Next => match self.next_index() {
+                Some(index) => Peek::Next(TrackRef(self.tracks[index].id.to_string())),
+                None => Peek::End,
+            },
+            _ => Peek::Unknown,
+        }
+    }
+
+    fn open_ahead(&self, track: TrackRef) -> BoxFuture<'static, anyhow::Result<LoadedTrack>> {
+        self.open_track(track, Duration::ZERO, true)
+    }
+
+    fn started(&self, track: &TrackRef) -> bool {
+        if self.removed.lock().unwrap().contains(&track.0) {
+            return false;
+        }
+        if let Some(index) = self.tracks.iter().position(|t| t.id == track.0) {
+            *self.cursor.lock().unwrap() = Some(index);
+        }
+        true
+    }
+
     fn open(
         &self,
         track: TrackRef,
         at: Duration,
     ) -> BoxFuture<'static, anyhow::Result<LoadedTrack>> {
+        self.open_track(track, at, false)
+    }
+}
+
+impl TestSupplier {
+    fn open_track(
+        &self,
+        track: TrackRef,
+        at: Duration,
+        ahead: bool,
+    ) -> BoxFuture<'static, anyhow::Result<LoadedTrack>> {
         let Some(index) = self.tracks.iter().position(|t| t.id == track.0) else {
             return Box::pin(async move { Err(anyhow!("no such track: {}", track.0)) });
         };
-        *self.cursor.lock().unwrap() = Some(index);
+        self.openings.lock().unwrap().push((track.0.clone(), ahead));
+        // Opening it ahead of its turn does not make it the current track.
+        if !ahead {
+            *self.cursor.lock().unwrap() = Some(index);
+        }
 
         let test_track = self.tracks[index].clone();
         Box::pin(async move {
@@ -224,6 +291,7 @@ impl TrackSupplier for TestSupplier {
 struct Harness {
     // Field order matters: the engine (and its audio thread) must go before the runtime.
     engine: Engine,
+    supplier: Arc<TestSupplier>,
     sinks: Arc<FakeSinkFactory>,
     events: broadcast::Receiver<Event>,
     /// A second subscription that, unlike `events`, keeps the `Position` events.
@@ -257,16 +325,18 @@ impl Harness {
             .enable_all()
             .build()
             .unwrap();
+        let supplier = TestSupplier::new(tracks);
         let engine = Engine::spawn_with_options(
             rt.handle().clone(),
             sinks.clone(),
-            TestSupplier::new(tracks),
+            supplier.clone(),
             options,
         )
         .unwrap();
         let (events, raw_events) = (engine.subscribe(), engine.subscribe());
         Self {
             engine,
+            supplier,
             sinks,
             events,
             raw_events,
@@ -464,7 +534,7 @@ fn started_event_and_status_carry_the_track_and_its_format() {
     h.play("a");
 
     let events = h.events_until(is_started);
-    let Some(Event::TrackStarted { meta, spec }) = events.last() else {
+    let Some(Event::TrackStarted { meta, spec, .. }) = events.last() else {
         unreachable!()
     };
     assert_eq!(meta.track, TrackRef("a".into()));
@@ -2213,4 +2283,450 @@ fn a_lost_output_that_is_still_gone_when_resuming_stays_paused_with_the_reason()
     };
     assert!(message.contains("not there"), "{message}");
     assert_eq!(h.engine.status().state, State::Paused);
+}
+
+// ---- gapless -------------------------------------------------------------------------------
+
+fn gapless_options() -> Options {
+    // A report after every write, so the prefetch starts as soon as it may.
+    Options {
+        position_interval: Duration::ZERO,
+        ..Options::default()
+    }
+}
+
+/// Plays `first` on a blocking sink until the writer is stuck mid-track, and waits until the
+/// track after it has been opened ahead and is ready to be joined.
+fn play_and_prefetch(
+    tracks: Vec<TestTrack>,
+    next: &str,
+    options: Options,
+) -> (Harness, FakeSinkHandle) {
+    let first = tracks[0].id;
+    let mut h = Harness::with_options(tracks, FakeSinkFactory::blocking(), options);
+    let sink = play_until_queue_is_full(&mut h, first);
+    wait_until("the next track is opened ahead", || {
+        h.supplier.opened(next) == 1
+    });
+    std::thread::sleep(Duration::from_millis(100)); // and decoded, and reported ready
+    (h, sink)
+}
+
+#[test]
+fn two_tracks_of_the_same_format_are_one_unbroken_stream_with_no_drain_between() {
+    let (mut h, sink) = play_and_prefetch(
+        vec![TestTrack::pcm("a", 30_000), TestTrack::pcm("b", 10_000)],
+        "b",
+        gapless_options(),
+    );
+    sink.set_blocking(false);
+
+    let events = h.events_until(is_stopped);
+    let labels: Vec<String> = events.iter().map(label).collect();
+    assert_eq!(
+        labels,
+        [
+            "state:Playing",
+            "ended:a:Completed",
+            "started:b",
+            "ended:b:Completed",
+            "state:Loading",
+            "exhausted",
+            "state:Stopped"
+        ],
+        "no Loading and no state change between the tracks"
+    );
+    let started: Vec<bool> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::TrackStarted { gapless, .. } => Some(*gapless),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started, [true], "b was joined to a");
+
+    let mut expected = ramp(30_000);
+    expected.extend(ramp(10_000));
+    assert_eq!(
+        sink.played(),
+        expected,
+        "every sample, in order, exactly once"
+    );
+    assert_eq!(
+        sink.drain_count(),
+        1,
+        "drained once, at the end of the queue"
+    );
+    assert_eq!(h.sinks.handles().len(), 1, "one sink for both");
+    assert_eq!(h.supplier.opened("a"), 1);
+    assert_eq!(h.supplier.opened("b"), 1, "opened once, ahead of its turn");
+}
+
+#[test]
+fn the_next_track_is_announced_when_it_is_heard_not_when_it_is_written() {
+    let (mut h, sink) = play_and_prefetch(
+        vec![TestTrack::pcm("a", 4_000), TestTrack::pcm("b", 30_000)],
+        "b",
+        gapless_options(),
+    );
+    // a fits in the queue and was written in full; b's first frames are behind it.
+    h.events_until(|e| matches!(e, Event::StateChanged(State::Playing)));
+    wait_until("b is written behind a", || {
+        sink.queued_frames() > 4_000 - PERIOD
+    });
+    h.assert_quiet_for(Duration::from_millis(150));
+    let status = h.engine.status();
+    assert_eq!(
+        status.track.map(|track| track.track.0),
+        Some("a".to_string()),
+        "still a until it is heard"
+    );
+
+    // The DAC plays a's last frames; only then is a over and b under way.
+    sink.advance(4_096);
+    let events = h.events_until(|event| matches!(event, Event::TrackStarted { .. }));
+    let labels: Vec<String> = events.iter().map(label).collect();
+    assert_eq!(labels.last().map(String::as_str), Some("started:b"));
+    assert!(
+        labels.iter().any(|l| l == "ended:a:Completed"),
+        "{labels:?}"
+    );
+    assert!(
+        sink.played().len() >= 4_000 * 2,
+        "a had been played in full when it was said to have ended"
+    );
+    // The last position of a is its length.
+    assert_eq!(
+        h.engine.status().track.map(|t| t.track.0),
+        Some("b".to_string())
+    );
+    sink.set_blocking(false);
+}
+
+#[test]
+fn positions_during_the_handover_belong_to_the_track_being_heard() {
+    let (mut h, sink) = play_and_prefetch(
+        vec![TestTrack::pcm("a", 4_000), TestTrack::pcm("b", 30_000)],
+        "b",
+        gapless_options(),
+    );
+    h.events_until(|e| matches!(e, Event::StateChanged(State::Playing)));
+    wait_until("b is written behind a", || {
+        sink.queued_frames() > 4_000 - PERIOD
+    });
+    let mut positions = Vec::new();
+    for _ in 0..3 {
+        sink.advance(1_000);
+        h.assert_quiet_for(Duration::from_millis(30));
+        positions.push(h.engine.status().position);
+    }
+    let end_of_a = frames_to_duration(4_000, 48_000);
+    assert!(
+        positions.iter().all(|position| *position <= end_of_a),
+        "never past the end of a while it is being heard: {positions:?}"
+    );
+    assert!(
+        positions.windows(2).all(|pair| pair[0] <= pair[1]),
+        "{positions:?}"
+    );
+    sink.set_blocking(false);
+    let _ = h.events_until(is_stopped);
+}
+
+#[test]
+fn a_different_format_drains_and_reopens_the_sink_but_needs_no_second_opening() {
+    let (mut h, sink) = play_and_prefetch(
+        vec![
+            TestTrack::pcm_with("a", 30_000, SPEC_48K),
+            TestTrack::pcm_with("b", 10_000, SPEC_96K),
+        ],
+        "b",
+        gapless_options(),
+    );
+    sink.set_blocking(false);
+    // The second sink is a new one, blocking like the first: let it run.
+    wait_until("the second sink is open", || h.sinks.handles().len() == 2);
+    h.sink(1).set_blocking(false);
+
+    let events = h.events_until(is_stopped);
+    let started: Vec<bool> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::TrackStarted { gapless, .. } => Some(*gapless),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        started,
+        [false],
+        "the format changed: not a joined boundary"
+    );
+    assert_eq!(h.sinks.handles().len(), 2, "the sink was reopened");
+    assert_eq!(h.sink(0).played(), ramp(30_000));
+    assert_eq!(h.sink(1).played(), ramp(10_000));
+    assert_eq!(
+        h.supplier.opened("b"),
+        1,
+        "the track opened ahead was the one started"
+    );
+}
+
+#[test]
+fn a_track_that_is_not_ready_in_time_is_waited_for_and_then_adopted_not_requested_again() {
+    let (mut h, sink) = {
+        let tracks = vec![
+            TestTrack::pcm("a", 5_000),
+            TestTrack::pcm("b", 10_000).slow(Duration::from_millis(400)),
+        ];
+        let mut h = Harness::with_options(tracks, FakeSinkFactory::blocking(), gapless_options());
+        let sink = play_until_queue_is_full(&mut h, "a");
+        (h, sink)
+    };
+    sink.set_blocking(false);
+
+    let labels = h.labels_until(is_stopped);
+    assert!(
+        labels.iter().any(|l| l == "state:Loading"),
+        "b was not ready when a ran out: the ordinary path, {labels:?}"
+    );
+    assert_eq!(
+        h.supplier.opened("b"),
+        1,
+        "the one opening in flight was used, not repeated"
+    );
+    let mut expected = ramp(5_000);
+    expected.extend(ramp(10_000));
+    assert_eq!(sink.played(), expected);
+}
+
+#[test]
+fn a_track_that_cannot_be_opened_ahead_is_tried_again_the_ordinary_way_and_then_stops() {
+    let (mut h, sink) = play_and_prefetch(
+        vec![
+            TestTrack::pcm("a", 30_000),
+            TestTrack::new("b", Media::Broken),
+        ],
+        "b",
+        gapless_options(),
+    );
+    sink.set_blocking(false);
+    let labels = h.labels_until(is_stopped);
+    assert!(labels.iter().any(|l| l.starts_with("error:")), "{labels:?}");
+    assert!(
+        labels.iter().any(|l| l == "ended:a:Completed"),
+        "{labels:?}"
+    );
+    assert!(
+        h.supplier.opened("b") >= 2,
+        "opened ahead, and again at the end of a"
+    );
+}
+
+#[test]
+fn skipping_while_the_next_track_is_joined_cuts_the_one_that_is_heard() {
+    let (mut h, sink) = play_and_prefetch(
+        vec![
+            TestTrack::pcm("a", 4_000),
+            TestTrack::pcm("b", 30_000),
+            TestTrack::pcm("c", 2_000),
+        ],
+        "b",
+        gapless_options(),
+    );
+    wait_until("b is written behind a", || {
+        sink.queued_frames() > 4_000 - PERIOD
+    });
+    h.send(Command::Next);
+    sink.advance(PERIOD);
+    let events = h.events_until(is_started);
+    let labels: Vec<String> = events.iter().map(label).collect();
+    assert!(
+        labels.iter().any(|l| l == "ended:a:Interrupted"),
+        "the track that was heard is the one cut: {labels:?}"
+    );
+    // b starts, the ordinary way, and was never announced before.
+    let started: Vec<bool> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::TrackStarted { gapless, .. } => Some(*gapless),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started, [false]);
+    h.sinks.handles()[0].set_blocking(false);
+}
+
+#[test]
+fn stopping_while_the_next_track_is_joined_ends_only_the_one_that_is_heard() {
+    let (mut h, sink) = play_and_prefetch(
+        vec![TestTrack::pcm("a", 4_000), TestTrack::pcm("b", 30_000)],
+        "b",
+        gapless_options(),
+    );
+    wait_until("b is written behind a", || {
+        sink.queued_frames() > 4_000 - PERIOD
+    });
+    h.send(Command::Stop);
+    sink.advance(PERIOD);
+    let labels = h.labels_until(is_stopped);
+    assert!(
+        labels.iter().any(|l| l == "ended:a:Interrupted"),
+        "{labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|l| l.contains(":b")),
+        "b was never announced, so never ended: {labels:?}"
+    );
+}
+
+#[test]
+fn switching_the_output_while_the_next_track_is_joined_loses_and_repeats_nothing() {
+    let (mut h, sink) = play_and_prefetch(
+        vec![TestTrack::pcm("a", 4_000), TestTrack::pcm("b", 30_000)],
+        "b",
+        gapless_options(),
+    );
+    wait_until("b is written behind a", || {
+        sink.queued_frames() > 4_000 - PERIOD
+    });
+    let second = FakeSinkFactory::blocking();
+    switch_output(&h, &sink, &second);
+    wait_until("playing on the new output", || {
+        second.handles().len() == 1 && h.engine.status().state == State::Playing
+    });
+    second.handles()[0].set_blocking(false);
+    let _ = h.events_until(is_stopped);
+
+    let mut played = h.sink(0).played();
+    played.extend(second.handles()[0].played());
+    let mut expected = ramp(4_000);
+    expected.extend(ramp(30_000));
+    assert_eq!(
+        played, expected,
+        "a then b, exactly, across the two outputs"
+    );
+}
+
+#[test]
+fn releasing_the_output_while_the_next_track_is_joined_carries_on_exactly() {
+    let (mut h, sink) = play_and_prefetch(
+        vec![TestTrack::pcm("a", 4_000), TestTrack::pcm("b", 30_000)],
+        "b",
+        gapless_options(),
+    );
+    wait_until("b is written behind a", || {
+        sink.queued_frames() > 4_000 - PERIOD
+    });
+    send_and_unblock(&h, &sink, Command::Release);
+    h.events_until(is_released);
+    h.send(Command::Resume);
+    wait_until("playing again on a new sink", || {
+        h.sinks.handles().len() == 2 && h.engine.status().state == State::Playing
+    });
+    h.sink(1).set_blocking(false);
+    let _ = h.events_until(is_stopped);
+    let mut expected = ramp(4_000);
+    expected.extend(ramp(30_000));
+    assert_eq!(played_on_all(&h), expected);
+}
+
+#[test]
+fn a_track_removed_from_the_queue_while_joined_is_skipped_and_the_next_one_plays() {
+    let (mut h, sink) = play_and_prefetch(
+        vec![
+            TestTrack::pcm("a", 4_000),
+            TestTrack::pcm("b", 30_000),
+            TestTrack::pcm("c", 3_000),
+        ],
+        "b",
+        gapless_options(),
+    );
+    wait_until("b is written behind a", || {
+        sink.queued_frames() > 4_000 - PERIOD
+    });
+    h.supplier.remove("b");
+    sink.set_blocking(false);
+    h.sinks.handles()[0].advance(4_096);
+    let labels = h.labels_until(is_stopped);
+    assert!(
+        !labels.iter().any(|l| l == "started:b"),
+        "b no longer exists: {labels:?}"
+    );
+    assert!(labels.iter().any(|l| l == "started:c"), "{labels:?}");
+}
+
+#[test]
+fn without_gapless_the_sink_is_drained_and_the_next_track_loaded_as_before() {
+    let mut h = Harness::with_options(
+        vec![TestTrack::pcm("a", 5_000), TestTrack::pcm("b", 3_000)],
+        FakeSinkFactory::autoplay(),
+        Options {
+            gapless: false,
+            ..gapless_options()
+        },
+    );
+    h.play("a");
+    let labels = h.labels_until(is_stopped);
+    assert_eq!(
+        labels,
+        [
+            "state:Loading",
+            "started:a",
+            "state:Playing",
+            "ended:a:Completed",
+            "state:Loading",
+            "started:b",
+            "state:Playing",
+            "ended:b:Completed",
+            "state:Loading",
+            "exhausted",
+            "state:Stopped"
+        ]
+    );
+    assert_eq!(h.supplier.opened("b"), 1);
+    assert_eq!(
+        h.sink(0).drain_count(),
+        2,
+        "drained at the end of each track"
+    );
+}
+
+#[test]
+fn seeking_while_the_next_track_is_joined_moves_the_track_that_is_heard() {
+    let (mut h, sink) = play_and_prefetch(
+        vec![
+            TestTrack::pcm("a", 4_000).seekable(SeekMode::InPlace),
+            TestTrack::pcm("b", 30_000),
+        ],
+        "b",
+        gapless_options(),
+    );
+    h.events_until(|e| matches!(e, Event::StateChanged(State::Playing)));
+    wait_until("b is written behind a", || {
+        sink.queued_frames() > 4_000 - PERIOD
+    });
+    let target = frames_to_duration(1_000, 48_000);
+    send_and_unblock(&h, &sink, Command::Seek(SeekTarget::Absolute(target)));
+    let labels = h.labels_until(|e| matches!(e, Event::Seeked { .. }));
+    assert!(
+        !labels
+            .iter()
+            .any(|l| l.starts_with("started:") || l.starts_with("ended:")),
+        "nothing about b, and a did not end: {labels:?}"
+    );
+
+    sink.set_blocking(false);
+    let labels = h.labels_until(is_stopped);
+    assert!(
+        labels.iter().any(|l| l == "ended:a:Completed"),
+        "{labels:?}"
+    );
+    assert!(labels.iter().any(|l| l == "started:b"), "{labels:?}");
+    // What is heard after the seek: a from the target on, then b in full.
+    let mut tail = ramp(4_000)[1_000 * 2..].to_vec();
+    tail.extend(ramp(30_000));
+    assert!(
+        ends_with(&sink.played(), &tail),
+        "a from 1000 on, then b, unbroken"
+    );
 }

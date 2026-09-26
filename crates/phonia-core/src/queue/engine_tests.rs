@@ -118,6 +118,25 @@ impl Harness {
         Self::with_seed(media, sinks, 1)
     }
 
+    /// An engine that reports after every write, so opening the next track ahead starts as soon
+    /// as it may.
+    fn eager(media: &[(&str, Media)], sinks: Arc<FakeSinkFactory>) -> Self {
+        let mut h = Self::with_seed(media, sinks.clone(), 1);
+        let engine = Engine::spawn_with_options(
+            h._rt.handle().clone(),
+            sinks,
+            h.queue.clone(),
+            crate::engine::Options {
+                position_interval: Duration::ZERO,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        h.events = engine.subscribe();
+        h.engine = engine;
+        h
+    }
+
     fn with_seed(media: &[(&str, Media)], sinks: Arc<FakeSinkFactory>, seed: u64) -> Self {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -638,4 +657,112 @@ fn a_supplier_that_does_not_say_what_is_next_says_unknown() {
         Plain.started(&TrackRef("x".into())),
         "and starting is a no-op that succeeds"
     );
+}
+
+// ---- gapless through the queue -------------------------------------------------------------
+
+/// The `gapless` flag of every `TrackStarted` in `events`.
+fn gapless_flags(events: &[Event]) -> Vec<bool> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::TrackStarted { gapless, .. } => Some(*gapless),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Plays until the writer is stuck mid-track on `sink`, and gives the next track time to open.
+fn play_until_blocked(h: &mut Harness) -> FakeSinkHandle {
+    h.send(Command::Play(None));
+    wait_until("the first track has started", || {
+        !h.sinks.handles().is_empty()
+    });
+    let sink = h.sink(0);
+    wait_until_the_writer_is_blocked(&sink);
+    std::thread::sleep(Duration::from_millis(200));
+    sink
+}
+
+#[test]
+fn a_queue_plays_its_entries_joined_when_they_share_a_format() {
+    let media = [
+        ("a", Media::Pcm(30_000)),
+        ("b", Media::Pcm(10_000)),
+        ("c", Media::Pcm(5_000)),
+    ];
+    let mut h = Harness::eager(&media, FakeSinkFactory::blocking());
+    h.queue.add([entry("a"), entry("b"), entry("c")]);
+    let sink = play_until_blocked(&mut h);
+    sink.set_blocking(false);
+
+    let events = h.events_until(is_stopped);
+    assert_eq!(
+        gapless_flags(&events),
+        [false, true, true],
+        "a starts on its own; b and c are joined"
+    );
+    let mut expected = ramp(30_000);
+    expected.extend(ramp(10_000));
+    expected.extend(ramp(5_000));
+    assert_eq!(sink.played(), expected);
+    assert_eq!(
+        sink.drain_count(),
+        1,
+        "drained only at the end of the queue"
+    );
+    assert_eq!(h.queue.snapshot().current.map(|id| id.0), Some(3));
+}
+
+#[test]
+fn repeat_one_loops_a_track_without_a_gap() {
+    let mut h = Harness::eager(&[("a", Media::Pcm(30_000))], FakeSinkFactory::blocking());
+    h.queue.add([entry("a")]);
+    h.queue.set_repeat(Repeat::One);
+    let sink = play_until_blocked(&mut h);
+
+    // Let the first pass be heard: the loop starts again from its beginning, joined.
+    let mut seen = Vec::new();
+    let deadline = Instant::now() + TIMEOUT;
+    while !seen
+        .iter()
+        .any(|event| matches!(event, Event::TrackStarted { gapless: true, .. }))
+    {
+        assert!(Instant::now() < deadline, "the loop never joined: {seen:?}");
+        sink.advance(PERIOD);
+        std::thread::sleep(Duration::from_millis(2));
+        while let Ok(event) = h.events.try_recv() {
+            seen.push(event);
+        }
+    }
+    assert_eq!(sink.drain_count(), 0, "no drain at the boundary");
+    assert_eq!(h.sinks.handles().len(), 1);
+    h.send(Command::Stop);
+    sink.set_blocking(false);
+}
+
+#[test]
+fn removing_the_entry_that_was_opened_ahead_makes_the_one_after_it_play_joined() {
+    let media = [
+        ("a", Media::Pcm(30_000)),
+        ("b", Media::Pcm(1_000)),
+        ("c", Media::Pcm(6_000)),
+    ];
+    let mut h = Harness::eager(&media, FakeSinkFactory::blocking());
+    let ids = h.queue.add([entry("a"), entry("b"), entry("c")]);
+    let sink = play_until_blocked(&mut h);
+
+    h.queue.remove(&[ids[1]]);
+    // The next report notices, drops what was opened, and opens c instead.
+    sink.advance(PERIOD);
+    std::thread::sleep(Duration::from_millis(300));
+    sink.set_blocking(false);
+
+    let events = h.events_until(is_stopped);
+    let titles: Vec<String> = events.iter().cloned().filter_map(started_title).collect();
+    assert_eq!(titles, ["a", "c"], "b is gone");
+    assert_eq!(gapless_flags(&events), [false, true], "c was joined to a");
+    let mut expected = ramp(30_000);
+    expected.extend(ramp(6_000));
+    assert_eq!(sink.played(), expected);
 }

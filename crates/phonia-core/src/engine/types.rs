@@ -122,10 +122,13 @@ pub enum EndReason {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     StateChanged(State),
-    /// Sent just before `StateChanged(Playing)`.
+    /// Sent just before `StateChanged(Playing)`, except when the track was joined to the one
+    /// before it without a gap (`gapless`): then playback never stopped, so there is no state
+    /// change, and this is sent at the moment the listener starts hearing the new track.
     TrackStarted {
         meta: TrackMeta,
         spec: SourceSpec,
+        gapless: bool,
     },
     TrackEnded {
         meta: TrackMeta,

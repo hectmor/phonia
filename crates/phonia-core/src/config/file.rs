@@ -181,6 +181,13 @@ pub struct Daemon {
     pub verbose: Option<bool>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Playback {
+    /// Join a track to the next of the same format with no gap.
+    pub gapless: Option<bool>,
+}
+
 /// The whole file.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -188,6 +195,7 @@ pub struct ConfigFile {
     pub output: Output,
     pub tidal: Tidal,
     pub daemon: Daemon,
+    pub playback: Playback,
 }
 
 /// Reads the text of a config file. The error names the offending key and line.
@@ -214,6 +222,9 @@ session_store = "file"
 [daemon]
 socket = "/run/user/1000/phonia/phoniad.sock"
 verbose = true
+
+[playback]
+gapless = false
 "#;
 
     #[test]
@@ -235,6 +246,9 @@ verbose = true
                 daemon: Daemon {
                     socket: Some("/run/user/1000/phonia/phoniad.sock".into()),
                     verbose: Some(true)
+                },
+                playback: Playback {
+                    gapless: Some(false)
                 },
             }
         );
