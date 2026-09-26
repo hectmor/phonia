@@ -21,7 +21,15 @@ pub fn run(action: ConfigAction, config_flag: Option<&Path>) -> Result<()> {
         ConfigAction::Show => {
             let loaded = config::load(source.as_ref())?;
             let settings = config::resolve(Overrides::default(), &loaded.file);
-            println!("{}", format_settings(&settings, source.as_ref(), loaded.path.is_some(), &phonia_ipc::socket::default_socket_path()));
+            println!(
+                "{}",
+                format_settings(
+                    &settings,
+                    source.as_ref(),
+                    loaded.path.is_some(),
+                    &phonia_ipc::socket::default_socket_path()
+                )
+            );
         }
     }
     Ok(())
@@ -36,14 +44,21 @@ fn describe_source(source: Option<&ConfigSource>) -> String {
                 (ConfigSource::Explicit(_), true) => "named explicitly",
                 (ConfigSource::Explicit(_), false) => "named explicitly, but it does not exist",
                 (ConfigSource::Default(_), true) => "the default place",
-                (ConfigSource::Default(_), false) => "the default place; it does not exist, so the defaults are used",
+                (ConfigSource::Default(_), false) => {
+                    "the default place; it does not exist, so the defaults are used"
+                }
             };
             format!("{} ({how})", path.display())
         }
     }
 }
 
-fn format_settings(settings: &Settings, source: Option<&ConfigSource>, read: bool, default_socket: &Path) -> String {
+fn format_settings(
+    settings: &Settings,
+    source: Option<&ConfigSource>,
+    read: bool,
+    default_socket: &Path,
+) -> String {
     let file = match (source, read) {
         (Some(source), true) => source.path().display().to_string(),
         (Some(source), false) => format!("{} (not found: all defaults)", source.path().display()),
@@ -52,32 +67,68 @@ fn format_settings(settings: &Settings, source: Option<&ConfigSource>, read: boo
     let rows = [
         (
             "output.device",
-            settings.device.value.clone().unwrap_or_else(|| "(not set)".to_string()),
+            settings
+                .device
+                .value
+                .clone()
+                .unwrap_or_else(|| "(not set)".to_string()),
             settings.device.origin,
         ),
-        ("output.mode", settings.mode.value.to_string(), settings.mode.origin),
-        ("output.sink", settings.sink.value.clone(), settings.sink.origin),
-        ("output.reserve", settings.reserve.value.to_string(), settings.reserve.origin),
+        (
+            "output.mode",
+            settings.mode.value.to_string(),
+            settings.mode.origin,
+        ),
+        (
+            "output.sink",
+            settings.sink.value.clone(),
+            settings.sink.origin,
+        ),
+        (
+            "output.reserve",
+            settings.reserve.value.to_string(),
+            settings.reserve.origin,
+        ),
         (
             "output.release_after_pause",
             settings.release_after_pause.value.to_string(),
             settings.release_after_pause.origin,
         ),
-        ("tidal.max_quality", settings.max_quality.value.to_string(), settings.max_quality.origin),
-        ("tidal.session_store", settings.session_store.value.to_string(), settings.session_store.origin),
+        (
+            "tidal.max_quality",
+            settings.max_quality.value.to_string(),
+            settings.max_quality.origin,
+        ),
+        (
+            "tidal.session_store",
+            settings.session_store.value.to_string(),
+            settings.session_store.origin,
+        ),
         (
             "daemon.socket",
-            settings.socket.value.clone().unwrap_or_else(|| default_socket.to_path_buf()).display().to_string(),
+            settings
+                .socket
+                .value
+                .clone()
+                .unwrap_or_else(|| default_socket.to_path_buf())
+                .display()
+                .to_string(),
             settings.socket.origin,
         ),
-        ("daemon.verbose", settings.verbose.value.to_string(), settings.verbose.origin),
+        (
+            "daemon.verbose",
+            settings.verbose.value.to_string(),
+            settings.verbose.origin,
+        ),
     ];
     let key_width = rows.iter().map(|row| row.0.len()).max().unwrap_or(0);
     let value_width = rows.iter().map(|row| row.1.len()).max().unwrap_or(0);
 
     let mut text = format!("Config file: {file}");
     for (key, value, origin) in rows {
-        text.push_str(&format!("\n  {key:<key_width$}  {value:<value_width$}  ({origin})"));
+        text.push_str(&format!(
+            "\n  {key:<key_width$}  {value:<value_width$}  ({origin})"
+        ));
     }
     text
 }
@@ -95,7 +146,9 @@ mod tests {
     fn with_no_file_everything_is_a_default_and_the_device_is_not_set() {
         let text = format_settings(
             &settings(&ConfigFile::default()),
-            Some(&ConfigSource::Default("/home/u/.config/phonia/config.toml".into())),
+            Some(&ConfigSource::Default(
+                "/home/u/.config/phonia/config.toml".into(),
+            )),
             false,
             Path::new("/run/user/1000/phonia/phoniad.sock"),
         );
@@ -117,8 +170,14 @@ mod tests {
     #[test]
     fn values_from_the_file_say_so() {
         let file = ConfigFile {
-            output: Output { device: Some("hw:DS2,0".into()), ..Output::default() },
-            tidal: Tidal { max_quality: Some(Quality::Lossless), ..Tidal::default() },
+            output: Output {
+                device: Some("hw:DS2,0".into()),
+                ..Output::default()
+            },
+            tidal: Tidal {
+                max_quality: Some(Quality::Lossless),
+                ..Tidal::default()
+            },
             ..ConfigFile::default()
         };
         let text = format_settings(
@@ -128,9 +187,16 @@ mod tests {
             Path::new("/s"),
         );
         assert!(text.starts_with("Config file: /tmp/c.toml\n"), "{text}");
-        assert!(text.contains("hw:DS2,0") && text.contains("(config file)"), "{text}");
+        assert!(
+            text.contains("hw:DS2,0") && text.contains("(config file)"),
+            "{text}"
+        );
         assert!(text.contains("lossless"), "{text}");
-        assert_eq!(text.matches("(default)").count(), 7, "mode, sink, reserve, release_after_pause, session_store, socket and verbose were not written");
+        assert_eq!(
+            text.matches("(default)").count(),
+            7,
+            "mode, sink, reserve, release_after_pause, session_store, socket and verbose were not written"
+        );
     }
 
     #[test]
@@ -138,12 +204,17 @@ mod tests {
         assert!(describe_source(None).contains("no config file is read"));
 
         let missing = ConfigSource::Explicit("/definitely/not/here.toml".into());
-        assert_eq!(describe_source(Some(&missing)), "/definitely/not/here.toml (named explicitly, but it does not exist)");
+        assert_eq!(
+            describe_source(Some(&missing)),
+            "/definitely/not/here.toml (named explicitly, but it does not exist)"
+        );
 
         let missing_default = ConfigSource::Default("/definitely/not/config.toml".into());
         assert!(describe_source(Some(&missing_default)).contains("defaults are used"));
 
         let here = std::env::current_exe().unwrap();
-        assert!(describe_source(Some(&ConfigSource::Explicit(here))).ends_with("(named explicitly)"));
+        assert!(
+            describe_source(Some(&ConfigSource::Explicit(here))).ends_with("(named explicitly)")
+        );
     }
 }

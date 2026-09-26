@@ -134,13 +134,22 @@ impl Decoder {
             .make_audio_decoder(audio_params, &dec_opts)
             .context("unsupported audio codec")?;
 
-        let duration = track_duration(track.num_frames, track.duration, track.time_base, sample_rate);
+        let duration = track_duration(
+            track.num_frames,
+            track.duration,
+            track.time_base,
+            sample_rate,
+        );
 
         Ok(Decoder {
             format,
             decoder,
             track_id: track.id,
-            spec: SourceSpec { sample_rate, channels, bits_per_sample },
+            spec: SourceSpec {
+                sample_rate,
+                channels,
+                bits_per_sample,
+            },
             duration,
             time_base: track.time_base,
             skip_samples: 0,
@@ -199,7 +208,10 @@ impl Decoder {
             .format
             .seek(
                 SeekMode::Accurate,
-                SeekTo::Time { time: Time::from_nanos_u64(nanos), track_id: Some(self.track_id) },
+                SeekTo::Time {
+                    time: Time::from_nanos_u64(nanos),
+                    track_id: Some(self.track_id),
+                },
             )
             .context("seeking in the audio stream")?;
         self.decoder.reset();
@@ -207,7 +219,10 @@ impl Decoder {
         let skip_frames = self.ticks_to_frames(seeked.required_ts.get() - seeked.actual_ts.get());
         self.skip_samples = skip_frames as usize * self.spec.channels as usize;
 
-        Ok(frames_to_duration(self.ticks_to_frames(seeked.required_ts.get()), self.spec.sample_rate))
+        Ok(frames_to_duration(
+            self.ticks_to_frames(seeked.required_ts.get()),
+            self.spec.sample_rate,
+        ))
     }
 
     /// Decodes the next packet into `out` (replacing its contents) as left-justified,
@@ -223,9 +238,13 @@ impl Decoder {
                 Ok(Some(packet)) => packet,
                 Ok(None) => return Ok(false),
                 Err(SymphoniaError::ResetRequired) => {
-                    bail!("the stream requires resetting the decoder mid-playback; not supported yet");
+                    bail!(
+                        "the stream requires resetting the decoder mid-playback; not supported yet"
+                    );
                 }
-                Err(e) => return Err(e).context("error reading the next packet from the container"),
+                Err(e) => {
+                    return Err(e).context("error reading the next packet from the container");
+                }
             };
 
             if packet.track_id != self.track_id {
@@ -289,7 +308,9 @@ fn track_duration(
     let duration = match (num_frames, ticks, time_base) {
         (Some(frames), _, _) => Some(frames_to_duration(frames, sample_rate)),
         (None, Some(ticks), Some(time_base)) => time_base
-            .calc_time(Timestamp::new(i64::try_from(ticks.get()).unwrap_or(i64::MAX)))
+            .calc_time(Timestamp::new(
+                i64::try_from(ticks.get()).unwrap_or(i64::MAX),
+            ))
             .and_then(|time| u64::try_from(time.as_nanos()).ok())
             .map(Duration::from_nanos),
         _ => None,
@@ -306,7 +327,10 @@ pub(crate) fn duration_to_frames(duration: Duration, sample_rate: u32) -> u64 {
 
 pub(crate) fn frames_to_duration(frames: u64, sample_rate: u32) -> Duration {
     let sample_rate = u64::from(sample_rate.max(1));
-    Duration::new(frames / sample_rate, ((frames % sample_rate) * 1_000_000_000 / sample_rate) as u32)
+    Duration::new(
+        frames / sample_rate,
+        ((frames % sample_rate) * 1_000_000_000 / sample_rate) as u32,
+    )
 }
 
 #[cfg(test)]
@@ -318,7 +342,11 @@ mod tests {
     fn source_spec_is_plain_comparable_data() {
         // Smoke test: keeps `SourceSpec` a simple value type as the rest of the pipeline
         // (auth.rs/tidal.rs/output/alsa.rs) grows around it.
-        let a = SourceSpec { sample_rate: 96_000, channels: 2, bits_per_sample: 24 };
+        let a = SourceSpec {
+            sample_rate: 96_000,
+            channels: 2,
+            bits_per_sample: 24,
+        };
         let b = a;
         assert_eq!(a, b);
     }
@@ -345,7 +373,14 @@ mod tests {
     #[test]
     fn reports_spec_and_duration() {
         let d = decoder(RATE as usize * 2);
-        assert_eq!(d.spec(), SourceSpec { sample_rate: RATE, channels: 2, bits_per_sample: 16 });
+        assert_eq!(
+            d.spec(),
+            SourceSpec {
+                sample_rate: RATE,
+                channels: 2,
+                bits_per_sample: 16
+            }
+        );
         assert_eq!(d.duration(), Some(Duration::from_secs(2)));
     }
 
@@ -355,7 +390,10 @@ mod tests {
         let mut d = decoder(frames);
         assert_eq!(read_all(&mut d), expected(0, frames * 2));
         let mut chunk = Vec::new();
-        assert!(!d.next_chunk_into(&mut chunk).unwrap(), "must keep reporting the end");
+        assert!(
+            !d.next_chunk_into(&mut chunk).unwrap(),
+            "must keep reporting the end"
+        );
     }
 
     #[test]
@@ -401,7 +439,10 @@ mod tests {
 
         let landed_frame = (position.as_secs_f64() * f64::from(RATE)).round() as usize;
         assert!(position <= Duration::from_micros(123_456));
-        assert!(landed_frame.abs_diff(5444) <= 1, "landed on frame {landed_frame}");
+        assert!(
+            landed_frame.abs_diff(5444) <= 1,
+            "landed on frame {landed_frame}"
+        );
         assert_eq!(read_all(&mut d), expected(landed_frame * 2, frames * 2));
     }
 
@@ -479,20 +520,30 @@ mod tests {
         seeked.seek(Duration::from_millis(500)).unwrap();
         let by_seek = read_all(&mut seeked);
 
-        let slice = NonSeekable(std::io::Cursor::new(crate::testutil::wav_slice(slice_start, frames - slice_start)));
+        let slice = NonSeekable(std::io::Cursor::new(crate::testutil::wav_slice(
+            slice_start,
+            frames - slice_start,
+        )));
         let mut reopened = Decoder::open(slice, Some("wav")).unwrap();
         reopened.skip_frames((target - slice_start) as u64);
         let by_reopening = read_all(&mut reopened);
 
         assert_eq!(by_seek.len(), (frames - target) * 2);
-        assert!(by_reopening == by_seek, "reopening and skipping must land on the same frame as a seek");
+        assert!(
+            by_reopening == by_seek,
+            "reopening and skipping must land on the same frame as a seek"
+        );
     }
 
     #[test]
     fn duration_to_frames_inverts_frames_to_duration() {
         for rate in [44_100, 48_000, 96_000, 192_000] {
             for frames in [0u64, 1, 2, 999, 4_096, 765_952, 12_345_678] {
-                assert_eq!(duration_to_frames(frames_to_duration(frames, rate), rate), frames, "{frames} @ {rate}");
+                assert_eq!(
+                    duration_to_frames(frames_to_duration(frames, rate), rate),
+                    frames,
+                    "{frames} @ {rate}"
+                );
             }
         }
     }
@@ -503,12 +554,20 @@ mod tests {
         use symphonia::core::units::Duration as Ticks;
 
         assert_eq!(track_duration(Some(0), None, None, 44_100), None);
-        assert_eq!(track_duration(Some(44_100), None, None, 44_100), Some(Duration::from_secs(1)));
+        assert_eq!(
+            track_duration(Some(44_100), None, None, 44_100),
+            Some(Duration::from_secs(1))
+        );
 
         let millis = TimeBase::new(NonZero::new(1).unwrap(), NonZero::new(1_000).unwrap());
-        assert_eq!(track_duration(None, Some(Ticks::new(2_500)), Some(millis), 44_100), Some(Duration::from_millis(2_500)));
-        assert_eq!(track_duration(None, Some(Ticks::new(0)), Some(millis), 44_100), None);
+        assert_eq!(
+            track_duration(None, Some(Ticks::new(2_500)), Some(millis), 44_100),
+            Some(Duration::from_millis(2_500))
+        );
+        assert_eq!(
+            track_duration(None, Some(Ticks::new(0)), Some(millis), 44_100),
+            None
+        );
         assert_eq!(track_duration(None, None, None, 44_100), None);
     }
 }
-

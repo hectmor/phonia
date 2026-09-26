@@ -25,7 +25,11 @@ pub fn state(state: engine::State) -> ipc::State {
 }
 
 pub fn spec(spec: SourceSpec) -> ipc::Spec {
-    ipc::Spec { sample_rate: spec.sample_rate, channels: spec.channels, bits_per_sample: spec.bits_per_sample }
+    ipc::Spec {
+        sample_rate: spec.sample_rate,
+        channels: spec.channels,
+        bits_per_sample: spec.bits_per_sample,
+    }
 }
 
 pub fn repeat(repeat: queue::Repeat) -> ipc::Repeat {
@@ -81,9 +85,18 @@ pub fn queue_dto(queue: &QueueSnapshot) -> ipc::Queue {
 }
 
 /// The queue entry an engine track reference stands for, and its source.
-fn entry_of(track: &engine::TrackRef, queue: &QueueSnapshot) -> (Option<ipc::ItemId>, Option<String>) {
-    let Some(id) = ItemId::from_ref(track) else { return (None, None) };
-    let source = queue.items.iter().find(|item| item.id == id).map(|item| item.track.source.0.clone());
+fn entry_of(
+    track: &engine::TrackRef,
+    queue: &QueueSnapshot,
+) -> (Option<ipc::ItemId>, Option<String>) {
+    let Some(id) = ItemId::from_ref(track) else {
+        return (None, None);
+    };
+    let source = queue
+        .items
+        .iter()
+        .find(|item| item.id == id)
+        .map(|item| item.track.source.0.clone());
     (Some(ipc::ItemId(id.0)), source)
 }
 
@@ -97,7 +110,12 @@ pub fn status_dto(
         state: state(status.state),
         track: status.track.as_ref().map(|meta| {
             let (item_id, source) = entry_of(&meta.track, queue);
-            ipc::Track { item_id, source, title: meta.title.clone(), duration_ms: meta.duration.map(ms) }
+            ipc::Track {
+                item_id,
+                source,
+                title: meta.title.clone(),
+                duration_ms: meta.duration.map(ms),
+            }
         }),
         spec: status.spec.map(spec),
         position_ms: ms(status.position),
@@ -108,7 +126,10 @@ pub fn status_dto(
             OutputState::Released { by } => ipc::Output::Released { by: by.clone() },
         },
         route,
-        volume: volume.map(|volume| ipc::Volume { percent: volume.percent, muted: volume.muted }),
+        volume: volume.map(|volume| ipc::Volume {
+            percent: volume.percent,
+            muted: volume.muted,
+        }),
     }
 }
 
@@ -148,7 +169,11 @@ pub fn sink_report(report: &SinkReport) -> ipc::SinkReport {
             ProcReading::Read { contents, .. } => Some(contents.clone()),
             _ => None,
         },
-        mode: Some(if report.shared.is_some() { ipc::OutputMode::Shared } else { ipc::OutputMode::Exclusive }),
+        mode: Some(if report.shared.is_some() {
+            ipc::OutputMode::Shared
+        } else {
+            ipc::OutputMode::Exclusive
+        }),
         resampled_to: report
             .shared
             .as_ref()
@@ -173,20 +198,29 @@ pub fn event(event: &engine::Event, queue: &QueueSnapshot) -> ipc::Event {
                 spec: spec(*format),
             }
         }
-        engine::Event::TrackEnded { meta, reason } => {
-            ipc::Event::TrackEnded { item_id: entry_of(&meta.track, queue).0, reason: end_reason(*reason) }
-        }
-        engine::Event::Position { position, duration } => {
-            ipc::Event::Position { position_ms: ms(*position), duration_ms: duration.map(ms) }
-        }
-        engine::Event::Seeked { position } => ipc::Event::Seeked { position_ms: ms(*position) },
-        engine::Event::SeekRejected { reason } => ipc::Event::SeekRejected { reason: reason.clone() },
+        engine::Event::TrackEnded { meta, reason } => ipc::Event::TrackEnded {
+            item_id: entry_of(&meta.track, queue).0,
+            reason: end_reason(*reason),
+        },
+        engine::Event::Position { position, duration } => ipc::Event::Position {
+            position_ms: ms(*position),
+            duration_ms: duration.map(ms),
+        },
+        engine::Event::Seeked { position } => ipc::Event::Seeked {
+            position_ms: ms(*position),
+        },
+        engine::Event::SeekRejected { reason } => ipc::Event::SeekRejected {
+            reason: reason.clone(),
+        },
         engine::Event::QueueExhausted => ipc::Event::QueueExhausted,
-        engine::Event::OutputReleased { by, reason } => {
-            ipc::Event::OutputReleased { by: by.clone(), reason: release_reason(*reason) }
-        }
+        engine::Event::OutputReleased { by, reason } => ipc::Event::OutputReleased {
+            by: by.clone(),
+            reason: release_reason(*reason),
+        },
         engine::Event::OutputAcquired => ipc::Event::OutputAcquired,
-        engine::Event::Error { message } => ipc::Event::Error { message: message.clone() },
+        engine::Event::Error { message } => ipc::Event::Error {
+            message: message.clone(),
+        },
     }
 }
 
@@ -207,7 +241,10 @@ mod tests {
         };
         QueueSnapshot {
             version: 3,
-            items: vec![item(7, "file:/m/a.flac", Some("a.flac"), Some(215)), item(8, "tidal:1", None, None)],
+            items: vec![
+                item(7, "file:/m/a.flac", Some("a.flac"), Some(215)),
+                item(8, "tidal:1", None, None),
+            ],
             order: vec![ItemId(8), ItemId(7)],
             current: Some(ItemId(7)),
             shuffle: true,
@@ -224,61 +261,136 @@ mod tests {
         assert_eq!(dto.items[0].duration_ms, Some(215_000));
         assert_eq!(dto.items[1].title, None);
         assert_eq!(dto.order, [ipc::ItemId(8), ipc::ItemId(7)]);
-        assert_eq!((dto.current, dto.shuffle, dto.repeat), (Some(ipc::ItemId(7)), true, ipc::Repeat::All));
+        assert_eq!(
+            (dto.current, dto.shuffle, dto.repeat),
+            (Some(ipc::ItemId(7)), true, ipc::Repeat::All)
+        );
     }
 
     #[test]
     fn the_engines_track_reference_is_the_item_id_and_names_its_source() {
         let status = Status {
             state: engine::State::Playing,
-            track: Some(TrackMeta { track: ItemId(7).track_ref(), title: Some("a.flac".into()), duration: Some(Duration::from_secs(215)) }),
-            spec: Some(SourceSpec { sample_rate: 96_000, channels: 2, bits_per_sample: 24 }),
+            track: Some(TrackMeta {
+                track: ItemId(7).track_ref(),
+                title: Some("a.flac".into()),
+                duration: Some(Duration::from_secs(215)),
+            }),
+            spec: Some(SourceSpec {
+                sample_rate: 96_000,
+                channels: 2,
+                bits_per_sample: 24,
+            }),
             position: Duration::from_millis(1_500),
             duration: Some(Duration::from_secs(215)),
-            output: OutputState::Released { by: Some("jackd".into()) },
+            output: OutputState::Released {
+                by: Some("jackd".into()),
+            },
         };
         let dto = status_dto(&status, &snapshot(), None, None);
         let track = dto.track.unwrap();
         assert_eq!(track.item_id, Some(ipc::ItemId(7)));
-        assert_eq!(track.source.as_deref(), Some("file:/m/a.flac"), "the wire names the source, never the engine's reference");
+        assert_eq!(
+            track.source.as_deref(),
+            Some("file:/m/a.flac"),
+            "the wire names the source, never the engine's reference"
+        );
         assert_eq!((dto.position_ms, dto.state), (1_500, ipc::State::Playing));
         assert_eq!(dto.spec.unwrap().sample_rate, 96_000);
-        assert_eq!(dto.output, ipc::Output::Released { by: Some("jackd".into()) });
+        assert_eq!(
+            dto.output,
+            ipc::Output::Released {
+                by: Some("jackd".into())
+            }
+        );
     }
 
     #[test]
     fn output_events_map_to_wire_events() {
         let q = snapshot();
-        let released = engine::Event::OutputReleased { by: Some("jackd".into()), reason: ReleaseReason::Requested };
+        let released = engine::Event::OutputReleased {
+            by: Some("jackd".into()),
+            reason: ReleaseReason::Requested,
+        };
         assert_eq!(
             event(&released, &q),
-            ipc::Event::OutputReleased { by: Some("jackd".into()), reason: ipc::ReleaseReason::Requested }
+            ipc::Event::OutputReleased {
+                by: Some("jackd".into()),
+                reason: ipc::ReleaseReason::Requested
+            }
         );
-        assert_eq!(event(&engine::Event::OutputAcquired, &q), ipc::Event::OutputAcquired);
+        assert_eq!(
+            event(&engine::Event::OutputAcquired, &q),
+            ipc::Event::OutputAcquired
+        );
     }
 
     #[test]
     fn a_track_that_is_not_in_the_queue_is_reported_without_a_source() {
-        let meta = TrackMeta { track: TrackRef("999".into()), title: None, duration: None };
-        let event = event(&engine::Event::TrackEnded { meta, reason: EndReason::Failed }, &snapshot());
-        assert_eq!(event, ipc::Event::TrackEnded { item_id: Some(ipc::ItemId(999)), reason: ipc::EndReason::Failed });
+        let meta = TrackMeta {
+            track: TrackRef("999".into()),
+            title: None,
+            duration: None,
+        };
+        let event = event(
+            &engine::Event::TrackEnded {
+                meta,
+                reason: EndReason::Failed,
+            },
+            &snapshot(),
+        );
+        assert_eq!(
+            event,
+            ipc::Event::TrackEnded {
+                item_id: Some(ipc::ItemId(999)),
+                reason: ipc::EndReason::Failed
+            }
+        );
     }
 
     #[test]
     fn engine_events_map_to_wire_events() {
         let q = snapshot();
-        assert_eq!(event(&engine::Event::StateChanged(engine::State::Seeking), &q), ipc::Event::StateChanged { state: ipc::State::Seeking });
         assert_eq!(
-            event(&engine::Event::Position { position: Duration::from_millis(2_500), duration: None }, &q),
-            ipc::Event::Position { position_ms: 2_500, duration_ms: None }
+            event(&engine::Event::StateChanged(engine::State::Seeking), &q),
+            ipc::Event::StateChanged {
+                state: ipc::State::Seeking
+            }
         );
-        assert_eq!(event(&engine::Event::QueueExhausted, &q), ipc::Event::QueueExhausted);
-        assert_eq!(event(&engine::Event::Seeked { position: Duration::from_secs(3) }, &q), ipc::Event::Seeked { position_ms: 3_000 });
+        assert_eq!(
+            event(
+                &engine::Event::Position {
+                    position: Duration::from_millis(2_500),
+                    duration: None
+                },
+                &q
+            ),
+            ipc::Event::Position {
+                position_ms: 2_500,
+                duration_ms: None
+            }
+        );
+        assert_eq!(
+            event(&engine::Event::QueueExhausted, &q),
+            ipc::Event::QueueExhausted
+        );
+        assert_eq!(
+            event(
+                &engine::Event::Seeked {
+                    position: Duration::from_secs(3)
+                },
+                &q
+            ),
+            ipc::Event::Seeked { position_ms: 3_000 }
+        );
     }
 
     #[test]
     fn seek_targets_and_repeat_modes_round_trip() {
-        assert_eq!(seek_target(ipc::SeekTarget::Forward { ms: 10_000 }), SeekTarget::Forward(Duration::from_secs(10)));
+        assert_eq!(
+            seek_target(ipc::SeekTarget::Forward { ms: 10_000 }),
+            SeekTarget::Forward(Duration::from_secs(10))
+        );
         for wire in [ipc::Repeat::Off, ipc::Repeat::One, ipc::Repeat::All] {
             assert_eq!(repeat(repeat_from_wire(wire)), wire);
         }
@@ -288,9 +400,16 @@ mod tests {
     fn a_sink_report_carries_the_verdict_and_the_evidence() {
         let report = SinkReport::new(
             "hw:1,0".into(),
-            SourceSpec { sample_rate: 96_000, channels: 2, bits_per_sample: 24 },
+            SourceSpec {
+                sample_rate: 96_000,
+                channels: 2,
+                bits_per_sample: 24,
+            },
             "S24_3LE".into(),
-            ProcReading::Read { path: "/p".into(), contents: "format: S24_3LE\nrate: 96000 (96000/1)\n".into() },
+            ProcReading::Read {
+                path: "/p".into(),
+                contents: "format: S24_3LE\nrate: 96000 (96000/1)\n".into(),
+            },
         );
         let dto = sink_report(&report);
         assert!(dto.bit_perfect);
@@ -299,7 +418,11 @@ mod tests {
 
         let converted = SinkReport::new(
             "default".into(),
-            SourceSpec { sample_rate: 96_000, channels: 2, bits_per_sample: 24 },
+            SourceSpec {
+                sample_rate: 96_000,
+                channels: 2,
+                bits_per_sample: 24,
+            },
             "S24_3LE".into(),
             ProcReading::NotHw,
         );
@@ -313,7 +436,11 @@ mod tests {
     fn a_shared_report_reaches_clients_as_not_bit_perfect_with_the_reason() {
         use phonia_core::output::alsa::SharedRoute;
         let report = SinkReport::shared(
-            SourceSpec { sample_rate: 96_000, channels: 2, bits_per_sample: 24 },
+            SourceSpec {
+                sample_rate: 96_000,
+                channels: 2,
+                bits_per_sample: 24,
+            },
             "S32LE".into(),
             SharedRoute {
                 sink: "Soundcore Life P2".into(),
@@ -327,7 +454,10 @@ mod tests {
         assert!(!dto.bit_perfect);
         assert_eq!(dto.device, "Soundcore Life P2");
         assert!(dto.problem.unwrap().contains("SBC"));
-        assert_eq!(dto.hw_params, None, "there is no /proc/asound for a stream through the sound server");
+        assert_eq!(
+            dto.hw_params, None,
+            "there is no /proc/asound for a stream through the sound server"
+        );
     }
 
     #[test]

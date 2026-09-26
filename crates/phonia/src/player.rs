@@ -3,7 +3,9 @@
 
 use anyhow::{Result, anyhow};
 use phonia_core::control::Controller;
-use phonia_core::engine::{self, Command, Engine, EndReason, Event, SeekTarget, State, TrackSupplier};
+use phonia_core::engine::{
+    self, Command, EndReason, Engine, Event, SeekTarget, State, TrackSupplier,
+};
 use phonia_core::output::SinkFactory;
 use phonia_core::queue::{ItemId, Queue, QueueSnapshot, Repeat};
 use std::io::Write;
@@ -125,7 +127,11 @@ fn format_queue(queue: &QueueSnapshot) -> String {
         repeat_name(queue.repeat)
     );
     for (index, item) in queue.items.iter().enumerate() {
-        let marker = if queue.current == Some(item.id) { '>' } else { ' ' };
+        let marker = if queue.current == Some(item.id) {
+            '>'
+        } else {
+            ' '
+        };
         let name = item.track.title.as_deref().unwrap_or(&item.track.source.0);
         text.push_str(&format!("\n {marker} {:>3}. {name}", index + 1));
     }
@@ -174,7 +180,10 @@ struct Console {
 
 impl Console {
     fn progress(&mut self, position: Duration, duration: Option<Duration>) {
-        print!("\r{}", format_progress(position.as_secs_f64(), duration.map(|d| d.as_secs_f64())));
+        print!(
+            "\r{}",
+            format_progress(position.as_secs_f64(), duration.map(|d| d.as_secs_f64()))
+        );
         let _ = std::io::stdout().flush();
         self.progress_shown = true;
     }
@@ -203,7 +212,8 @@ pub async fn run(
     options: engine::Options,
 ) -> Result<()> {
     let supplier: Arc<dyn TrackSupplier> = queue.clone();
-    let engine = Engine::spawn_with_options(tokio::runtime::Handle::current(), sinks, supplier, options)?;
+    let engine =
+        Engine::spawn_with_options(tokio::runtime::Handle::current(), sinks, supplier, options)?;
     let controller = Controller::new(engine, queue.clone());
     let mut events = controller.subscribe_events();
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -291,16 +301,29 @@ fn remove_entry(controller: &Controller, number: usize, console: &mut Console) {
 
 /// Reacts to one engine event. Returns `true` once the engine has stopped, which is how every
 /// run ends: the queue ran out, the user quit, or something failed.
-fn handle_event(event: Event, interactive: bool, console: &mut Console, error: &mut Option<String>) -> bool {
+fn handle_event(
+    event: Event,
+    interactive: bool,
+    console: &mut Console,
+    error: &mut Option<String>,
+) -> bool {
     match event {
         Event::Position { position, duration } => console.progress(position, duration),
         Event::TrackStarted { meta, .. } => {
-            console.line(format!("Playing: {}", meta.title.as_deref().unwrap_or(&meta.track.0)));
+            console.line(format!(
+                "Playing: {}",
+                meta.title.as_deref().unwrap_or(&meta.track.0)
+            ));
         }
-        Event::TrackEnded { reason: EndReason::Completed, .. } => console.finish(),
+        Event::TrackEnded {
+            reason: EndReason::Completed,
+            ..
+        } => console.finish(),
         Event::StateChanged(State::Stopped) => return true,
         Event::StateChanged(state) if interactive => console.line(format!("[{state:?}]")),
-        Event::Seeked { position } if interactive => console.line(format!("Seeked to {:.1}s", position.as_secs_f64())),
+        Event::Seeked { position } if interactive => {
+            console.line(format!("Seeked to {:.1}s", position.as_secs_f64()))
+        }
         Event::SeekRejected { reason } => console.line(format!("Seek rejected: {reason}")),
         Event::OutputReleased { by: Some(by), .. } => console.line(format!("DAC released to {by}")),
         Event::OutputReleased { by: None, .. } => console.line("DAC released"),
@@ -334,7 +357,10 @@ mod tests {
     #[test]
     fn seek_to_takes_seconds_with_or_without_a_space() {
         assert_eq!(parse_key("s 90"), Key::SeekTo(Duration::from_secs(90)));
-        assert_eq!(parse_key("s90.5"), Key::SeekTo(Duration::from_millis(90_500)));
+        assert_eq!(
+            parse_key("s90.5"),
+            Key::SeekTo(Duration::from_millis(90_500))
+        );
         assert_eq!(parse_key("s 0"), Key::SeekTo(Duration::ZERO));
     }
 
@@ -350,7 +376,10 @@ mod tests {
 
     #[test]
     fn nonsense_is_reported_not_guessed() {
-        for bad in ["s", "s abc", "s -5", "y", "pp", "seek 10", "d", "d 0", "d -1", "d x", "j", "j 0", "j 1.5"] {
+        for bad in [
+            "s", "s abc", "s -5", "y", "pp", "seek 10", "d", "d 0", "d -1", "d x", "j", "j 0",
+            "j 1.5",
+        ] {
             assert_eq!(parse_key(bad), Key::Unknown(bad.to_string()), "{bad:?}");
         }
     }
@@ -358,8 +387,14 @@ mod tests {
     #[test]
     fn keys_map_to_engine_commands() {
         assert_eq!(command_for(&Key::TogglePause), Some(Command::TogglePause));
-        assert_eq!(command_for(&Key::Forward), Some(Command::Seek(SeekTarget::Forward(SEEK_STEP))));
-        assert_eq!(command_for(&Key::Rewind), Some(Command::Seek(SeekTarget::Backward(SEEK_STEP))));
+        assert_eq!(
+            command_for(&Key::Forward),
+            Some(Command::Seek(SeekTarget::Forward(SEEK_STEP)))
+        );
+        assert_eq!(
+            command_for(&Key::Rewind),
+            Some(Command::Seek(SeekTarget::Backward(SEEK_STEP)))
+        );
         assert_eq!(
             command_for(&Key::SeekTo(Duration::from_secs(3))),
             Some(Command::Seek(SeekTarget::Absolute(Duration::from_secs(3))))
@@ -368,7 +403,12 @@ mod tests {
         assert_eq!(command_for(&Key::Help), None);
     }
 
-    fn snapshot(titles: &[&str], current: Option<usize>, shuffle: bool, repeat: Repeat) -> QueueSnapshot {
+    fn snapshot(
+        titles: &[&str],
+        current: Option<usize>,
+        shuffle: bool,
+        repeat: Repeat,
+    ) -> QueueSnapshot {
         use phonia_core::engine::TrackRef;
         use phonia_core::queue::{QueueItem, QueueTrack};
         let items: Vec<QueueItem> = titles
@@ -376,7 +416,11 @@ mod tests {
             .enumerate()
             .map(|(index, title)| QueueItem {
                 id: ItemId(index as u64 + 1),
-                track: QueueTrack { source: TrackRef(format!("/music/{title}.flac")), title: Some(title.to_string()), duration: None },
+                track: QueueTrack {
+                    source: TrackRef(format!("/music/{title}.flac")),
+                    title: Some(title.to_string()),
+                    duration: None,
+                },
             })
             .collect();
         QueueSnapshot {
@@ -391,7 +435,12 @@ mod tests {
 
     #[test]
     fn the_queue_listing_numbers_entries_and_marks_the_current_one() {
-        let text = format_queue(&snapshot(&["one", "two", "three"], Some(1), true, Repeat::All));
+        let text = format_queue(&snapshot(
+            &["one", "two", "three"],
+            Some(1),
+            true,
+            Repeat::All,
+        ));
         assert_eq!(
             text,
             "Queue (3 entries, shuffle on, repeat all):\n     1. one\n >   2. two\n     3. three"
@@ -400,7 +449,10 @@ mod tests {
 
     #[test]
     fn an_empty_queue_lists_only_its_header() {
-        assert_eq!(format_queue(&snapshot(&[], None, false, Repeat::Off)), "Queue (0 entries, shuffle off, repeat off):");
+        assert_eq!(
+            format_queue(&snapshot(&[], None, false, Repeat::Off)),
+            "Queue (0 entries, shuffle off, repeat off):"
+        );
     }
 
     #[test]

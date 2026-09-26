@@ -84,8 +84,15 @@ impl Inner {
         self.items.iter().find(|item| item.id == id)
     }
 
-    pub(super) fn record_meta(&mut self, id: ItemId, title: Option<&str>, duration: Option<std::time::Duration>) {
-        let Some(item) = self.items.iter_mut().find(|item| item.id == id) else { return };
+    pub(super) fn record_meta(
+        &mut self,
+        id: ItemId,
+        title: Option<&str>,
+        duration: Option<std::time::Duration>,
+    ) {
+        let Some(item) = self.items.iter_mut().find(|item| item.id == id) else {
+            return;
+        };
         let mut changed = false;
         if item.track.title.is_none() && title.is_some() {
             item.track.title = title.map(str::to_string);
@@ -125,7 +132,11 @@ impl Inner {
 
     /// Inserts at `at` in queue order (clamped). While shuffled the entries still go to the end
     /// of the play order: they are played once this cycle, and where they land is predictable.
-    pub(super) fn insert(&mut self, at: usize, tracks: impl IntoIterator<Item = QueueTrack>) -> Vec<ItemId> {
+    pub(super) fn insert(
+        &mut self,
+        at: usize,
+        tracks: impl IntoIterator<Item = QueueTrack>,
+    ) -> Vec<ItemId> {
         let new = self.new_items(tracks);
         let ids: Vec<ItemId> = new.iter().map(|item| item.id).collect();
         let at = at.min(self.items.len());
@@ -138,17 +149,24 @@ impl Inner {
 
     /// Inserts right after the entry that is playing (or first, if nothing is), in both the
     /// queue and the play order.
-    pub(super) fn play_next(&mut self, tracks: impl IntoIterator<Item = QueueTrack>) -> Vec<ItemId> {
+    pub(super) fn play_next(
+        &mut self,
+        tracks: impl IntoIterator<Item = QueueTrack>,
+    ) -> Vec<ItemId> {
         let new = self.new_items(tracks);
         let ids: Vec<ItemId> = new.iter().map(|item| item.id).collect();
 
         let base = self.current;
         let items_at = base
             .and_then(|id| self.items.iter().position(|item| item.id == id))
-            .map_or_else(|| self.vacated.unwrap_or(0).min(self.items.len()), |index| index + 1);
-        let order_at = base
-            .and_then(|id| self.position(id))
-            .map_or_else(|| self.vacated.unwrap_or(0).min(self.order.len()), |index| index + 1);
+            .map_or_else(
+                || self.vacated.unwrap_or(0).min(self.items.len()),
+                |index| index + 1,
+            );
+        let order_at = base.and_then(|id| self.position(id)).map_or_else(
+            || self.vacated.unwrap_or(0).min(self.order.len()),
+            |index| index + 1,
+        );
 
         self.items.splice(items_at..items_at, new);
         self.insert_in_order(order_at, &ids);
@@ -173,7 +191,9 @@ impl Inner {
     pub(super) fn remove(&mut self, ids: &[ItemId]) -> usize {
         let mut removed = 0;
         for &id in ids {
-            let Some(index) = self.items.iter().position(|item| item.id == id) else { continue };
+            let Some(index) = self.items.iter().position(|item| item.id == id) else {
+                continue;
+            };
             self.items.remove(index);
             removed += 1;
 
@@ -203,7 +223,9 @@ impl Inner {
     /// Moves an entry to position `to` in queue order (clamped). The cursor stays on the entry
     /// it was on, since it is an id. While shuffled the play order is left alone.
     pub(super) fn move_to(&mut self, id: ItemId, to: usize) -> bool {
-        let Some(from) = self.items.iter().position(|item| item.id == id) else { return false };
+        let Some(from) = self.items.iter().position(|item| item.id == id) else {
+            return false;
+        };
         let item = self.items.remove(from);
         self.items.insert(to.min(self.items.len()), item);
         if !self.shuffle {
@@ -240,7 +262,12 @@ impl Inner {
         self.shuffle = shuffle;
         if shuffle {
             let current = self.current;
-            let mut others: Vec<ItemId> = self.items.iter().map(|item| item.id).filter(|id| Some(*id) != current).collect();
+            let mut others: Vec<ItemId> = self
+                .items
+                .iter()
+                .map(|item| item.id)
+                .filter(|id| Some(*id) != current)
+                .collect();
             others.shuffle(&mut self.rng);
             self.order = current.into_iter().chain(others).collect();
             // The entry that took the place of a removed one is no longer meaningful.
@@ -256,7 +283,9 @@ impl Inner {
 
     /// The entry `advance` measures from: whatever it last offered, or else what is playing.
     fn base_id(&self) -> Option<ItemId> {
-        self.pending.filter(|id| self.position(*id).is_some()).or(self.current)
+        self.pending
+            .filter(|id| self.position(*id).is_some())
+            .or(self.current)
     }
 
     fn base(&self) -> Base {
@@ -309,7 +338,9 @@ impl Inner {
         match self.base() {
             Base::At(0) => wrap.then(|| self.order.last().copied()).flatten(),
             Base::At(position) => self.order.get(position - 1).copied(),
-            Base::Vacated(slot) => slot.checked_sub(1).and_then(|previous| self.order.get(previous).copied()),
+            Base::Vacated(slot) => slot
+                .checked_sub(1)
+                .and_then(|previous| self.order.get(previous).copied()),
             Base::Nothing => self.order.first().copied(),
         }
     }

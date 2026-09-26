@@ -108,17 +108,26 @@ mod tests {
 
     #[tokio::test]
     async fn reads_one_frame_per_line() {
-        assert_eq!(frames_of(b"{\"a\":1}\n{\"b\":2}\n").await, [b"{\"a\":1}".to_vec(), b"{\"b\":2}".to_vec()]);
+        assert_eq!(
+            frames_of(b"{\"a\":1}\n{\"b\":2}\n").await,
+            [b"{\"a\":1}".to_vec(), b"{\"b\":2}".to_vec()]
+        );
     }
 
     #[tokio::test]
     async fn a_last_line_without_a_newline_still_counts() {
-        assert_eq!(frames_of(b"one\ntwo").await, [b"one".to_vec(), b"two".to_vec()]);
+        assert_eq!(
+            frames_of(b"one\ntwo").await,
+            [b"one".to_vec(), b"two".to_vec()]
+        );
     }
 
     #[tokio::test]
     async fn empty_lines_and_carriage_returns_are_ignored() {
-        assert_eq!(frames_of(b"\n\none\r\n\n\ntwo\n\n").await, [b"one".to_vec(), b"two".to_vec()]);
+        assert_eq!(
+            frames_of(b"\n\none\r\n\n\ntwo\n\n").await,
+            [b"one".to_vec(), b"two".to_vec()]
+        );
         assert!(frames_of(b"").await.is_empty());
         assert!(frames_of(b"\n\n\n").await.is_empty());
     }
@@ -133,8 +142,14 @@ mod tests {
         });
         let mut reader = BufReader::with_capacity(3, reader);
         let mut buf = Vec::new();
-        assert_eq!(read_frame(&mut reader, &mut buf).await.unwrap().unwrap(), b"{\"type\":\"status\"}");
-        assert_eq!(read_frame(&mut reader, &mut buf).await.unwrap().unwrap(), b"second");
+        assert_eq!(
+            read_frame(&mut reader, &mut buf).await.unwrap().unwrap(),
+            b"{\"type\":\"status\"}"
+        );
+        assert_eq!(
+            read_frame(&mut reader, &mut buf).await.unwrap().unwrap(),
+            b"second"
+        );
         sender.await.unwrap();
         assert!(read_frame(&mut reader, &mut buf).await.unwrap().is_none());
     }
@@ -166,7 +181,14 @@ mod tests {
         input.push(b'\n');
         let mut reader = BufReader::new(&input[..]);
         let mut buf = Vec::new();
-        assert_eq!(read_frame(&mut reader, &mut buf).await.unwrap().unwrap().len(), MAX_FRAME_BYTES);
+        assert_eq!(
+            read_frame(&mut reader, &mut buf)
+                .await
+                .unwrap()
+                .unwrap()
+                .len(),
+            MAX_FRAME_BYTES
+        );
     }
 
     #[tokio::test]

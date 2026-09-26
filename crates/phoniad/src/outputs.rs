@@ -6,8 +6,8 @@
 
 use futures_util::future::BoxFuture;
 use phonia_core::config::OutputSpec;
-use phonia_core::output::{SinkFactory, Volume, VolumeHandler};
 use phonia_core::output::catalog::{self, Entry};
+use phonia_core::output::{SinkFactory, Volume, VolumeHandler};
 use phonia_ipc as ipc;
 use std::sync::{Arc, Mutex};
 
@@ -72,7 +72,12 @@ impl Outputs {
 
     /// The volume, when the output has one phonia can set.
     pub fn volume(&self) -> Option<Volume> {
-        let has_volume = self.factory.lock().unwrap().as_ref().is_some_and(|factory| factory.volume().is_some());
+        let has_volume = self
+            .factory
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|factory| factory.volume().is_some());
         has_volume.then(|| *self.level.lock().unwrap())
     }
 
@@ -88,7 +93,9 @@ impl Outputs {
         let mut level = *self.level.lock().unwrap();
         change(&mut level);
         level.percent = level.percent.min(100);
-        control.set(level).map_err(|error| VolumeError::Failed(format!("{error:#}")))?;
+        control
+            .set(level)
+            .map_err(|error| VolumeError::Failed(format!("{error:#}")))?;
         *self.level.lock().unwrap() = level;
         Ok(level)
     }

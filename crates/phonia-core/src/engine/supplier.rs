@@ -25,7 +25,10 @@ pub enum Advance {
 /// The audio of an opened track.
 pub enum TrackMedia {
     /// Encoded audio (FLAC, fMP4, ...) for the decoder.
-    Encoded { source: Box<dyn MediaSource>, extension: Option<String> },
+    Encoded {
+        source: Box<dyn MediaSource>,
+        extension: Option<String>,
+    },
     /// Ready-made left-justified interleaved PCM, for tests and in-memory sources.
     RawPcm { samples: Vec<i32>, spec: SourceSpec },
 }
@@ -59,19 +62,33 @@ pub struct LoadedTrack {
 impl LoadedTrack {
     /// A track that can't be seeked and starts at the beginning.
     pub fn new(meta: TrackMeta, media: TrackMedia) -> Self {
-        Self { meta, media, seek: SeekMode::None, start: Duration::ZERO }
+        Self {
+            meta,
+            media,
+            seek: SeekMode::None,
+            start: Duration::ZERO,
+        }
     }
 
     pub fn seekable_in_place(self) -> Self {
-        Self { seek: SeekMode::InPlace, ..self }
+        Self {
+            seek: SeekMode::InPlace,
+            ..self
+        }
     }
 
     pub fn forward_only(self) -> Self {
-        Self { seek: SeekMode::ForwardOnly, ..self }
+        Self {
+            seek: SeekMode::ForwardOnly,
+            ..self
+        }
     }
 
     pub fn reopenable(self) -> Self {
-        Self { seek: SeekMode::Reopen, ..self }
+        Self {
+            seek: SeekMode::Reopen,
+            ..self
+        }
     }
 
     pub fn starting_at(self, start: Duration) -> Self {

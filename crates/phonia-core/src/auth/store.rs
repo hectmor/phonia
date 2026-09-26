@@ -47,8 +47,10 @@ impl fmt::Debug for StoredSession {
 /// What the client of a login says to keep.
 pub fn stored_from(client: &TidalClient) -> Result<StoredSession> {
     let auth = &client.session.auth;
-    let refresh_token =
-        auth.refresh_token.clone().ok_or_else(|| anyhow!("the login did not return a refresh token"))?;
+    let refresh_token = auth
+        .refresh_token
+        .clone()
+        .ok_or_else(|| anyhow!("the login did not return a refresh token"))?;
     Ok(StoredSession {
         v: VERSION,
         refresh_token,
@@ -132,18 +134,27 @@ impl FileStore {
         let text = match fs::read_to_string(&self.path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(StoreError::Other(format!("reading {:?}: {error}", self.path))),
+            Err(error) => {
+                return Err(StoreError::Other(format!(
+                    "reading {:?}: {error}",
+                    self.path
+                )));
+            }
         };
         let corrupt = |why: String| StoreError::Corrupt(format!("{:?}: {why}", self.path));
-        let value: serde_json::Value = serde_json::from_str(&text).map_err(|error| corrupt(error.to_string()))?;
+        let value: serde_json::Value =
+            serde_json::from_str(&text).map_err(|error| corrupt(error.to_string()))?;
 
         if value.get("v").is_some() {
-            return serde_json::from_value(value).map(Some).map_err(|error| corrupt(error.to_string()));
+            return serde_json::from_value(value)
+                .map(Some)
+                .map_err(|error| corrupt(error.to_string()));
         }
         if value.get("session").is_some() {
             // The first versions saved the whole `tidlers` client, personal data and access token
             // included. Keep what matters and rewrite the file without the rest.
-            let client = TidalClient::from_json(&text).map_err(|error| corrupt(error.to_string()))?;
+            let client =
+                TidalClient::from_json(&text).map_err(|error| corrupt(error.to_string()))?;
             let stored = stored_from(&client).map_err(|error| corrupt(format!("{error:#}")))?;
             self.write(&stored)?;
             eprintln!(
@@ -157,7 +168,8 @@ impl FileStore {
 
     /// Replaces the file in one step, so a crash never leaves half a session.
     fn write(&self, session: &StoredSession) -> Result<(), StoreError> {
-        let json = serde_json::to_string(session).map_err(|error| StoreError::Other(error.to_string()))?;
+        let json =
+            serde_json::to_string(session).map_err(|error| StoreError::Other(error.to_string()))?;
         let write = || -> Result<()> {
             let temporary = self.path.with_extension("json.tmp");
             let mut file = fs::OpenOptions::new()
@@ -169,8 +181,10 @@ impl FileStore {
                 .with_context(|| format!("opening {temporary:?}"))?;
             file.set_permissions(fs::Permissions::from_mode(0o600))
                 .with_context(|| format!("restricting permissions on {temporary:?}"))?;
-            file.write_all(json.as_bytes()).with_context(|| format!("writing {temporary:?}"))?;
-            file.sync_all().with_context(|| format!("syncing {temporary:?}"))?;
+            file.write_all(json.as_bytes())
+                .with_context(|| format!("writing {temporary:?}"))?;
+            file.sync_all()
+                .with_context(|| format!("syncing {temporary:?}"))?;
             fs::rename(&temporary, &self.path).with_context(|| format!("replacing {:?}", self.path))
         };
         write().map_err(|error| StoreError::Other(format!("{error:#}")))
@@ -195,7 +209,10 @@ impl SessionStore for FileStore {
             match fs::remove_file(&self.path) {
                 Ok(()) => Ok(true),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-                Err(error) => Err(StoreError::Other(format!("deleting {:?}: {error}", self.path))),
+                Err(error) => Err(StoreError::Other(format!(
+                    "deleting {:?}: {error}",
+                    self.path
+                ))),
             }
         })
     }
@@ -215,7 +232,10 @@ impl MemoryStore {
     }
 
     pub fn with(session: StoredSession) -> Self {
-        Self { session: Mutex::new(Some(session)), ..Self::default() }
+        Self {
+            session: Mutex::new(Some(session)),
+            ..Self::default()
+        }
     }
 
     /// Every later operation fails as if the store could not be reached.
@@ -278,7 +298,8 @@ mod tests {
     }
 
     fn temp_file(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("phonia-store-test-{}-{name}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("phonia-store-test-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir.join("session.json")
@@ -300,9 +321,21 @@ mod tests {
         let client = client_from(&session());
         let auth = &client.session.auth;
         assert_eq!(auth.refresh_token.as_deref(), Some("refresh-secret"));
-        assert_eq!((auth.pkce_config.client_id.as_str(), auth.pkce_config.client_secret.as_str()), ("the-client", "the-client-secret"));
-        assert!(auth.access_token.is_none() && client.user_info.is_none(), "nothing but the credentials is restored");
-        assert!(auth.pkce_login, "it is a PKCE client, whose refresh uses the PKCE credentials");
+        assert_eq!(
+            (
+                auth.pkce_config.client_id.as_str(),
+                auth.pkce_config.client_secret.as_str()
+            ),
+            ("the-client", "the-client-secret")
+        );
+        assert!(
+            auth.access_token.is_none() && client.user_info.is_none(),
+            "nothing but the credentials is restored"
+        );
+        assert!(
+            auth.pkce_login,
+            "it is a PKCE client, whose refresh uses the PKCE credentials"
+        );
     }
 
     #[test]
@@ -314,14 +347,25 @@ mod tests {
     #[test]
     fn a_login_without_a_refresh_token_cannot_be_stored() {
         let client = TidalClient::new(&TidalAuth::with_pkce());
-        assert!(stored_from(&client).unwrap_err().to_string().contains("refresh token"));
+        assert!(
+            stored_from(&client)
+                .unwrap_err()
+                .to_string()
+                .contains("refresh token")
+        );
     }
 
     #[test]
     fn the_debug_output_hides_the_secrets() {
         let text = format!("{:?}", session());
-        assert!(!text.contains("refresh-secret") && !text.contains("the-client-secret"), "{text}");
-        assert!(text.contains("the-client"), "the client id is not secret: {text}");
+        assert!(
+            !text.contains("refresh-secret") && !text.contains("the-client-secret"),
+            "{text}"
+        );
+        assert!(
+            text.contains("the-client"),
+            "the client id is not secret: {text}"
+        );
     }
 
     #[tokio::test]
@@ -331,9 +375,15 @@ mod tests {
         assert_eq!(store.load().await.unwrap(), None);
 
         store.save(&session()).await.unwrap();
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         assert_eq!(store.load().await.unwrap(), Some(session()));
-        assert!(!path.with_extension("json.tmp").exists(), "no temporary file is left behind");
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "no temporary file is left behind"
+        );
 
         assert!(store.delete().await.unwrap());
         assert!(!store.delete().await.unwrap(), "nothing left to delete");
@@ -346,7 +396,10 @@ mod tests {
         fs::write(&path, "old").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         FileStore::new(&path).save(&session()).await.unwrap();
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[tokio::test]
@@ -356,7 +409,11 @@ mod tests {
             fs::write(&path, text).unwrap();
             let error = FileStore::new(&path).load().await.unwrap_err();
             assert!(matches!(error, StoreError::Corrupt(_)), "{text}: {error}");
-            assert_eq!(fs::read_to_string(&path).unwrap(), text, "the file is left as it was");
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                text,
+                "the file is left as it was"
+            );
         }
     }
 
@@ -368,9 +425,19 @@ mod tests {
 
         assert_eq!(store.load().await.unwrap(), Some(session()));
         let rewritten = fs::read_to_string(&path).unwrap();
-        assert!(!rewritten.contains("access-secret") && !rewritten.contains("user_id"), "{rewritten}");
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-        assert_eq!(store.load().await.unwrap(), Some(session()), "and it reads the same the second time");
+        assert!(
+            !rewritten.contains("access-secret") && !rewritten.contains("user_id"),
+            "{rewritten}"
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            store.load().await.unwrap(),
+            Some(session()),
+            "and it reads the same the second time"
+        );
     }
 
     #[tokio::test]
@@ -383,6 +450,9 @@ mod tests {
         assert!(store.delete().await.unwrap());
 
         store.fail_with("no bus");
-        assert!(matches!(store.load().await, Err(StoreError::Unavailable(_))));
+        assert!(matches!(
+            store.load().await,
+            Err(StoreError::Unavailable(_))
+        ));
     }
 }

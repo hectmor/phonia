@@ -5,6 +5,7 @@
 
 use crate::convert;
 use crate::outputs::{Outputs, VolumeError};
+use anyhow::Result;
 use futures_util::StreamExt;
 use futures_util::stream;
 use phonia_core::control::Controller;
@@ -15,7 +16,6 @@ use phonia_core::output::alsa::SinkReport;
 use phonia_core::queue::{ItemId, Queue, QueueTrack};
 use phonia_ipc as ipc;
 use phonia_ipc::{AddAt, ErrorCode, NewTrack, Payload, ProtocolError, Reply, Request};
-use anyhow::Result;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -66,7 +66,12 @@ impl Daemon {
     pub fn start(parts: DaemonParts) -> Result<Arc<Daemon>> {
         let queue = Queue::new(parts.opener.clone() as Arc<dyn TrackOpener>);
         let first_sinks = parts.sinks.clone();
-        let engine = Engine::spawn_with_options(tokio::runtime::Handle::current(), parts.sinks, queue.clone(), parts.engine)?;
+        let engine = Engine::spawn_with_options(
+            tokio::runtime::Handle::current(),
+            parts.sinks,
+            queue.clone(),
+            parts.engine,
+        )?;
         let controller = Controller::new(engine, queue);
 
         let (events, _) = broadcast::channel(EVENT_BACKLOG);
@@ -144,7 +149,12 @@ impl Daemon {
     fn state(&self) -> (ipc::Status, ipc::Queue) {
         let queue = self.controller.snapshot();
         (
-            convert::status_dto(&self.controller.status(), &queue, Some(self.outputs.route()), self.outputs.volume()),
+            convert::status_dto(
+                &self.controller.status(),
+                &queue,
+                Some(self.outputs.route()),
+                self.outputs.volume(),
+            ),
             convert::queue_dto(&queue),
         )
     }
@@ -164,7 +174,15 @@ impl Daemon {
     }
 
     pub fn hello(&self) -> ipc::ServerHello {
-        ipc::ServerHello { protocol: ipc::PROTOCOL, server: self.info.clone(), capabilities: vec![ipc::CAP_OUTPUT_RELEASE.to_string(), ipc::CAP_OUTPUT_SELECT.to_string(), ipc::CAP_VOLUME.to_string()] }
+        ipc::ServerHello {
+            protocol: ipc::PROTOCOL,
+            server: self.info.clone(),
+            capabilities: vec![
+                ipc::CAP_OUTPUT_RELEASE.to_string(),
+                ipc::CAP_OUTPUT_SELECT.to_string(),
+                ipc::CAP_VOLUME.to_string(),
+            ],
+        }
     }
 
     /// Flips to true when the daemon should stop.
@@ -201,10 +219,14 @@ impl Daemon {
                 })
             }
             Request::SetOutput { output } => self.set_output(&output).await,
-            Request::Hello { .. } | Request::Subscribe | Request::Unsubscribe => {
-                error(ErrorCode::BadRequest, "this request is handled by the connection")
-            }
-            Request::Unknown => error(ErrorCode::UnknownRequest, "this daemon does not know that request"),
+            Request::Hello { .. } | Request::Subscribe | Request::Unsubscribe => error(
+                ErrorCode::BadRequest,
+                "this request is handled by the connection",
+            ),
+            Request::Unknown => error(
+                ErrorCode::UnknownRequest,
+                "this daemon does not know that request",
+            ),
             mutating => {
                 let _serial = self.control_lock.lock().await;
                 self.change(mutating)
@@ -230,7 +252,10 @@ impl Daemon {
         self.publish(|_| ipc::Event::OutputChanged { route });
         // The new output starts at the volume that was set; the clients are told what it is.
         if let Some(volume) = self.outputs.volume() {
-            self.publish(|_| ipc::Event::VolumeChanged { percent: volume.percent, muted: volume.muted });
+            self.publish(|_| ipc::Event::VolumeChanged {
+                percent: volume.percent,
+                muted: volume.muted,
+            });
         }
         match switched {
             Ok(()) => Reply::Ok(Payload::Ack),
@@ -247,7 +272,10 @@ impl Daemon {
     fn change_volume(&self, change: impl FnOnce(&mut phonia_core::output::Volume)) -> Reply {
         match self.outputs.set_volume(change) {
             Ok(volume) => {
-                self.publish(|_| ipc::Event::VolumeChanged { percent: volume.percent, muted: volume.muted });
+                self.publish(|_| ipc::Event::VolumeChanged {
+                    percent: volume.percent,
+                    muted: volume.muted,
+                });
                 Reply::Ok(Payload::Ack)
             }
             Err(VolumeError::Unsupported) => self::error(
@@ -262,7 +290,10 @@ impl Daemon {
     /// The desktop's mixer changed the volume of the stream.
     fn volume_changed_outside(&self, volume: phonia_core::output::Volume) {
         self.outputs.volume_changed_outside(volume);
-        self.publish(|_| ipc::Event::VolumeChanged { percent: volume.percent, muted: volume.muted });
+        self.publish(|_| ipc::Event::VolumeChanged {
+            percent: volume.percent,
+            muted: volume.muted,
+        });
     }
 
     /// Outputs appeared or disappeared: tells subscribers to ask again.
@@ -294,13 +325,18 @@ impl Daemon {
             Request::Seek { target } => send(Command::Seek(convert::seek_target(target))),
             Request::QueueRemove { ids } => {
                 let ids: Vec<ItemId> = ids.iter().map(|id| ItemId(id.0)).collect();
-                Reply::Ok(Payload::Removed { count: self.controller.remove(&ids) })
+                Reply::Ok(Payload::Removed {
+                    count: self.controller.remove(&ids),
+                })
             }
             Request::QueueMove { id, to } => {
                 if self.controller.queue().move_to(ItemId(id.0), to) {
                     Reply::Ok(Payload::Ack)
                 } else {
-                    error(ErrorCode::NotFound, &format!("there is no queue entry {}", id.0))
+                    error(
+                        ErrorCode::NotFound,
+                        &format!("there is no queue entry {}", id.0),
+                    )
                 }
             }
             Request::QueueClear => {
@@ -312,14 +348,19 @@ impl Daemon {
                 Reply::Ok(Payload::Ack)
             }
             Request::SetRepeat { repeat } => {
-                self.controller.queue().set_repeat(convert::repeat_from_wire(repeat));
+                self.controller
+                    .queue()
+                    .set_repeat(convert::repeat_from_wire(repeat));
                 Reply::Ok(Payload::Ack)
             }
             Request::Shutdown => {
                 self.request_shutdown();
                 Reply::Ok(Payload::Ack)
             }
-            other => error(ErrorCode::Internal, &format!("{other:?} reached the wrong handler")),
+            other => error(
+                ErrorCode::Internal,
+                &format!("{other:?} reached the wrong handler"),
+            ),
         }
     }
 
@@ -329,7 +370,10 @@ impl Daemon {
     /// fetched just now is added without them.
     async fn queue_add(&self, tracks: Vec<NewTrack>, at: AddAt) -> Reply {
         if tracks.len() > MAX_ADD {
-            return error(ErrorCode::BadRequest, &format!("at most {MAX_ADD} tracks can be added at once"));
+            return error(
+                ErrorCode::BadRequest,
+                &format!("at most {MAX_ADD} tracks can be added at once"),
+            );
         }
 
         enum Outcome {
@@ -354,12 +398,19 @@ impl Daemon {
             .collect()
             .await;
 
-        let (mut accepted, mut unresolved_reasons, mut rejected) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut accepted, mut unresolved_reasons, mut rejected) =
+            (Vec::new(), Vec::new(), Vec::new());
         for outcome in outcomes {
             match outcome {
-                Outcome::Ready(source, info) => accepted.push((source, info.title, info.duration, None)),
-                Outcome::Unresolved(source, reason) => accepted.push((source, None, None, Some(reason))),
-                Outcome::Rejected(source, reason) => rejected.push(ipc::Rejected { source, reason }),
+                Outcome::Ready(source, info) => {
+                    accepted.push((source, info.title, info.duration, None))
+                }
+                Outcome::Unresolved(source, reason) => {
+                    accepted.push((source, None, None, Some(reason)))
+                }
+                Outcome::Rejected(source, reason) => {
+                    rejected.push(ipc::Rejected { source, reason })
+                }
             }
         }
 
@@ -380,7 +431,10 @@ impl Daemon {
         };
         for (id, (_, _, _, reason)) in ids.iter().zip(&accepted) {
             if let Some(reason) = reason {
-                unresolved_reasons.push(ipc::Unresolved { id: ipc::ItemId(id.0), reason: reason.clone() });
+                unresolved_reasons.push(ipc::Unresolved {
+                    id: ipc::ItemId(id.0),
+                    reason: reason.clone(),
+                });
             }
         }
 
@@ -393,5 +447,8 @@ impl Daemon {
 }
 
 fn error(code: ErrorCode, message: &str) -> Reply {
-    Reply::Err(ProtocolError { code, message: message.to_string() })
+    Reply::Err(ProtocolError {
+        code,
+        message: message.to_string(),
+    })
 }

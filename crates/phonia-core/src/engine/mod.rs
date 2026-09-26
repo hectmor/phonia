@@ -14,7 +14,8 @@ mod tests;
 
 pub use supplier::{Advance, LoadedTrack, SeekMode, TrackMedia, TrackOpener, TrackSupplier};
 pub use types::{
-    Command, EndReason, Event, OutputState, ReleaseReason, SeekTarget, State, Status, TrackMeta, TrackRef,
+    Command, EndReason, Event, OutputState, ReleaseReason, SeekTarget, State, Status, TrackMeta,
+    TrackRef,
 };
 
 use std::time::Duration;
@@ -59,7 +60,10 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { position_interval: POSITION_INTERVAL, release_after_pause: Some(RELEASE_AFTER_PAUSE) }
+        Self {
+            position_interval: POSITION_INTERVAL,
+            release_after_pause: Some(RELEASE_AFTER_PAUSE),
+        }
     }
 }
 
@@ -73,7 +77,11 @@ pub struct Engine {
 impl Engine {
     /// Starts the audio thread. `rt` runs the supplier's (possibly slow) `open` calls. Pausing
     /// for [`RELEASE_AFTER_PAUSE`] hands the audio device back.
-    pub fn spawn(rt: Handle, sinks: Arc<dyn SinkFactory>, supplier: Arc<dyn TrackSupplier>) -> Result<Self> {
+    pub fn spawn(
+        rt: Handle,
+        sinks: Arc<dyn SinkFactory>,
+        supplier: Arc<dyn TrackSupplier>,
+    ) -> Result<Self> {
         Self::spawn_with_options(rt, sinks, supplier, Options::default())
     }
 
@@ -113,7 +121,13 @@ impl Engine {
                 return false;
             }
             let (done, answer) = mpsc::channel();
-            if request_tx.send(Msg::ReleaseRequested { by: request.by, done }).is_err() {
+            if request_tx
+                .send(Msg::ReleaseRequested {
+                    by: request.by,
+                    done,
+                })
+                .is_err()
+            {
                 return false;
             }
             answer.recv_timeout(RELEASE_ANSWER_TIMEOUT).unwrap_or(false)
@@ -137,7 +151,12 @@ impl Engine {
             .spawn(move || audio_thread::run(ctx))
             .context("spawning the audio thread")?;
 
-        Ok(Self { tx, events, status, thread: Mutex::new(Some(thread)) })
+        Ok(Self {
+            tx,
+            events,
+            status,
+            thread: Mutex::new(Some(thread)),
+        })
     }
 
     /// Plays through `sinks` from now on. Whatever is playing moves over without losing its place:
@@ -150,7 +169,9 @@ impl Engine {
     /// speaker opened): call it from a thread that may block.
     pub fn set_output(&self, sinks: Arc<dyn SinkFactory>) -> Result<()> {
         let (done, answer) = mpsc::channel();
-        self.tx.send(Msg::SetOutput { sinks, done }).map_err(|_| anyhow!("the playback engine has shut down"))?;
+        self.tx
+            .send(Msg::SetOutput { sinks, done })
+            .map_err(|_| anyhow!("the playback engine has shut down"))?;
         match answer.recv_timeout(SET_OUTPUT_TIMEOUT) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(why)) => Err(anyhow!(why)),
@@ -160,7 +181,9 @@ impl Engine {
 
     /// Fails only once the engine has shut down.
     pub fn send(&self, command: Command) -> Result<()> {
-        self.tx.send(Msg::Command(command)).map_err(|_| anyhow!("the playback engine has shut down"))
+        self.tx
+            .send(Msg::Command(command))
+            .map_err(|_| anyhow!("the playback engine has shut down"))
     }
 
     /// Events from now on; subscribe before sending the command whose events you care about.

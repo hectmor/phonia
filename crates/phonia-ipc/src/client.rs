@@ -7,7 +7,7 @@
 use crate::dto::{Queue, Status};
 use crate::framing::{self, FrameError};
 use crate::proto::{
-    ClientInfo, ClientMessage, Event, Payload, PROTOCOL, ProtocolError, Reply, Request, RequestId,
+    ClientInfo, ClientMessage, Event, PROTOCOL, Payload, ProtocolError, Reply, Request, RequestId,
     ServerHello, ServerMessage,
 };
 use std::collections::HashMap;
@@ -89,10 +89,20 @@ pub struct Client {
 impl Client {
     /// Connects to the daemon's socket (the default path if none is given).
     pub async fn connect(path: Option<&Path>, info: ClientInfo) -> Result<Client, ClientError> {
-        let path = path.map(Path::to_path_buf).unwrap_or_else(crate::socket::default_socket_path);
-        let stream = tokio::net::UnixStream::connect(&path).await.map_err(|error| {
-            ClientError::Io(io::Error::new(error.kind(), format!("could not connect to the daemon at {}: {error}", path.display())))
-        })?;
+        let path = path
+            .map(Path::to_path_buf)
+            .unwrap_or_else(crate::socket::default_socket_path);
+        let stream = tokio::net::UnixStream::connect(&path)
+            .await
+            .map_err(|error| {
+                ClientError::Io(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "could not connect to the daemon at {}: {error}",
+                        path.display()
+                    ),
+                ))
+            })?;
         Client::from_stream(stream, info).await
     }
 
@@ -105,10 +115,16 @@ impl Client {
         let mut reader = BufReader::new(read_half);
 
         let mut buffer = Vec::new();
-        let banner = framing::read_frame(&mut reader, &mut buffer).await?.ok_or(ClientError::Closed)?;
+        let banner = framing::read_frame(&mut reader, &mut buffer)
+            .await?
+            .ok_or(ClientError::Closed)?;
         let server = match serde_json::from_slice::<ServerMessage>(banner) {
             Ok(ServerMessage::Hello(hello)) => hello,
-            _ => return Err(ClientError::Handshake("the peer did not greet like a phonia daemon".into())),
+            _ => {
+                return Err(ClientError::Handshake(
+                    "the peer did not greet like a phonia daemon".into(),
+                ));
+            }
         };
         if !PROTOCOL.compatible_with(server.protocol) {
             return Err(ClientError::Handshake(format!(
@@ -130,7 +146,12 @@ impl Client {
         tokio::spawn(read_loop(reader, inner.clone(), closed_tx));
 
         let client = Client { inner };
-        client.request(Request::Hello { protocol: PROTOCOL, client: info }).await?;
+        client
+            .request(Request::Hello {
+                protocol: PROTOCOL,
+                client: info,
+            })
+            .await?;
         Ok(client)
     }
 
@@ -145,8 +166,11 @@ impl Client {
         let (answer, answered) = oneshot::channel();
         self.inner.pending.lock().unwrap().insert(id, answer);
 
-        let bytes = serde_json::to_vec(&ClientMessage { id: RequestId(id), request })
-            .map_err(|error| ClientError::Handshake(error.to_string()))?;
+        let bytes = serde_json::to_vec(&ClientMessage {
+            id: RequestId(id),
+            request,
+        })
+        .map_err(|error| ClientError::Handshake(error.to_string()))?;
         let written = {
             let mut writer = self.inner.writer.lock().await;
             framing::write_frame(&mut *writer, &bytes).await
@@ -183,7 +207,11 @@ impl Client {
         // Listen before asking, so no event can fall between the snapshot and the first read.
         let events = self.inner.events.subscribe();
         let snapshot = self.resubscribe().await?;
-        let stream = EventStream { events, seen: snapshot.seq, client: self.clone() };
+        let stream = EventStream {
+            events,
+            seen: snapshot.seq,
+            client: self.clone(),
+        };
         Ok((snapshot, stream))
     }
 
@@ -233,7 +261,12 @@ impl EventStream {
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
                     let snapshot = self.client.resubscribe().await.ok()?;
                     self.seen = snapshot.seq;
-                    let event = Event::Resync { skipped, seq: snapshot.seq, status: snapshot.status, queue: snapshot.queue };
+                    let event = Event::Resync {
+                        skipped,
+                        seq: snapshot.seq,
+                        status: snapshot.status,
+                        queue: snapshot.queue,
+                    };
                     return Some((snapshot.seq, event));
                 }
                 Err(broadcast::error::RecvError::Closed) => return None,
@@ -242,7 +275,11 @@ impl EventStream {
     }
 }
 
-async fn read_loop<R: AsyncBufRead + Unpin>(mut reader: R, inner: Arc<Inner>, closed: watch::Sender<bool>) {
+async fn read_loop<R: AsyncBufRead + Unpin>(
+    mut reader: R,
+    inner: Arc<Inner>,
+    closed: watch::Sender<bool>,
+) {
     let mut buffer = Vec::new();
     while let Ok(Some(bytes)) = framing::read_frame(&mut reader, &mut buffer).await {
         match serde_json::from_slice::<ServerMessage>(bytes) {

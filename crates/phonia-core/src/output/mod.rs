@@ -33,7 +33,8 @@ pub fn factory_for(
             Arc::new(factory)
         }
         OutputSpec::Shared { sink } => Arc::new(
-            shared::pulse::SharedSinkFactory::new(shared::pulse::Target::parse(sink.as_deref())).on_report(on_report),
+            shared::pulse::SharedSinkFactory::new(shared::pulse::Target::parse(sink.as_deref()))
+                .on_report(on_report),
         ),
     }
 }
@@ -127,7 +128,10 @@ pub struct Volume {
 
 impl Default for Volume {
     fn default() -> Self {
-        Volume { percent: 100, muted: false }
+        Volume {
+            percent: 100,
+            muted: false,
+        }
     }
 }
 

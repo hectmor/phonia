@@ -37,7 +37,9 @@ impl FromStr for Quality {
         match text {
             "hires" => Ok(Quality::Hires),
             "lossless" => Ok(Quality::Lossless),
-            other => Err(format!("unknown quality {other:?}: expected hires or lossless")),
+            other => Err(format!(
+                "unknown quality {other:?}: expected hires or lossless"
+            )),
         }
     }
 }
@@ -226,8 +228,14 @@ verbose = true
                     reserve: Some(false),
                     release_after_pause: Some(ReleaseAfterPause::After(Duration::from_secs(30))),
                 },
-                tidal: Tidal { max_quality: Some(Quality::Lossless), session_store: Some(SessionStoreKind::File) },
-                daemon: Daemon { socket: Some("/run/user/1000/phonia/phoniad.sock".into()), verbose: Some(true) },
+                tidal: Tidal {
+                    max_quality: Some(Quality::Lossless),
+                    session_store: Some(SessionStoreKind::File)
+                },
+                daemon: Daemon {
+                    socket: Some("/run/user/1000/phonia/phoniad.sock".into()),
+                    verbose: Some(true)
+                },
             }
         );
     }
@@ -235,63 +243,115 @@ verbose = true
     #[test]
     fn the_time_before_a_pause_gives_the_card_back() {
         let read = |text: &str| parse(&format!("[output]\nrelease_after_pause = {text}\n"));
-        assert_eq!(read("0").unwrap().output.release_after_pause, Some(ReleaseAfterPause::After(Duration::ZERO)));
-        assert_eq!(read("\"never\"").unwrap().output.release_after_pause, Some(ReleaseAfterPause::Never));
+        assert_eq!(
+            read("0").unwrap().output.release_after_pause,
+            Some(ReleaseAfterPause::After(Duration::ZERO))
+        );
+        assert_eq!(
+            read("\"never\"").unwrap().output.release_after_pause,
+            Some(ReleaseAfterPause::Never)
+        );
         for bad in ["-1", "\"soon\"", "true", "1.5"] {
             let error = read(bad).unwrap_err().to_string();
-            assert!(error.contains("release_after_pause") || error.contains("never"), "{bad}: {error}");
+            assert!(
+                error.contains("release_after_pause") || error.contains("never"),
+                "{bad}: {error}"
+            );
         }
     }
 
     #[test]
     fn an_unknown_session_store_is_an_error() {
-        let error = parse("[tidal]\nsession_store = \"cloud\"\n").unwrap_err().to_string();
-        assert!(error.contains("session_store") || error.contains("cloud"), "{error}");
+        let error = parse("[tidal]\nsession_store = \"cloud\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("session_store") || error.contains("cloud"),
+            "{error}"
+        );
     }
 
     #[test]
     fn a_minimal_file_leaves_everything_else_unset() {
         let file = parse("[output]\ndevice = \"auto\"\n").unwrap();
         assert_eq!(file.output.device.as_deref(), Some("auto"));
-        assert_eq!((file.output.mode, file.tidal.max_quality, file.daemon.socket, file.daemon.verbose), (None, None, None, None));
+        assert_eq!(
+            (
+                file.output.mode,
+                file.tidal.max_quality,
+                file.daemon.socket,
+                file.daemon.verbose
+            ),
+            (None, None, None, None)
+        );
     }
 
     #[test]
     fn an_empty_file_and_a_file_with_only_comments_are_the_defaults() {
         assert_eq!(parse("").unwrap(), ConfigFile::default());
-        assert_eq!(parse("# nothing to see\n\n").unwrap(), ConfigFile::default());
-        assert_eq!(parse("[output]\n").unwrap(), ConfigFile::default(), "an empty section says nothing either");
+        assert_eq!(
+            parse("# nothing to see\n\n").unwrap(),
+            ConfigFile::default()
+        );
+        assert_eq!(
+            parse("[output]\n").unwrap(),
+            ConfigFile::default(),
+            "an empty section says nothing either"
+        );
     }
 
     #[test]
     fn a_typo_in_a_key_is_an_error_that_names_it_and_where() {
-        let error = parse("[output]\ndevise = \"hw:DS2,0\"\n").unwrap_err().to_string();
+        let error = parse("[output]\ndevise = \"hw:DS2,0\"\n")
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("devise"), "{error}");
         assert!(error.contains("line 2"), "{error}");
     }
 
     #[test]
     fn a_typo_in_a_section_is_an_error_too() {
-        let error = parse("[outputs]\ndevice = \"hw:1,0\"\n").unwrap_err().to_string();
+        let error = parse("[outputs]\ndevice = \"hw:1,0\"\n")
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("outputs"), "{error}");
-        assert!(parse("[tidal]\nquality = \"hires\"\n").is_err(), "the key is max_quality");
+        assert!(
+            parse("[tidal]\nquality = \"hires\"\n").is_err(),
+            "the key is max_quality"
+        );
     }
 
     #[test]
     fn a_value_of_the_wrong_type_is_an_error() {
-        let error = parse("[daemon]\nverbose = \"yes\"\n").unwrap_err().to_string();
-        assert!(error.contains("invalid type") && error.contains("verbose"), "{error}");
+        let error = parse("[daemon]\nverbose = \"yes\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("invalid type") && error.contains("verbose"),
+            "{error}"
+        );
         assert!(parse("[output]\ndevice = 3\n").is_err());
     }
 
     #[test]
     fn a_word_that_is_not_an_option_lists_the_ones_that_are() {
-        let quality = parse("[tidal]\nmax_quality = \"mqa\"\n").unwrap_err().to_string();
-        assert!(quality.contains("unknown variant") && quality.contains("hires") && quality.contains("lossless"), "{quality}");
-
-        let mode = parse("[output]\nmode = \"cloud\"\n").unwrap_err().to_string();
+        let quality = parse("[tidal]\nmax_quality = \"mqa\"\n")
+            .unwrap_err()
+            .to_string();
         assert!(
-            mode.contains("unknown variant") && mode.contains("exclusive") && mode.contains("shared"),
+            quality.contains("unknown variant")
+                && quality.contains("hires")
+                && quality.contains("lossless"),
+            "{quality}"
+        );
+
+        let mode = parse("[output]\nmode = \"cloud\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            mode.contains("unknown variant")
+                && mode.contains("exclusive")
+                && mode.contains("shared"),
             "{mode}"
         );
     }

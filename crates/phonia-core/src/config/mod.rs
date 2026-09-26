@@ -7,7 +7,10 @@
 
 mod file;
 
-pub use file::{ConfigFile, Daemon, Output, OutputMode, Quality, ReleaseAfterPause, SessionStoreKind, Tidal, parse};
+pub use file::{
+    ConfigFile, Daemon, Output, OutputMode, Quality, ReleaseAfterPause, SessionStoreKind, Tidal,
+    parse,
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 use std::ffi::OsStr;
@@ -42,7 +45,11 @@ impl ConfigSource {
 
 /// Picks the config file: the `--config` flag, else the environment variable, else the default
 /// place. Pure; [`discover_from_env`] supplies the real environment.
-pub fn discover(flag: Option<&Path>, env: Option<&OsStr>, dir: Option<&Path>) -> Option<ConfigSource> {
+pub fn discover(
+    flag: Option<&Path>,
+    env: Option<&OsStr>,
+    dir: Option<&Path>,
+) -> Option<ConfigSource> {
     if let Some(path) = flag {
         return Some(ConfigSource::Explicit(path.to_path_buf()));
     }
@@ -69,17 +76,28 @@ pub struct Loaded {
 /// by name and isn't there is, and so is a file that can't be read or understood (the message
 /// names the file, and the key and line).
 pub fn load(source: Option<&ConfigSource>) -> Result<Loaded> {
-    let Some(source) = source else { return Ok(Loaded::default()) };
+    let Some(source) = source else {
+        return Ok(Loaded::default());
+    };
     let path = source.path();
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && matches!(source, ConfigSource::Default(_)) => {
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && matches!(source, ConfigSource::Default(_)) =>
+        {
             return Ok(Loaded::default());
         }
-        Err(error) => return Err(anyhow!(error)).with_context(|| format!("reading the config file {}", path.display())),
+        Err(error) => {
+            return Err(anyhow!(error))
+                .with_context(|| format!("reading the config file {}", path.display()));
+        }
     };
     let file = parse(&text).with_context(|| format!("in the config file {}", path.display()))?;
-    Ok(Loaded { file, path: Some(path.to_path_buf()) })
+    Ok(Loaded {
+        file,
+        path: Some(path.to_path_buf()),
+    })
 }
 
 /// Where a setting's value came from.
@@ -110,9 +128,18 @@ impl<T> Sourced<T> {
     /// The flag if given, else the file's value, else the default.
     pub fn pick(flag: Option<T>, file: Option<T>, default: T) -> Self {
         match (flag, file) {
-            (Some(value), _) => Sourced { value, origin: Origin::Flag },
-            (None, Some(value)) => Sourced { value, origin: Origin::File },
-            (None, None) => Sourced { value: default, origin: Origin::Default },
+            (Some(value), _) => Sourced {
+                value,
+                origin: Origin::Flag,
+            },
+            (None, Some(value)) => Sourced {
+                value,
+                origin: Origin::File,
+            },
+            (None, None) => Sourced {
+                value: default,
+                origin: Origin::Default,
+            },
         }
     }
 }
@@ -151,15 +178,41 @@ pub struct Settings {
 pub fn resolve(overrides: Overrides, file: &ConfigFile) -> Settings {
     let device_flag = overrides.device.is_some();
     Settings {
-        device: Sourced::pick(overrides.device.map(Some), file.output.device.clone().map(Some), None),
+        device: Sourced::pick(
+            overrides.device.map(Some),
+            file.output.device.clone().map(Some),
+            None,
+        ),
         // Naming a card on the command line is asking for exclusive mode, whatever the file says.
-        mode: Sourced::pick(device_flag.then_some(OutputMode::Exclusive).or(overrides.mode), file.output.mode, OutputMode::default()),
-        sink: Sourced::pick(overrides.sink, file.output.sink.clone(), "default".to_string()),
+        mode: Sourced::pick(
+            device_flag
+                .then_some(OutputMode::Exclusive)
+                .or(overrides.mode),
+            file.output.mode,
+            OutputMode::default(),
+        ),
+        sink: Sourced::pick(
+            overrides.sink,
+            file.output.sink.clone(),
+            "default".to_string(),
+        ),
         reserve: Sourced::pick(None, file.output.reserve, true),
-        release_after_pause: Sourced::pick(None, file.output.release_after_pause, ReleaseAfterPause::default()),
-        max_quality: Sourced::pick(overrides.max_quality, file.tidal.max_quality, Quality::default()),
+        release_after_pause: Sourced::pick(
+            None,
+            file.output.release_after_pause,
+            ReleaseAfterPause::default(),
+        ),
+        max_quality: Sourced::pick(
+            overrides.max_quality,
+            file.tidal.max_quality,
+            Quality::default(),
+        ),
         session_store: Sourced::pick(None, file.tidal.session_store, SessionStoreKind::default()),
-        socket: Sourced::pick(overrides.socket.map(Some), file.daemon.socket.clone().map(Some), None),
+        socket: Sourced::pick(
+            overrides.socket.map(Some),
+            file.daemon.socket.clone().map(Some),
+            None,
+        ),
         verbose: Sourced::pick(overrides.verbose, file.daemon.verbose, false),
     }
 }
@@ -185,13 +238,22 @@ impl OutputSpec {
 
     /// The output an id (see [`OutputSpec::id`]) names.
     pub fn from_id(id: &str) -> Result<OutputSpec> {
-        if let Some(device) = id.strip_prefix("exclusive:").filter(|device| !device.is_empty()) {
-            return Ok(OutputSpec::Exclusive { device: device.to_string() });
+        if let Some(device) = id
+            .strip_prefix("exclusive:")
+            .filter(|device| !device.is_empty())
+        {
+            return Ok(OutputSpec::Exclusive {
+                device: device.to_string(),
+            });
         }
         if let Some(sink) = id.strip_prefix("shared:").filter(|sink| !sink.is_empty()) {
-            return Ok(OutputSpec::Shared { sink: (sink != "default").then(|| sink.to_string()) });
+            return Ok(OutputSpec::Shared {
+                sink: (sink != "default").then(|| sink.to_string()),
+            });
         }
-        bail!("{id:?} is not an output id: they look like exclusive:hw:DS2,0, shared:default or shared:<output name>")
+        bail!(
+            "{id:?} is not an output id: they look like exclusive:hw:DS2,0, shared:default or shared:<output name>"
+        )
     }
 
     /// For messages.
@@ -224,10 +286,12 @@ impl Settings {
     /// in shared mode.
     pub fn output(&self) -> Result<OutputSpec> {
         Ok(match self.mode.value {
-            OutputMode::Exclusive => OutputSpec::Exclusive { device: self.require_device()?.to_string() },
-            OutputMode::Shared => {
-                OutputSpec::Shared { sink: (self.sink.value != "default").then(|| self.sink.value.clone()) }
-            }
+            OutputMode::Exclusive => OutputSpec::Exclusive {
+                device: self.require_device()?.to_string(),
+            },
+            OutputMode::Shared => OutputSpec::Shared {
+                sink: (self.sink.value != "default").then(|| self.sink.value.clone()),
+            },
         })
     }
 
@@ -262,7 +326,8 @@ mod tests {
     use super::*;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("phonia-config-test-{}-{name}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("phonia-config-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -276,11 +341,32 @@ mod tests {
         let flag = Path::new("/tmp/flag.toml");
         let env = OsStr::new("/tmp/env.toml");
 
-        assert_eq!(discover(Some(flag), Some(env), Some(dir)), Some(ConfigSource::Explicit("/tmp/flag.toml".into())));
-        assert_eq!(discover(None, Some(env), Some(dir)), Some(ConfigSource::Explicit("/tmp/env.toml".into())));
-        assert_eq!(discover(None, None, Some(dir)), Some(ConfigSource::Default("/home/u/.config/phonia/config.toml".into())));
-        assert_eq!(discover(None, Some(OsStr::new("")), Some(dir)), Some(ConfigSource::Default("/home/u/.config/phonia/config.toml".into())), "an empty variable is unset");
-        assert_eq!(discover(None, None, None), None, "no config directory and nothing named: no file");
+        assert_eq!(
+            discover(Some(flag), Some(env), Some(dir)),
+            Some(ConfigSource::Explicit("/tmp/flag.toml".into()))
+        );
+        assert_eq!(
+            discover(None, Some(env), Some(dir)),
+            Some(ConfigSource::Explicit("/tmp/env.toml".into()))
+        );
+        assert_eq!(
+            discover(None, None, Some(dir)),
+            Some(ConfigSource::Default(
+                "/home/u/.config/phonia/config.toml".into()
+            ))
+        );
+        assert_eq!(
+            discover(None, Some(OsStr::new("")), Some(dir)),
+            Some(ConfigSource::Default(
+                "/home/u/.config/phonia/config.toml".into()
+            )),
+            "an empty variable is unset"
+        );
+        assert_eq!(
+            discover(None, None, None),
+            None,
+            "no config directory and nothing named: no file"
+        );
     }
 
     // ---- reading it ------------------------------------------------------------------------
@@ -299,7 +385,10 @@ mod tests {
     #[test]
     fn a_missing_file_that_was_asked_for_is_an_error_naming_it() {
         let path = temp_dir("missing-explicit").join("nope.toml");
-        let error = format!("{:#}", load(Some(&ConfigSource::Explicit(path.clone()))).unwrap_err());
+        let error = format!(
+            "{:#}",
+            load(Some(&ConfigSource::Explicit(path.clone()))).unwrap_err()
+        );
         assert!(error.contains("nope.toml"), "{error}");
     }
 
@@ -316,44 +405,147 @@ mod tests {
     fn a_broken_file_is_an_error_with_the_file_the_key_and_the_line() {
         let path = temp_dir("broken").join("config.toml");
         std::fs::write(&path, "[output]\n\ndevise = \"hw:1,0\"\n").unwrap();
-        let error = format!("{:#}", load(Some(&ConfigSource::Default(path))).unwrap_err());
-        assert!(error.contains("config.toml") && error.contains("devise") && error.contains("line 3"), "{error}");
+        let error = format!(
+            "{:#}",
+            load(Some(&ConfigSource::Default(path))).unwrap_err()
+        );
+        assert!(
+            error.contains("config.toml") && error.contains("devise") && error.contains("line 3"),
+            "{error}"
+        );
     }
 
     // ---- deciding the settings -------------------------------------------------------------
 
-    fn file(device: Option<&str>, quality: Option<Quality>, socket: Option<&str>, verbose: Option<bool>) -> ConfigFile {
+    fn file(
+        device: Option<&str>,
+        quality: Option<Quality>,
+        socket: Option<&str>,
+        verbose: Option<bool>,
+    ) -> ConfigFile {
         ConfigFile {
-            output: Output { device: device.map(str::to_string), ..Output::default() },
-            tidal: Tidal { max_quality: quality, ..Tidal::default() },
-            daemon: Daemon { socket: socket.map(PathBuf::from), verbose },
+            output: Output {
+                device: device.map(str::to_string),
+                ..Output::default()
+            },
+            tidal: Tidal {
+                max_quality: quality,
+                ..Tidal::default()
+            },
+            daemon: Daemon {
+                socket: socket.map(PathBuf::from),
+                verbose,
+            },
         }
     }
 
     #[test]
     fn with_nothing_said_everything_is_the_default() {
         let settings = resolve(Overrides::default(), &ConfigFile::default());
-        assert_eq!(settings.device, Sourced { value: None, origin: Origin::Default });
-        assert_eq!(settings.mode, Sourced { value: OutputMode::Exclusive, origin: Origin::Default });
-        assert_eq!(settings.sink, Sourced { value: "default".to_string(), origin: Origin::Default });
-        assert_eq!(settings.reserve, Sourced { value: true, origin: Origin::Default });
+        assert_eq!(
+            settings.device,
+            Sourced {
+                value: None,
+                origin: Origin::Default
+            }
+        );
+        assert_eq!(
+            settings.mode,
+            Sourced {
+                value: OutputMode::Exclusive,
+                origin: Origin::Default
+            }
+        );
+        assert_eq!(
+            settings.sink,
+            Sourced {
+                value: "default".to_string(),
+                origin: Origin::Default
+            }
+        );
+        assert_eq!(
+            settings.reserve,
+            Sourced {
+                value: true,
+                origin: Origin::Default
+            }
+        );
         assert_eq!(
             settings.release_after_pause,
-            Sourced { value: ReleaseAfterPause::After(std::time::Duration::from_secs(10)), origin: Origin::Default }
+            Sourced {
+                value: ReleaseAfterPause::After(std::time::Duration::from_secs(10)),
+                origin: Origin::Default
+            }
         );
-        assert_eq!(settings.max_quality, Sourced { value: Quality::Hires, origin: Origin::Default });
-        assert_eq!(settings.session_store, Sourced { value: SessionStoreKind::Keyring, origin: Origin::Default });
-        assert_eq!(settings.socket, Sourced { value: None, origin: Origin::Default });
-        assert_eq!(settings.verbose, Sourced { value: false, origin: Origin::Default });
+        assert_eq!(
+            settings.max_quality,
+            Sourced {
+                value: Quality::Hires,
+                origin: Origin::Default
+            }
+        );
+        assert_eq!(
+            settings.session_store,
+            Sourced {
+                value: SessionStoreKind::Keyring,
+                origin: Origin::Default
+            }
+        );
+        assert_eq!(
+            settings.socket,
+            Sourced {
+                value: None,
+                origin: Origin::Default
+            }
+        );
+        assert_eq!(
+            settings.verbose,
+            Sourced {
+                value: false,
+                origin: Origin::Default
+            }
+        );
     }
 
     #[test]
     fn the_file_beats_the_default() {
-        let settings = resolve(Overrides::default(), &file(Some("hw:DS2,0"), Some(Quality::Lossless), Some("/s"), Some(true)));
-        assert_eq!(settings.device, Sourced { value: Some("hw:DS2,0".into()), origin: Origin::File });
-        assert_eq!(settings.max_quality, Sourced { value: Quality::Lossless, origin: Origin::File });
-        assert_eq!(settings.socket, Sourced { value: Some("/s".into()), origin: Origin::File });
-        assert_eq!(settings.verbose, Sourced { value: true, origin: Origin::File });
+        let settings = resolve(
+            Overrides::default(),
+            &file(
+                Some("hw:DS2,0"),
+                Some(Quality::Lossless),
+                Some("/s"),
+                Some(true),
+            ),
+        );
+        assert_eq!(
+            settings.device,
+            Sourced {
+                value: Some("hw:DS2,0".into()),
+                origin: Origin::File
+            }
+        );
+        assert_eq!(
+            settings.max_quality,
+            Sourced {
+                value: Quality::Lossless,
+                origin: Origin::File
+            }
+        );
+        assert_eq!(
+            settings.socket,
+            Sourced {
+                value: Some("/s".into()),
+                origin: Origin::File
+            }
+        );
+        assert_eq!(
+            settings.verbose,
+            Sourced {
+                value: true,
+                origin: Origin::File
+            }
+        );
     }
 
     #[test]
@@ -365,36 +557,99 @@ mod tests {
             verbose: Some(false),
             ..Overrides::default()
         };
-        let settings = resolve(overrides, &file(Some("hw:DS2,0"), Some(Quality::Lossless), Some("/file"), Some(true)));
-        assert_eq!(settings.device, Sourced { value: Some("hw:9,0".into()), origin: Origin::Flag });
-        assert_eq!(settings.max_quality, Sourced { value: Quality::Hires, origin: Origin::Flag });
-        assert_eq!(settings.socket, Sourced { value: Some("/flag".into()), origin: Origin::Flag });
-        assert_eq!(settings.verbose, Sourced { value: false, origin: Origin::Flag }, "an explicit false beats a true in the file");
+        let settings = resolve(
+            overrides,
+            &file(
+                Some("hw:DS2,0"),
+                Some(Quality::Lossless),
+                Some("/file"),
+                Some(true),
+            ),
+        );
+        assert_eq!(
+            settings.device,
+            Sourced {
+                value: Some("hw:9,0".into()),
+                origin: Origin::Flag
+            }
+        );
+        assert_eq!(
+            settings.max_quality,
+            Sourced {
+                value: Quality::Hires,
+                origin: Origin::Flag
+            }
+        );
+        assert_eq!(
+            settings.socket,
+            Sourced {
+                value: Some("/flag".into()),
+                origin: Origin::Flag
+            }
+        );
+        assert_eq!(
+            settings.verbose,
+            Sourced {
+                value: false,
+                origin: Origin::Flag
+            },
+            "an explicit false beats a true in the file"
+        );
     }
 
     #[test]
     fn a_setting_equal_to_its_default_still_reports_where_it_was_written() {
-        let settings = resolve(Overrides::default(), &file(None, Some(Quality::Hires), None, Some(false)));
-        assert_eq!(settings.max_quality.origin, Origin::File, "written in the file, though it is the default value");
+        let settings = resolve(
+            Overrides::default(),
+            &file(None, Some(Quality::Hires), None, Some(false)),
+        );
+        assert_eq!(
+            settings.max_quality.origin,
+            Origin::File,
+            "written in the file, though it is the default value"
+        );
         assert_eq!(settings.verbose.origin, Origin::File);
     }
 
     #[test]
     fn a_device_is_required_and_the_message_says_how_to_set_one() {
-        let error = resolve(Overrides::default(), &ConfigFile::default()).require_device().unwrap_err().to_string();
-        assert!(error.contains("phonia devices") && error.contains("[output]") && error.contains("--device"), "{error}");
+        let error = resolve(Overrides::default(), &ConfigFile::default())
+            .require_device()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("phonia devices")
+                && error.contains("[output]")
+                && error.contains("--device"),
+            "{error}"
+        );
 
-        let named = resolve(Overrides { device: Some("hw:DS2,0".into()), ..Overrides::default() }, &ConfigFile::default());
+        let named = resolve(
+            Overrides {
+                device: Some("hw:DS2,0".into()),
+                ..Overrides::default()
+            },
+            &ConfigFile::default(),
+        );
         assert_eq!(named.require_device().unwrap(), "hw:DS2,0");
     }
 
     #[test]
     fn the_socket_falls_back_to_whatever_the_caller_calls_the_default() {
         let unset = resolve(Overrides::default(), &ConfigFile::default());
-        assert_eq!(unset.socket_path(|| PathBuf::from("/usual.sock")), PathBuf::from("/usual.sock"));
+        assert_eq!(
+            unset.socket_path(|| PathBuf::from("/usual.sock")),
+            PathBuf::from("/usual.sock")
+        );
 
-        let set = resolve(Overrides::default(), &file(None, None, Some("/mine.sock"), None));
-        assert_eq!(set.socket_path(|| unreachable!("the default must not be asked for")), PathBuf::from("/mine.sock"));
+        let set = resolve(
+            Overrides::default(),
+            &file(None, None, Some("/mine.sock"), None),
+        );
+        assert_eq!(
+            set.socket_path(|| unreachable!("the default must not be asked for")),
+            PathBuf::from("/mine.sock")
+        );
     }
 
     #[test]
@@ -407,8 +662,14 @@ mod tests {
     #[test]
     fn qualities_map_to_tidals() {
         use tidlers::client::models::playback::AudioQuality;
-        assert!(matches!(AudioQuality::from(Quality::Hires), AudioQuality::HiRes));
-        assert!(matches!(AudioQuality::from(Quality::Lossless), AudioQuality::Lossless));
+        assert!(matches!(
+            AudioQuality::from(Quality::Hires),
+            AudioQuality::HiRes
+        ));
+        assert!(matches!(
+            AudioQuality::from(Quality::Lossless),
+            AudioQuality::Lossless
+        ));
     }
 
     #[test]
@@ -419,75 +680,153 @@ mod tests {
         file.output.device = Some("hw:DS2,0".into());
         assert_eq!(
             resolve(Overrides::default(), &file).output().unwrap(),
-            OutputSpec::Exclusive { device: "hw:DS2,0".into() }
+            OutputSpec::Exclusive {
+                device: "hw:DS2,0".into()
+            }
         );
 
         let shared = ConfigFile {
-            output: Output { mode: Some(OutputMode::Shared), ..Output::default() },
+            output: Output {
+                mode: Some(OutputMode::Shared),
+                ..Output::default()
+            },
             ..ConfigFile::default()
         };
-        assert_eq!(resolve(Overrides::default(), &shared).output().unwrap(), OutputSpec::Shared { sink: None });
+        assert_eq!(
+            resolve(Overrides::default(), &shared).output().unwrap(),
+            OutputSpec::Shared { sink: None }
+        );
     }
 
     #[test]
     fn shared_mode_names_its_output_or_uses_the_default() {
         let mut file = ConfigFile {
-            output: Output { mode: Some(OutputMode::Shared), sink: Some("bluez_output.AA".into()), ..Output::default() },
+            output: Output {
+                mode: Some(OutputMode::Shared),
+                sink: Some("bluez_output.AA".into()),
+                ..Output::default()
+            },
             ..ConfigFile::default()
         };
         assert_eq!(
             resolve(Overrides::default(), &file).output().unwrap(),
-            OutputSpec::Shared { sink: Some("bluez_output.AA".into()) }
+            OutputSpec::Shared {
+                sink: Some("bluez_output.AA".into())
+            }
         );
         file.output.sink = Some("default".into());
-        assert_eq!(resolve(Overrides::default(), &file).output().unwrap(), OutputSpec::Shared { sink: None });
+        assert_eq!(
+            resolve(Overrides::default(), &file).output().unwrap(),
+            OutputSpec::Shared { sink: None }
+        );
     }
 
     #[test]
     fn naming_a_card_on_the_command_line_means_exclusive_mode_even_if_the_file_says_shared() {
         let file = ConfigFile {
-            output: Output { mode: Some(OutputMode::Shared), ..Output::default() },
+            output: Output {
+                mode: Some(OutputMode::Shared),
+                ..Output::default()
+            },
             ..ConfigFile::default()
         };
-        let settings = resolve(Overrides { device: Some("hw:1,0".into()), ..Overrides::default() }, &file);
-        assert_eq!(settings.mode, Sourced { value: OutputMode::Exclusive, origin: Origin::Flag });
-        assert_eq!(settings.output().unwrap(), OutputSpec::Exclusive { device: "hw:1,0".into() });
+        let settings = resolve(
+            Overrides {
+                device: Some("hw:1,0".into()),
+                ..Overrides::default()
+            },
+            &file,
+        );
+        assert_eq!(
+            settings.mode,
+            Sourced {
+                value: OutputMode::Exclusive,
+                origin: Origin::Flag
+            }
+        );
+        assert_eq!(
+            settings.output().unwrap(),
+            OutputSpec::Exclusive {
+                device: "hw:1,0".into()
+            }
+        );
     }
 
     #[test]
     fn output_ids_round_trip() {
         for spec in [
-            OutputSpec::Exclusive { device: "hw:DS2,0".into() },
+            OutputSpec::Exclusive {
+                device: "hw:DS2,0".into(),
+            },
             OutputSpec::Shared { sink: None },
-            OutputSpec::Shared { sink: Some("bluez_output.AA:BB.1".into()) },
+            OutputSpec::Shared {
+                sink: Some("bluez_output.AA:BB.1".into()),
+            },
         ] {
             assert_eq!(OutputSpec::from_id(&spec.id()).unwrap(), spec);
         }
-        assert_eq!(OutputSpec::from_id("shared:default").unwrap(), OutputSpec::Shared { sink: None });
+        assert_eq!(
+            OutputSpec::from_id("shared:default").unwrap(),
+            OutputSpec::Shared { sink: None }
+        );
     }
 
     #[test]
     fn a_bad_output_id_says_what_they_look_like() {
         for bad in ["", "hw:1,0", "exclusive:", "shared:", "cloud:x"] {
             let error = OutputSpec::from_id(bad).unwrap_err().to_string();
-            assert!(error.contains("exclusive:") && error.contains("shared:"), "{bad}: {error}");
+            assert!(
+                error.contains("exclusive:") && error.contains("shared:"),
+                "{bad}: {error}"
+            );
         }
     }
 
     #[test]
     fn output_on_the_command_line_beats_the_file() {
-        let file = ConfigFile { output: Output { device: Some("hw:DS2,0".into()), ..Output::default() }, ..ConfigFile::default() };
+        let file = ConfigFile {
+            output: Output {
+                device: Some("hw:DS2,0".into()),
+                ..Output::default()
+            },
+            ..ConfigFile::default()
+        };
 
-        let shared = Overrides::default().with_output_id("shared:bluez_output.AA").unwrap();
+        let shared = Overrides::default()
+            .with_output_id("shared:bluez_output.AA")
+            .unwrap();
         let settings = resolve(shared, &file);
-        assert_eq!(settings.output().unwrap(), OutputSpec::Shared { sink: Some("bluez_output.AA".into()) });
-        assert_eq!((settings.mode.origin, settings.sink.origin), (Origin::Flag, Origin::Flag));
+        assert_eq!(
+            settings.output().unwrap(),
+            OutputSpec::Shared {
+                sink: Some("bluez_output.AA".into())
+            }
+        );
+        assert_eq!(
+            (settings.mode.origin, settings.sink.origin),
+            (Origin::Flag, Origin::Flag)
+        );
 
-        let default = resolve(Overrides::default().with_output_id("shared:default").unwrap(), &file);
+        let default = resolve(
+            Overrides::default()
+                .with_output_id("shared:default")
+                .unwrap(),
+            &file,
+        );
         assert_eq!(default.output().unwrap(), OutputSpec::Shared { sink: None });
 
-        let card = resolve(Overrides::default().with_output_id("exclusive:hw:1,0").unwrap(), &ConfigFile::default());
-        assert_eq!(card.output().unwrap(), OutputSpec::Exclusive { device: "hw:1,0".into() });
+        let card = resolve(
+            Overrides::default()
+                .with_output_id("exclusive:hw:1,0")
+                .unwrap(),
+            &ConfigFile::default(),
+        );
+        assert_eq!(
+            card.output().unwrap(),
+            OutputSpec::Exclusive {
+                device: "hw:1,0".into()
+            }
+        );
         assert!(Overrides::default().with_output_id("nonsense").is_err());
     }
 }

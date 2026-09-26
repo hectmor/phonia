@@ -31,8 +31,16 @@ pub async fn bind(path: &Path) -> Result<(UnixListener, SocketGuard)> {
 
     if std::fs::symlink_metadata(path).is_ok() {
         match UnixStream::connect(path).await {
-            Ok(_) => bail!("phoniad is already running: something answers on {}", path.display()),
-            Err(error) if matches!(error.kind(), ErrorKind::ConnectionRefused | ErrorKind::NotFound) => {
+            Ok(_) => bail!(
+                "phoniad is already running: something answers on {}",
+                path.display()
+            ),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::ConnectionRefused | ErrorKind::NotFound
+                ) =>
+            {
                 std::fs::remove_file(path)
                     .with_context(|| format!("removing the stale socket {}", path.display()))?;
             }
@@ -40,8 +48,11 @@ pub async fn bind(path: &Path) -> Result<(UnixListener, SocketGuard)> {
         }
     }
 
-    let listener = UnixListener::bind(path).with_context(|| format!("binding {}", path.display()))?;
-    let guard = SocketGuard { path: path.to_path_buf() };
+    let listener =
+        UnixListener::bind(path).with_context(|| format!("binding {}", path.display()))?;
+    let guard = SocketGuard {
+        path: path.to_path_buf(),
+    };
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .with_context(|| format!("restricting {}", path.display()))?;
     Ok((listener, guard))
@@ -72,9 +83,13 @@ fn prepare_directory(directory: &Path) -> Result<()> {
             .with_context(|| format!("creating {}", directory.display()))?;
         return Ok(());
     }
-    let metadata = std::fs::metadata(directory).with_context(|| format!("reading {}", directory.display()))?;
+    let metadata =
+        std::fs::metadata(directory).with_context(|| format!("reading {}", directory.display()))?;
     if metadata.uid() != phonia_ipc::socket::current_uid() {
-        bail!("{} belongs to another user; refusing to put the socket there", directory.display());
+        bail!(
+            "{} belongs to another user; refusing to put the socket there",
+            directory.display()
+        );
     }
     if metadata.mode() & 0o077 != 0 {
         std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
@@ -88,7 +103,8 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("phoniad-socket-test-{}-{name}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("phoniad-socket-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -102,7 +118,11 @@ mod tests {
         let path = scratch("private").join("run").join("phoniad.sock");
         let (_listener, _guard) = bind(&path).await.unwrap();
         assert_eq!(mode(&path), 0o600, "only the owner may connect");
-        assert_eq!(mode(path.parent().unwrap()), 0o700, "and only the owner may even look inside");
+        assert_eq!(
+            mode(path.parent().unwrap()),
+            0o700,
+            "and only the owner may even look inside"
+        );
     }
 
     #[tokio::test]
@@ -120,7 +140,10 @@ mod tests {
         let (_listener, _guard) = bind(&path).await.unwrap();
         let error = bind(&path).await.err().unwrap();
         assert!(error.to_string().contains("already running"), "{error:#}");
-        assert!(path.exists(), "the running daemon's socket must not be touched");
+        assert!(
+            path.exists(),
+            "the running daemon's socket must not be touched"
+        );
     }
 
     #[tokio::test]
@@ -133,7 +156,9 @@ mod tests {
             drop(listener);
         }
         assert!(path.exists(), "the leftover is there");
-        let (_listener, _guard) = bind(&path).await.expect("a stale socket must not block a new daemon");
+        let (_listener, _guard) = bind(&path)
+            .await
+            .expect("a stale socket must not block a new daemon");
     }
 
     #[tokio::test]
@@ -151,7 +176,10 @@ mod tests {
         let long = scratch("long").join("x".repeat(120)).join("phoniad.sock");
         let error = bind(&long).await.err().unwrap();
         assert!(error.to_string().contains("too long"), "{error:#}");
-        assert!(!long.parent().unwrap().exists(), "nothing is created for a path that can't work");
+        assert!(
+            !long.parent().unwrap().exists(),
+            "nothing is created for a path that can't work"
+        );
     }
 
     #[tokio::test]

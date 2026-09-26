@@ -11,7 +11,10 @@
 //! point, which is what makes "stop/next in the middle of a track" deterministic to test.
 
 use super::reserve::{DeviceReserver, Reservation, ReserveError};
-use super::{AudioSink, OutputGone, ReleaseHandler, ReleaseRequest, SinkFactory, Volume, VolumeControl, VolumeHandler};
+use super::{
+    AudioSink, OutputGone, ReleaseHandler, ReleaseRequest, SinkFactory, Volume, VolumeControl,
+    VolumeHandler,
+};
 use crate::decode::SourceSpec;
 use anyhow::{Result, bail};
 use std::collections::VecDeque;
@@ -67,11 +70,29 @@ impl FakeSink {
         Self::with_sizes(spec, DEFAULT_PERIOD_FRAMES, DEFAULT_CAPACITY_FRAMES)
     }
 
-    pub fn with_sizes(spec: SourceSpec, period_frames: usize, capacity_frames: usize) -> (Self, FakeSinkHandle) {
+    pub fn with_sizes(
+        spec: SourceSpec,
+        period_frames: usize,
+        capacity_frames: usize,
+    ) -> (Self, FakeSinkHandle) {
         assert!(period_frames > 0 && capacity_frames >= period_frames);
-        let shared = Arc::new(Shared { state: Mutex::new(State::default()), room: Condvar::new() });
-        let handle = FakeSinkHandle { spec, shared: shared.clone() };
-        (Self { spec, period_frames, capacity_frames, shared }, handle)
+        let shared = Arc::new(Shared {
+            state: Mutex::new(State::default()),
+            room: Condvar::new(),
+        });
+        let handle = FakeSinkHandle {
+            spec,
+            shared: shared.clone(),
+        };
+        (
+            Self {
+                spec,
+                period_frames,
+                capacity_frames,
+                shared,
+            },
+            handle,
+        )
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -177,7 +198,9 @@ impl AudioSink for FakeSink {
             }
             // A real blocking write waits for the DAC to consume audio when the queue is full.
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                bail!("write blocked for more than {BLOCKED_WRITE_TIMEOUT:?}: the test never advanced the sink");
+                bail!(
+                    "write blocked for more than {BLOCKED_WRITE_TIMEOUT:?}: the test never advanced the sink"
+                );
             };
             state = self.shared.room.wait_timeout(state, remaining).unwrap().0;
         }
@@ -270,7 +293,8 @@ impl FakeSinkFactory {
 
     /// Sinks whose output has a volume, as a shared one does.
     pub fn with_volume(mut self: Arc<Self>) -> Arc<Self> {
-        Arc::get_mut(&mut self).expect("not shared yet").volume = Some(Arc::new(FakeVolume::default()));
+        Arc::get_mut(&mut self).expect("not shared yet").volume =
+            Some(Arc::new(FakeVolume::default()));
         self
     }
 
@@ -291,7 +315,10 @@ impl FakeSinkFactory {
 
     /// Makes the next open fail with `message`, as a refused reservation would.
     pub fn fail_next_open(&self, message: &str) {
-        self.open_failures.lock().unwrap().push_back(message.to_string());
+        self.open_failures
+            .lock()
+            .unwrap()
+            .push_back(message.to_string());
     }
 
     /// Another program asking for the card, as the D-Bus side would relay it. Blocks until the
@@ -299,7 +326,12 @@ impl FakeSinkFactory {
     /// listening.
     pub fn request_release(&self, by: Option<&str>, priority: i32) -> bool {
         let handler = self.handler.lock().unwrap().clone();
-        handler.is_some_and(|handler| handler(ReleaseRequest { by: by.map(str::to_string), priority }))
+        handler.is_some_and(|handler| {
+            handler(ReleaseRequest {
+                by: by.map(str::to_string),
+                priority,
+            })
+        })
     }
 }
 
@@ -322,7 +354,9 @@ impl SinkFactory for FakeSinkFactory {
     }
 
     fn volume(&self) -> Option<Arc<dyn VolumeControl>> {
-        self.volume.clone().map(|volume| volume as Arc<dyn VolumeControl>)
+        self.volume
+            .clone()
+            .map(|volume| volume as Arc<dyn VolumeControl>)
     }
 
     fn on_release_request(&self, handler: ReleaseHandler) {
@@ -382,7 +416,10 @@ pub struct FakeReserver {
 
 impl FakeReserver {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self { log: Arc::new(Mutex::new(Vec::new())), script: Mutex::new(VecDeque::new()) })
+        Arc::new(Self {
+            log: Arc::new(Mutex::new(Vec::new())),
+            script: Mutex::new(VecDeque::new()),
+        })
     }
 
     pub fn script(&self, outcome: Result<bool, ReserveError>) {
@@ -409,16 +446,27 @@ impl Reservation for FakeReservation {
 
 impl Drop for FakeReservation {
     fn drop(&mut self) {
-        self.log.lock().unwrap().push(format!("release {}", self.card));
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("release {}", self.card));
     }
 }
 
 impl DeviceReserver for FakeReserver {
-    fn acquire(&self, card: u32, _device_name: &str) -> std::result::Result<Box<dyn Reservation>, ReserveError> {
+    fn acquire(
+        &self,
+        card: u32,
+        _device_name: &str,
+    ) -> std::result::Result<Box<dyn Reservation>, ReserveError> {
         let outcome = self.script.lock().unwrap().pop_front().unwrap_or(Ok(false));
         let took_over = outcome?;
         self.log.lock().unwrap().push(format!("acquire {card}"));
-        Ok(Box::new(FakeReservation { card, took_over, log: self.log.clone() }))
+        Ok(Box::new(FakeReservation {
+            card,
+            took_over,
+            log: self.log.clone(),
+        }))
     }
 }
 
@@ -426,12 +474,18 @@ impl DeviceReserver for FakeReserver {
 mod tests {
     use super::*;
 
-    const SPEC: SourceSpec = SourceSpec { sample_rate: 48_000, channels: 2, bits_per_sample: 24 };
+    const SPEC: SourceSpec = SourceSpec {
+        sample_rate: 48_000,
+        channels: 2,
+        bits_per_sample: 24,
+    };
 
     /// `frames` stereo frames whose samples are unique and increasing, so any loss, duplication
     /// or reordering shows up in an equality check.
     fn ramp(from_frame: usize, frames: usize) -> Vec<i32> {
-        (from_frame * 2..(from_frame + frames) * 2).map(|i| i as i32).collect()
+        (from_frame * 2..(from_frame + frames) * 2)
+            .map(|i| i as i32)
+            .collect()
     }
 
     fn write_all(sink: &mut FakeSink, samples: &[i32]) {
@@ -509,7 +563,11 @@ mod tests {
         sink.drain().unwrap();
         let mut expected = ramp(0, 50);
         expected.extend(ramp(1000, 50));
-        assert_eq!(handle.played(), expected, "flushed audio must never be heard");
+        assert_eq!(
+            handle.played(),
+            expected,
+            "flushed audio must never be heard"
+        );
     }
 
     #[test]
@@ -535,7 +593,9 @@ mod tests {
     fn handle_observes_a_sink_that_moved_to_another_thread() {
         let (mut sink, handle) = FakeSink::with_sizes(SPEC, 100, 1000);
         handle.set_autoplay(true);
-        std::thread::spawn(move || write_all(&mut sink, &ramp(0, 100))).join().unwrap();
+        std::thread::spawn(move || write_all(&mut sink, &ramp(0, 100)))
+            .join()
+            .unwrap();
         assert_eq!(handle.played(), ramp(0, 100));
     }
 
@@ -550,7 +610,10 @@ mod tests {
             sink
         });
         std::thread::sleep(Duration::from_millis(100));
-        assert!(!writer.is_finished(), "the write must be blocked on a full queue");
+        assert!(
+            !writer.is_finished(),
+            "the write must be blocked on a full queue"
+        );
         assert_eq!(handle.queued_frames(), 200);
 
         handle.advance(100);

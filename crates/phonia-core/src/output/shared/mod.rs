@@ -13,8 +13,8 @@
 pub mod pulse;
 pub mod ring;
 
-use super::alsa::{ReportHandler, SinkReport};
 use super::AudioSink;
+use super::alsa::{ReportHandler, SinkReport};
 use crate::decode::SourceSpec;
 use anyhow::{Result, bail};
 use ring::Ring;
@@ -90,7 +90,8 @@ impl<T: Transport> SharedSink<T> {
     fn add_silence(&mut self) {
         let waiting = self.ring.queued_frames() as u64;
         if let Ok(timing) = self.transport.timing() {
-            self.silence_end = timing.write_bytes / self.frame_bytes() + waiting + self.silence_frames;
+            self.silence_end =
+                timing.write_bytes / self.frame_bytes() + waiting + self.silence_frames;
         }
         self.ring.push_silence(self.silence_frames as usize);
         self.needs_silence = false;
@@ -115,7 +116,9 @@ impl<T: Transport> AudioSink for SharedSink<T> {
     /// What can be in flight at most (the ring and what the server holds), plus a second for the
     /// latency of the sink, so that the engine keeps enough to replay all of it.
     fn capacity_frames(&self) -> u64 {
-        self.ring.capacity_frames() as u64 + self.server_target_frames + u64::from(self.spec.sample_rate)
+        self.ring.capacity_frames() as u64
+            + self.server_target_frames
+            + u64::from(self.spec.sample_rate)
     }
 
     fn write(&mut self, samples: &[i32]) -> Result<usize> {
@@ -133,7 +136,9 @@ impl<T: Transport> AudioSink for SharedSink<T> {
 
     fn delay_frames(&mut self) -> Result<u64> {
         let waiting = self.ring.queued_frames() as u64;
-        let Ok(timing) = self.transport.timing() else { return Ok(waiting) };
+        let Ok(timing) = self.transport.timing() else {
+            return Ok(waiting);
+        };
 
         let frame = self.frame_bytes();
         let unplayed = waiting + timing.queued_bytes / frame;
@@ -175,7 +180,10 @@ impl<T: Transport> AudioSink for SharedSink<T> {
                 break timing.sink_latency;
             }
             if Instant::now() > deadline {
-                bail!("the sound server did not finish playing within {} s", DRAIN_SLACK.as_secs());
+                bail!(
+                    "the sound server did not finish playing within {} s",
+                    DRAIN_SLACK.as_secs()
+                );
             }
             std::thread::sleep(DRAIN_POLL);
         };
@@ -192,7 +200,11 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    const SPEC: SourceSpec = SourceSpec { sample_rate: 48_000, channels: 2, bits_per_sample: 24 };
+    const SPEC: SourceSpec = SourceSpec {
+        sample_rate: 48_000,
+        channels: 2,
+        bits_per_sample: 24,
+    };
 
     #[derive(Clone, Default)]
     struct Fake {
@@ -222,7 +234,11 @@ mod tests {
         let ring = Ring::new(4_800, 480, 2);
         ring.push_silence(prefix as usize);
         let fake = Fake::default();
-        (SharedSink::new(SPEC, ring.clone(), fake.clone(), prefix, 19_200, None), fake, ring)
+        (
+            SharedSink::new(SPEC, ring.clone(), fake.clone(), prefix, 19_200, None),
+            fake,
+            ring,
+        )
     }
 
     fn frames(count: usize) -> Vec<i32> {
@@ -237,8 +253,12 @@ mod tests {
 
         // The server took 200 frames of it and holds them, 100 more reached the sink, and the sink
         // adds 10 ms.
-        *fake.timing.lock().unwrap() =
-            Timing { queued_bytes: 200 * 8, read_bytes: 100 * 8, sink_latency: Duration::from_millis(10), ..Timing::default() };
+        *fake.timing.lock().unwrap() = Timing {
+            queued_bytes: 200 * 8,
+            read_bytes: 100 * 8,
+            sink_latency: Duration::from_millis(10),
+            ..Timing::default()
+        };
         assert_eq!(sink.delay_frames().unwrap(), 480 + 200 + 480);
     }
 
@@ -246,14 +266,30 @@ mod tests {
     fn silence_at_the_start_is_not_audio_waiting_to_be_heard() {
         let (mut sink, fake, _) = sink(1_000);
         sink.write(&frames(480)).unwrap();
-        assert_eq!(sink.delay_frames().unwrap(), 480, "the 1000 silent frames don't count");
+        assert_eq!(
+            sink.delay_frames().unwrap(),
+            480,
+            "the 1000 silent frames don't count"
+        );
 
         // Half of the silence has been played; the rest still is not audio.
-        *fake.timing.lock().unwrap() = Timing { queued_bytes: 0, read_bytes: 500 * 8, ..Timing::default() };
+        *fake.timing.lock().unwrap() = Timing {
+            queued_bytes: 0,
+            read_bytes: 500 * 8,
+            ..Timing::default()
+        };
         assert_eq!(sink.delay_frames().unwrap(), 1_480 - 500);
         // All of it played and some audio too.
-        *fake.timing.lock().unwrap() = Timing { queued_bytes: 0, read_bytes: 1_200 * 8, ..Timing::default() };
-        assert_eq!(sink.delay_frames().unwrap(), 1_480, "the ring still holds everything, nothing was pulled");
+        *fake.timing.lock().unwrap() = Timing {
+            queued_bytes: 0,
+            read_bytes: 1_200 * 8,
+            ..Timing::default()
+        };
+        assert_eq!(
+            sink.delay_frames().unwrap(),
+            1_480,
+            "the ring still holds everything, nothing was pulled"
+        );
     }
 
     #[test]
@@ -262,14 +298,26 @@ mod tests {
         ring.clear(); // the server took the silence that opened the stream
         sink.drain().unwrap();
         // The server has been given, and has played, 5000 frames so far.
-        *fake.timing.lock().unwrap() = Timing { write_bytes: 5_000 * 8, read_bytes: 5_000 * 8, ..Timing::default() };
+        *fake.timing.lock().unwrap() = Timing {
+            write_bytes: 5_000 * 8,
+            read_bytes: 5_000 * 8,
+            ..Timing::default()
+        };
 
         sink.write(&frames(480)).unwrap();
-        assert_eq!(ring.queued_frames(), 1_000 + 480, "the silence went in first");
+        assert_eq!(
+            ring.queued_frames(),
+            1_000 + 480,
+            "the silence went in first"
+        );
 
         // The server has now played 500 of the silence and holds the rest, and the audio.
-        *fake.timing.lock().unwrap() =
-            Timing { write_bytes: 6_480 * 8, read_bytes: 5_500 * 8, queued_bytes: 980 * 8, ..Timing::default() };
+        *fake.timing.lock().unwrap() = Timing {
+            write_bytes: 6_480 * 8,
+            read_bytes: 5_500 * 8,
+            queued_bytes: 980 * 8,
+            ..Timing::default()
+        };
         // 500 silent frames are still to play; they are not audio waiting to be heard.
         assert_eq!(sink.delay_frames().unwrap(), 1_480 + 980 - 500);
     }
@@ -316,14 +364,20 @@ mod tests {
         sink.pause().unwrap();
         sink.flush().unwrap();
         assert_eq!(ring.queued_frames(), 0);
-        assert_eq!(*fake.log.lock().unwrap(), ["cork true", "flush", "cork false"]);
+        assert_eq!(
+            *fake.log.lock().unwrap(),
+            ["cork true", "flush", "cork false"]
+        );
     }
 
     #[test]
     fn draining_waits_for_the_ring_and_the_server_to_empty_and_keeps_the_stream() {
         let (mut sink, fake, ring) = sink(0);
         sink.write(&frames(100)).unwrap();
-        *fake.timing.lock().unwrap() = Timing { queued_bytes: 800, ..Timing::default() };
+        *fake.timing.lock().unwrap() = Timing {
+            queued_bytes: 800,
+            ..Timing::default()
+        };
 
         let releaser = {
             let (fake, ring) = (fake.clone(), ring.clone());
@@ -335,19 +389,35 @@ mod tests {
         };
         let started = Instant::now();
         sink.drain().unwrap();
-        assert!(started.elapsed() >= Duration::from_millis(90), "it waited for the audio to be played");
+        assert!(
+            started.elapsed() >= Duration::from_millis(90),
+            "it waited for the audio to be played"
+        );
         releaser.join().unwrap();
 
-        assert_eq!(fake.log.lock().unwrap().first().map(String::as_str), Some("cork false"), "a paused stream never drains");
-        assert!(sink.write(&frames(10)).is_ok(), "the sink is still usable afterwards");
+        assert_eq!(
+            fake.log.lock().unwrap().first().map(String::as_str),
+            Some("cork false"),
+            "a paused stream never drains"
+        );
+        assert!(
+            sink.write(&frames(10)).is_ok(),
+            "the sink is still usable afterwards"
+        );
     }
 
     #[test]
     fn a_lost_output_surfaces_from_write_and_drain_as_a_typed_error() {
         let (mut sink, _, ring) = sink(0);
         ring.mark_gone("the speaker went away");
-        for error in [sink.write(&frames(10)).unwrap_err(), sink.drain().unwrap_err()] {
-            assert_eq!(error.downcast_ref::<super::super::OutputGone>().unwrap().0, "the speaker went away");
+        for error in [
+            sink.write(&frames(10)).unwrap_err(),
+            sink.drain().unwrap_err(),
+        ] {
+            assert_eq!(
+                error.downcast_ref::<super::super::OutputGone>().unwrap().0,
+                "the speaker went away"
+            );
         }
     }
 

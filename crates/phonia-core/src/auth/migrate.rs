@@ -25,7 +25,10 @@ impl MigratingStore {
 
     /// The old file, if it is still there.
     pub fn leftover(&self) -> Option<PathBuf> {
-        self.legacy.path().exists().then(|| self.legacy.path().to_path_buf())
+        self.legacy
+            .path()
+            .exists()
+            .then(|| self.legacy.path().to_path_buf())
     }
 
     fn forget_legacy(&self) {
@@ -79,7 +82,10 @@ impl MigratingStore {
         let verified = match saved {
             Ok(()) => matches!(self.primary.load().await, Ok(Some(back)) if back == *stored),
             Err(ref error) => {
-                eprintln!("phonia: could not move the session to {}: {error}", self.primary.describe());
+                eprintln!(
+                    "phonia: could not move the session to {}: {error}",
+                    self.primary.describe()
+                );
                 return;
             }
         };
@@ -158,11 +164,17 @@ mod tests {
     use crate::auth::MemoryStore;
 
     fn session() -> StoredSession {
-        StoredSession { v: 1, refresh_token: "refresh".into(), client_id: "id".into(), client_secret: "secret".into() }
+        StoredSession {
+            v: 1,
+            refresh_token: "refresh".into(),
+            client_id: "id".into(),
+            client_secret: "secret".into(),
+        }
     }
 
     fn legacy_file(name: &str, with: Option<&StoredSession>) -> FileStore {
-        let dir = std::env::temp_dir().join(format!("phonia-migrate-test-{}-{name}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("phonia-migrate-test-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let store = FileStore::new(dir.join("session.json"));
@@ -180,7 +192,11 @@ mod tests {
         let store = MigratingStore::new(keyring.clone(), file);
 
         assert_eq!(store.load().await.unwrap(), Some(session()));
-        assert_eq!(keyring.load().await.unwrap(), Some(session()), "it is in the keyring now");
+        assert_eq!(
+            keyring.load().await.unwrap(),
+            Some(session()),
+            "it is in the keyring now"
+        );
         assert!(!path.exists(), "and the file is gone");
     }
 
@@ -192,7 +208,11 @@ mod tests {
         let path = file.path().to_path_buf();
         let store = MigratingStore::new(keyring, file);
 
-        assert_eq!(store.load().await.unwrap(), Some(session()), "the session is used from the file");
+        assert_eq!(
+            store.load().await.unwrap(),
+            Some(session()),
+            "the session is used from the file"
+        );
         assert!(path.exists(), "and nothing was lost");
     }
 
@@ -220,13 +240,19 @@ mod tests {
         let path = file.path().to_path_buf();
         let store = MigratingStore::new(Arc::new(Forgetful), file);
         assert_eq!(store.load().await.unwrap(), Some(session()));
-        assert!(path.exists(), "an unverified copy is not a reason to lose the file");
+        assert!(
+            path.exists(),
+            "an unverified copy is not a reason to lose the file"
+        );
     }
 
     #[tokio::test]
     async fn a_session_already_in_the_store_wins_and_a_leftover_file_is_removed() {
         let keyring = Arc::new(MemoryStore::with(session()));
-        let other = StoredSession { refresh_token: "older".into(), ..session() };
+        let other = StoredSession {
+            refresh_token: "older".into(),
+            ..session()
+        };
         let file = legacy_file("leftover", Some(&other));
         let path = file.path().to_path_buf();
         let store = MigratingStore::new(keyring, file);
@@ -247,7 +273,10 @@ mod tests {
         keyring.fail_with("no bus");
         let store = MigratingStore::new(keyring, legacy_file("refuse", None));
         let error = store.load().await.unwrap_err().to_string();
-        assert!(error.contains("no bus") && error.contains("session_store = \"file\""), "{error}");
+        assert!(
+            error.contains("no bus") && error.contains("session_store = \"file\""),
+            "{error}"
+        );
     }
 
     #[tokio::test]
@@ -272,7 +301,10 @@ mod tests {
         assert!(store.delete().await.unwrap());
         assert_eq!(keyring.load().await.unwrap(), None);
         assert!(!path.exists());
-        assert!(!store.delete().await.unwrap(), "nothing left the second time");
+        assert!(
+            !store.delete().await.unwrap(),
+            "nothing left the second time"
+        );
     }
 
     #[test]
@@ -286,6 +318,10 @@ mod tests {
 
         destroy(&path).unwrap();
         assert!(!path.exists());
-        assert_eq!(fs::read(&alias).unwrap(), vec![0; length], "the contents were zeroed, not just unlinked");
+        assert_eq!(
+            fs::read(&alias).unwrap(),
+            vec![0; length],
+            "the contents were zeroed, not just unlinked"
+        );
     }
 }

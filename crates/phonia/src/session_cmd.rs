@@ -37,13 +37,19 @@ pub fn format_report(report: &Report) -> String {
         Err(why) => text.push_str(&format!("\nSession:       could not be read: {why}")),
     }
     if let Some(leftover) = &report.leftover {
-        text.push_str(&format!("\nLeftover file: {} (from before the keyring)", leftover.display()));
+        text.push_str(&format!(
+            "\nLeftover file: {} (from before the keyring)",
+            leftover.display()
+        ));
     }
     match &report.account {
-        Some(Ok(account)) => {
-            text.push_str(&format!("\nAccount:       {} (user id {})", account.username, account.user_id))
-        }
-        Some(Err(why)) => text.push_str(&format!("\nAccount:       TIDAL did not accept the login: {why}")),
+        Some(Ok(account)) => text.push_str(&format!(
+            "\nAccount:       {} (user id {})",
+            account.username, account.user_id
+        )),
+        Some(Err(why)) => text.push_str(&format!(
+            "\nAccount:       TIDAL did not accept the login: {why}"
+        )),
         None => {}
     }
     text
@@ -54,7 +60,9 @@ pub async fn whoami(kind: SessionStoreKind, check: bool) -> Result<()> {
     // Reading is what moves an old file into the keyring, so it comes before looking for leftovers.
     let session = store.load().await;
     let leftover = match kind {
-        SessionStoreKind::Keyring => auth::legacy_session_file().ok().filter(|path| path.exists()),
+        SessionStoreKind::Keyring => auth::legacy_session_file()
+            .ok()
+            .filter(|path| path.exists()),
         SessionStoreKind::File => None,
     };
 
@@ -65,7 +73,9 @@ pub async fn whoami(kind: SessionStoreKind, check: bool) -> Result<()> {
     let report = Report {
         store: store.describe(),
         provider: store.provider().await,
-        session: session.map(|stored| stored.is_some()).map_err(|error| error.to_string()),
+        session: session
+            .map(|stored| stored.is_some())
+            .map_err(|error| error.to_string()),
         leftover,
         account,
     };
@@ -75,16 +85,28 @@ pub async fn whoami(kind: SessionStoreKind, check: bool) -> Result<()> {
 
 async fn ask_tidal(stored: &auth::StoredSession) -> Result<Account, String> {
     let mut client = client_from(stored);
-    client.refresh_access_token(false).await.map_err(|error| error.to_string())?;
-    let user = client.user_info.as_ref().ok_or_else(|| "TIDAL sent no account details".to_string())?;
-    Ok(Account { username: user.username.clone(), user_id: user.user_id })
+    client
+        .refresh_access_token(false)
+        .await
+        .map_err(|error| error.to_string())?;
+    let user = client
+        .user_info
+        .as_ref()
+        .ok_or_else(|| "TIDAL sent no account details".to_string())?;
+    Ok(Account {
+        username: user.username.clone(),
+        user_id: user.user_id,
+    })
 }
 
 pub async fn logout(kind: SessionStoreKind) -> Result<()> {
     let store = auth::open_store(kind, Interaction::Allow)?;
     let had_session = auth::logout(&*store).await.context("logging out")?;
     if had_session {
-        println!("Logged out: the session was removed from {}.", store.describe());
+        println!(
+            "Logged out: the session was removed from {}.",
+            store.describe()
+        );
         println!(
             "The token itself is not revoked on TIDAL's side (phonia cannot do that); to invalidate it, \
              remove phonia from your authorized apps in your TIDAL account settings."
@@ -119,27 +141,57 @@ mod tests {
 
     #[test]
     fn no_session_says_how_to_log_in() {
-        let text = format_report(&Report { session: Ok(false), provider: None, ..report() });
-        assert_eq!(text, "Session store: the desktop keyring\nSession:       none: run `phonia login`");
+        let text = format_report(&Report {
+            session: Ok(false),
+            provider: None,
+            ..report()
+        });
+        assert_eq!(
+            text,
+            "Session store: the desktop keyring\nSession:       none: run `phonia login`"
+        );
     }
 
     #[test]
     fn a_store_that_cannot_be_read_says_why() {
-        let text = format_report(&Report { session: Err("the keyring is locked".into()), ..report() });
-        assert!(text.contains("could not be read: the keyring is locked"), "{text}");
+        let text = format_report(&Report {
+            session: Err("the keyring is locked".into()),
+            ..report()
+        });
+        assert!(
+            text.contains("could not be read: the keyring is locked"),
+            "{text}"
+        );
     }
 
     #[test]
     fn a_leftover_file_and_the_checked_account_are_shown() {
         let text = format_report(&Report {
             leftover: Some("/home/u/.config/phonia/session.json".into()),
-            account: Some(Ok(Account { username: "someone".into(), user_id: 42 })),
+            account: Some(Ok(Account {
+                username: "someone".into(),
+                user_id: 42,
+            })),
             ..report()
         });
-        assert!(text.contains("Leftover file: /home/u/.config/phonia/session.json (from before the keyring)"), "{text}");
-        assert!(text.ends_with("Account:       someone (user id 42)"), "{text}");
+        assert!(
+            text.contains(
+                "Leftover file: /home/u/.config/phonia/session.json (from before the keyring)"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("Account:       someone (user id 42)"),
+            "{text}"
+        );
 
-        let text = format_report(&Report { account: Some(Err("401".into())), ..report() });
-        assert!(text.contains("TIDAL did not accept the login: 401"), "{text}");
+        let text = format_report(&Report {
+            account: Some(Err("401".into())),
+            ..report()
+        });
+        assert!(
+            text.contains("TIDAL did not accept the login: 401"),
+            "{text}"
+        );
     }
 }
