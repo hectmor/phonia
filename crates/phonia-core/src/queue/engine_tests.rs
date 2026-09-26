@@ -558,3 +558,84 @@ fn a_seek_that_reopens_the_stream_still_finds_its_entry() {
         "landed exactly at 1.2 s"
     );
 }
+
+// ---- opening ahead -------------------------------------------------------------------------
+
+#[test]
+fn opening_ahead_does_not_make_the_entry_current_and_starting_it_does() {
+    let queue = Queue::with_seed(
+        TestOpener::new(&[("a", Media::Pcm(10)), ("b", Media::Pcm(10))]),
+        1,
+    );
+    let ids = queue.add([entry("a"), entry("b")]);
+    block_on(queue.open(ids[0].track_ref(), Duration::ZERO)).unwrap();
+    let version = queue.snapshot().version;
+
+    assert_eq!(queue.peek(Advance::Auto), Peek::Next(ids[1].track_ref()));
+    let ahead = block_on(queue.open_ahead(ids[1].track_ref())).unwrap();
+    assert_eq!(
+        ahead.meta.track,
+        ids[1].track_ref(),
+        "with the queue's reference"
+    );
+    let snapshot = queue.snapshot();
+    assert_eq!(
+        (snapshot.current, snapshot.version),
+        (Some(ids[0]), version),
+        "the queue did not notice: b is not playing yet"
+    );
+
+    assert!(queue.started(&ids[1].track_ref()));
+    let snapshot = queue.snapshot();
+    assert_eq!(snapshot.current, Some(ids[1]), "now b is the current entry");
+    assert_eq!(
+        queue.advance(Advance::Previous),
+        Some(ids[0].track_ref()),
+        "and the history is as if it had been opened the ordinary way"
+    );
+}
+
+#[test]
+fn an_entry_removed_before_it_starts_says_so() {
+    let queue = Queue::with_seed(
+        TestOpener::new(&[("a", Media::Pcm(10)), ("b", Media::Pcm(10))]),
+        1,
+    );
+    let ids = queue.add([entry("a"), entry("b")]);
+    block_on(queue.open(ids[0].track_ref(), Duration::ZERO)).unwrap();
+    block_on(queue.open_ahead(ids[1].track_ref())).unwrap();
+
+    queue.remove(&[ids[1]]);
+    assert!(
+        !queue.started(&ids[1].track_ref()),
+        "the caller has to move on"
+    );
+    assert_eq!(queue.snapshot().current, Some(ids[0]));
+    assert!(!queue.started(&TrackRef("not an entry".into())));
+}
+
+#[test]
+fn opening_ahead_something_that_is_gone_is_an_error() {
+    let queue = Queue::with_seed(TestOpener::new(&[("a", Media::Pcm(10))]), 1);
+    let ids = queue.add([entry("a")]);
+    queue.remove(&ids);
+    assert!(block_on(queue.open_ahead(ids[0].track_ref())).is_err());
+}
+
+#[test]
+fn a_supplier_that_does_not_say_what_is_next_says_unknown() {
+    struct Plain;
+    impl TrackSupplier for Plain {
+        fn advance(&self, _: Advance) -> Option<TrackRef> {
+            None
+        }
+        fn open(&self, _: TrackRef, _: Duration) -> BoxFuture<'static, Result<LoadedTrack>> {
+            Box::pin(async { Err(anyhow!("nothing")) })
+        }
+    }
+    assert_eq!(Plain.peek(Advance::Auto), Peek::Unknown);
+    assert!(
+        Plain.started(&TrackRef("x".into())),
+        "and starting is a no-op that succeeds"
+    );
+}

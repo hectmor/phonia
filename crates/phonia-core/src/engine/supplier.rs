@@ -22,6 +22,18 @@ pub enum Advance {
     Restart,
 }
 
+/// What [`TrackSupplier::peek`] can say about what comes next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Peek {
+    /// This track comes next.
+    Next(TrackRef),
+    /// Nothing does: the queue ends here.
+    End,
+    /// It can't be told without deciding something (a shuffled queue that starts a new cycle
+    /// reshuffles when it does), or this supplier doesn't say.
+    Unknown,
+}
+
 /// The audio of an opened track.
 pub enum TrackMedia {
     /// Encoded audio (FLAC, fMP4, ...) for the decoder.
@@ -113,4 +125,25 @@ pub trait TrackSupplier: Send + Sync + 'static {
     /// Resolves and opens `track`, from `at` if the supplier can (see [`LoadedTrack::start`] for
     /// what it reports back). `at` is zero for an ordinary start.
     fn open(&self, track: TrackRef, at: Duration) -> BoxFuture<'static, Result<LoadedTrack>>;
+
+    /// What [`TrackSupplier::advance`] would answer for `how`, without deciding anything: nothing
+    /// about the supplier changes, so the answer can be asked for again and again, and may be
+    /// thrown away. Used to open the next track while the current one still plays.
+    fn peek(&self, _how: Advance) -> Peek {
+        Peek::Unknown
+    }
+
+    /// Opens `track` from its start for playing after the current one, without taking it as the
+    /// current one: nothing is decided until [`TrackSupplier::started`], and the opening may be
+    /// abandoned.
+    fn open_ahead(&self, track: TrackRef) -> BoxFuture<'static, Result<LoadedTrack>> {
+        self.open(track, Duration::ZERO)
+    }
+
+    /// The track opened with [`TrackSupplier::open_ahead`] is being played now: it becomes the
+    /// current one. `false` if it no longer exists (it was removed meanwhile), in which case the
+    /// caller moves on.
+    fn started(&self, _track: &TrackRef) -> bool {
+        true
+    }
 }

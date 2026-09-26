@@ -12,7 +12,7 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use supplier::{Advance, LoadedTrack, SeekMode, TrackMedia, TrackOpener, TrackSupplier};
+pub use supplier::{Advance, LoadedTrack, Peek, SeekMode, TrackMedia, TrackOpener, TrackSupplier};
 pub use types::{
     Command, EndReason, Event, OutputState, ReleaseReason, SeekTarget, State, Status, TrackMeta,
     TrackRef,

@@ -429,6 +429,57 @@ fn dash_opening(dash: &DashSegments, at: Duration) -> DashOpening {
 mod tests {
     use crate::auth::{MemoryStore, StoredSession};
 
+    /// Gapless playback joins tracks by writing the next one's first sample right after the last
+    /// of the one before, so a stream must decode to exactly the length it declares: any extra or
+    /// missing frame at the end of the last DASH segment would be an audible click or a drift.
+    #[tokio::test]
+    #[ignore = "needs a TIDAL login and network"]
+    async fn a_tidal_dash_track_decodes_to_exactly_the_length_its_manifest_declares() {
+        use crate::auth::{Interaction, open_store};
+        use crate::config::{Quality, SessionStoreKind};
+        use crate::decode::{Decoder, duration_to_frames};
+
+        let store = open_store(SessionStoreKind::default(), Interaction::Allow).unwrap();
+        let opener = TidalOpener::from_store(
+            crate::tidal::build_http_client().unwrap(),
+            store,
+            Quality::Hires.into(),
+        );
+        // A HiRes track (24-bit/192 kHz), which TIDAL serves as DASH; TIDAL_TRACK picks another.
+        let id = std::env::var("TIDAL_TRACK").unwrap_or_else(|_| "233059491".to_string());
+        let loaded = opener
+            .open(TrackRef(id.clone()), Duration::ZERO)
+            .await
+            .unwrap();
+        let declared = loaded
+            .meta
+            .duration
+            .expect("the manifest declares the length");
+        let TrackMedia::Encoded { source, extension } = loaded.media else {
+            panic!("not an encoded stream")
+        };
+
+        let (frames, spec) = tokio::task::spawn_blocking(move || {
+            let mut decoder = Decoder::open_boxed(source, extension.as_deref()).unwrap();
+            let spec = decoder.spec();
+            let mut chunk = Vec::new();
+            let mut frames = 0u64;
+            while decoder.next_chunk_into(&mut chunk).unwrap() {
+                frames += (chunk.len() / spec.channels as usize) as u64;
+            }
+            (frames, spec)
+        })
+        .await
+        .unwrap();
+
+        let declared_frames = duration_to_frames(declared, spec.sample_rate);
+        eprintln!("track {id}: {frames} frames decoded, {declared_frames} declared ({spec:?})");
+        assert_eq!(
+            frames, declared_frames,
+            "the decoded length differs from the manifest's"
+        );
+    }
+
     fn session_with(store: Option<Arc<MemoryStore>>) -> TidalSession {
         TidalSession {
             client: RwLock::new(None),
