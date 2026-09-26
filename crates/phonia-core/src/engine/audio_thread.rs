@@ -523,6 +523,8 @@ impl AudioThread {
                 .context("opening the audio output")?,
         );
         if self.released.take().is_some() {
+            // The status first: whoever hears the event and asks for the status must see it.
+            self.publish_status();
             self.emit(Event::OutputAcquired);
         }
         Ok(())
@@ -824,6 +826,7 @@ impl AudioThread {
         self.sink = None;
         self.ctx.sinks.release();
         self.released = Some(None);
+        self.publish_status();
         self.emit(Event::OutputReleased {
             by: None,
             reason: ReleaseReason::Lost,
@@ -919,11 +922,12 @@ impl AudioThread {
                 self.sink = None;
                 self.ctx.sinks.release();
                 self.released = Some(request.by.clone());
+                // The status first: whoever hears the event and asks for the status must see it.
+                self.publish_status();
                 self.emit(Event::OutputReleased {
                     by: request.by.clone(),
                     reason: request.reason,
                 });
-                self.publish_status();
                 request.answer(true);
             }
         }
