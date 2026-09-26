@@ -40,7 +40,9 @@ pub async fn list() -> Vec<Entry> {
 
 /// The sound cards with playback, one entry per playback device.
 pub fn cards(asound: &Path) -> Vec<Entry> {
-    let Ok(cards) = device::cards(asound) else { return Vec::new() };
+    let Ok(cards) = device::cards(asound) else {
+        return Vec::new();
+    };
     let mut entries = Vec::new();
     for card in cards.iter().filter(|card| !card.playback.is_empty()) {
         for playback in &card.playback {
@@ -48,8 +50,16 @@ pub fn cards(asound: &Path) -> Vec<Entry> {
             entries.push(Entry {
                 id: format!("exclusive:hw:{},{playback}", card.id),
                 mode: Mode::Exclusive,
-                name: if many { format!("{} (device {playback})", card.name) } else { card.name.clone() },
-                detail: Some(if card.usb { format!("USB, card {}", card.index) } else { format!("card {}", card.index) }),
+                name: if many {
+                    format!("{} (device {playback})", card.name)
+                } else {
+                    card.name.clone()
+                },
+                detail: Some(if card.usb {
+                    format!("USB, card {}", card.index)
+                } else {
+                    format!("card {}", card.index)
+                }),
                 bit_perfect: true,
                 lossy: false,
                 codec: None,
@@ -100,10 +110,17 @@ pub fn describe(spec: &OutputSpec, entries: &[Entry]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::pulse::{Output, OutputKind};
+    use super::*;
 
-    fn output(name: &str, description: &str, kind: OutputKind, codec: Option<&str>, lossy: bool, is_default: bool) -> Output {
+    fn output(
+        name: &str,
+        description: &str,
+        kind: OutputKind,
+        codec: Option<&str>,
+        lossy: bool,
+        is_default: bool,
+    ) -> Output {
         Output {
             name: name.into(),
             description: description.into(),
@@ -119,18 +136,53 @@ mod tests {
     #[test]
     fn shared_outputs_start_with_the_default_and_carry_their_kind_and_codec() {
         let entries = shared(&[
-            output("alsa_output.usb-DS2", "Fosi Audio DS2", OutputKind::Usb, None, false, true),
-            output("bluez_output.AA", "Soundcore Life P2", OutputKind::Bluetooth, Some("SBC"), true, false),
+            output(
+                "alsa_output.usb-DS2",
+                "Fosi Audio DS2",
+                OutputKind::Usb,
+                None,
+                false,
+                true,
+            ),
+            output(
+                "bluez_output.AA",
+                "Soundcore Life P2",
+                OutputKind::Bluetooth,
+                Some("SBC"),
+                true,
+                false,
+            ),
         ]);
         assert_eq!(
-            entries.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>(),
-            ["shared:default", "shared:alsa_output.usb-DS2", "shared:bluez_output.AA"]
+            entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "shared:default",
+                "shared:alsa_output.usb-DS2",
+                "shared:bluez_output.AA"
+            ]
         );
-        assert_eq!(entries[0].name, "The desktop's default output (Fosi Audio DS2)");
+        assert_eq!(
+            entries[0].name,
+            "The desktop's default output (Fosi Audio DS2)"
+        );
         assert!(entries[0].is_default && !entries[1].is_default);
-        assert!(entries.iter().all(|entry| !entry.bit_perfect && entry.mode == Mode::Shared));
+        assert!(
+            entries
+                .iter()
+                .all(|entry| !entry.bit_perfect && entry.mode == Mode::Shared)
+        );
         let bluetooth = &entries[2];
-        assert_eq!((bluetooth.lossy, bluetooth.codec.as_deref(), bluetooth.detail.as_deref()), (true, Some("SBC"), Some("Bluetooth")));
+        assert_eq!(
+            (
+                bluetooth.lossy,
+                bluetooth.codec.as_deref(),
+                bluetooth.detail.as_deref()
+            ),
+            (true, Some("SBC"), Some("Bluetooth"))
+        );
     }
 
     #[test]
@@ -142,10 +194,21 @@ mod tests {
 
     #[test]
     fn a_spec_is_described_by_its_entry_or_by_itself() {
-        let entries = shared(&[output("bluez_output.AA", "Soundcore Life P2", OutputKind::Bluetooth, Some("SBC"), true, false)]);
-        let listed = OutputSpec::Shared { sink: Some("bluez_output.AA".into()) };
+        let entries = shared(&[output(
+            "bluez_output.AA",
+            "Soundcore Life P2",
+            OutputKind::Bluetooth,
+            Some("SBC"),
+            true,
+            false,
+        )]);
+        let listed = OutputSpec::Shared {
+            sink: Some("bluez_output.AA".into()),
+        };
         assert_eq!(describe(&listed, &entries), "Soundcore Life P2");
-        let unlisted = OutputSpec::Exclusive { device: "hw:DS2,0".into() };
+        let unlisted = OutputSpec::Exclusive {
+            device: "hw:DS2,0".into(),
+        };
         assert_eq!(describe(&unlisted, &entries), "device hw:DS2,0");
     }
 }

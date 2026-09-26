@@ -8,7 +8,8 @@
 use crate::daemon::{Daemon, wait_for_shutdown};
 use phonia_ipc::framing::{FrameError, read_frame, write_frame};
 use phonia_ipc::{
-    ClientMessage, ErrorCode, Event, Payload, ProtocolError, Reply, Request, RequestId, ServerMessage,
+    ClientMessage, ErrorCode, Event, Payload, ProtocolError, Reply, Request, RequestId,
+    ServerMessage,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -57,8 +58,17 @@ where
     let (outbox, queued) = mpsc::channel::<ServerMessage>(OUTBOX);
     let writer = tokio::spawn(write_loop(write_half, queued));
 
-    let mut connection = Connection { daemon: daemon.clone(), outbox: outbox.clone(), handshaken: false, forwarder: None };
-    if outbox.send(ServerMessage::Hello(daemon.hello())).await.is_ok() {
+    let mut connection = Connection {
+        daemon: daemon.clone(),
+        outbox: outbox.clone(),
+        handshaken: false,
+        forwarder: None,
+    };
+    if outbox
+        .send(ServerMessage::Hello(daemon.hello()))
+        .await
+        .is_ok()
+    {
         connection.read_loop(BufReader::new(read_half)).await;
     }
 
@@ -71,9 +81,14 @@ where
     let _ = tokio::time::timeout(FLUSH_GRACE, writer).await;
 }
 
-async fn write_loop<W: AsyncWrite + Unpin>(mut writer: W, mut queued: mpsc::Receiver<ServerMessage>) {
+async fn write_loop<W: AsyncWrite + Unpin>(
+    mut writer: W,
+    mut queued: mpsc::Receiver<ServerMessage>,
+) {
     while let Some(message) = queued.recv().await {
-        let Ok(bytes) = serde_json::to_vec(&message) else { continue };
+        let Ok(bytes) = serde_json::to_vec(&message) else {
+            continue;
+        };
         match tokio::time::timeout(WRITE_TIMEOUT, write_frame(&mut writer, &bytes)).await {
             Ok(Ok(())) => {}
             _ => break, // too slow, or gone
@@ -108,7 +123,11 @@ impl Connection {
                 Ok(Some(bytes)) => bytes,
                 Ok(None) => return, // the client closed the connection
                 Err(FrameError::TooLarge) => {
-                    self.respond(RequestId(0), error(ErrorCode::BadRequest, "message too large")).await;
+                    self.respond(
+                        RequestId(0),
+                        error(ErrorCode::BadRequest, "message too large"),
+                    )
+                    .await;
                     return;
                 }
                 Err(FrameError::Io(_)) => return,
@@ -118,7 +137,10 @@ impl Connection {
                 Ok(message) => message,
                 Err(parse_error) => {
                     let id = request_id_of(bytes);
-                    let reply = error(ErrorCode::BadRequest, &format!("malformed request: {parse_error}"));
+                    let reply = error(
+                        ErrorCode::BadRequest,
+                        &format!("malformed request: {parse_error}"),
+                    );
                     self.respond(id, reply).await;
                     continue;
                 }
@@ -133,7 +155,9 @@ impl Connection {
     /// (which makes it stop by itself). It is cut off if that takes too long.
     async fn let_events_drain(&mut self) {
         if let Some(mut forwarder) = self.forwarder.take()
-            && tokio::time::timeout(FLUSH_GRACE, &mut forwarder).await.is_err()
+            && tokio::time::timeout(FLUSH_GRACE, &mut forwarder)
+                .await
+                .is_err()
         {
             forwarder.abort();
         }
@@ -147,16 +171,24 @@ impl Connection {
                 if !phonia_ipc::PROTOCOL.compatible_with(protocol) {
                     let reason = format!(
                         "this daemon speaks protocol {}.{}, the client {}.{}",
-                        phonia_ipc::PROTOCOL.major, phonia_ipc::PROTOCOL.minor, protocol.major, protocol.minor
+                        phonia_ipc::PROTOCOL.major,
+                        phonia_ipc::PROTOCOL.minor,
+                        protocol.major,
+                        protocol.minor
                     );
-                    self.respond(id, error(ErrorCode::UnsupportedVersion, &reason)).await;
+                    self.respond(id, error(ErrorCode::UnsupportedVersion, &reason))
+                        .await;
                     return false;
                 }
                 self.handshaken = true;
                 self.respond(id, Reply::Ok(Payload::Ack)).await;
             }
             _ if !self.handshaken => {
-                self.respond(id, error(ErrorCode::HandshakeRequired, "send a hello request first")).await;
+                self.respond(
+                    id,
+                    error(ErrorCode::HandshakeRequired, "send a hello request first"),
+                )
+                .await;
             }
             Request::Subscribe => self.subscribe(id).await,
             Request::Unsubscribe => {
@@ -181,12 +213,21 @@ impl Connection {
         }
         let events = self.daemon.subscribe();
         let (seq, status, queue) = self.daemon.snapshot();
-        self.respond(id, Reply::Ok(Payload::Snapshot { seq, status, queue })).await;
-        self.forwarder = Some(tokio::spawn(forward_events(events, seq, self.outbox.clone(), self.daemon.clone())));
+        self.respond(id, Reply::Ok(Payload::Snapshot { seq, status, queue }))
+            .await;
+        self.forwarder = Some(tokio::spawn(forward_events(
+            events,
+            seq,
+            self.outbox.clone(),
+            self.daemon.clone(),
+        )));
     }
 
     async fn respond(&self, id: RequestId, reply: Reply) {
-        let _ = self.outbox.send(ServerMessage::Response { id, reply }).await;
+        let _ = self
+            .outbox
+            .send(ServerMessage::Response { id, reply })
+            .await;
     }
 }
 
@@ -204,7 +245,12 @@ async fn forward_events(
             Ok((seq, event)) => {
                 seen = seq;
                 let last = event == Event::ShuttingDown;
-                if outbox.send(ServerMessage::Event { seq, event }).await.is_err() || last {
+                if outbox
+                    .send(ServerMessage::Event { seq, event })
+                    .await
+                    .is_err()
+                    || last
+                {
                     return;
                 }
                 continue;
@@ -212,7 +258,15 @@ async fn forward_events(
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
                 let (seq, status, queue) = daemon.snapshot();
                 seen = seq;
-                ServerMessage::Event { seq, event: Event::Resync { skipped, seq, status, queue } }
+                ServerMessage::Event {
+                    seq,
+                    event: Event::Resync {
+                        skipped,
+                        seq,
+                        status,
+                        queue,
+                    },
+                }
             }
             Err(broadcast::error::RecvError::Closed) => return,
         };
@@ -224,11 +278,16 @@ async fn forward_events(
 }
 
 fn error(code: ErrorCode, message: &str) -> Reply {
-    Reply::Err(ProtocolError { code, message: message.to_string() })
+    Reply::Err(ProtocolError {
+        code,
+        message: message.to_string(),
+    })
 }
 
 /// The id of a request that could not be fully parsed, so the error can still be matched to it.
 fn request_id_of(bytes: &[u8]) -> RequestId {
-    let id = serde_json::from_slice::<serde_json::Value>(bytes).ok().and_then(|value| value.get("id")?.as_u64());
+    let id = serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|value| value.get("id")?.as_u64());
     RequestId(id.unwrap_or(0))
 }

@@ -64,7 +64,10 @@ pub struct SecretServiceStore {
 
 impl SecretServiceStore {
     pub fn new(interaction: Interaction) -> Self {
-        Self { interaction, bus_address: None }
+        Self {
+            interaction,
+            bus_address: None,
+        }
     }
 
     /// Talk to the service on the bus at `address` instead of the session bus.
@@ -78,7 +81,11 @@ impl SecretServiceStore {
         let connection = self.connect().await.ok()?;
         let bus = zbus::fdo::DBusProxy::new(&connection).await.ok()?;
         let owner = bus.get_name_owner(SERVICE.try_into().ok()?).await.ok()?;
-        crate::output::dbus::process_name(&connection, zbus::names::BusName::from(owner.into_inner())).await
+        crate::output::dbus::process_name(
+            &connection,
+            zbus::names::BusName::from(owner.into_inner()),
+        )
+        .await
     }
 
     async fn connect(&self) -> Result<Connection, StoreError> {
@@ -87,23 +94,33 @@ impl SecretServiceStore {
             None => connection::Builder::session(),
         }
         .map_err(|error| StoreError::Unavailable(format!("no D-Bus session bus: {error}")))?;
-        builder.build().await.map_err(|error| StoreError::Unavailable(format!("no D-Bus session bus: {error}")))
+        builder
+            .build()
+            .await
+            .map_err(|error| StoreError::Unavailable(format!("no D-Bus session bus: {error}")))
     }
 
     async fn open(&self) -> Result<Open, StoreError> {
         let connection = self.connect().await?;
         let service = proxy(&connection, SERVICE_PATH, SERVICE_INTERFACE).await?;
-        let (_, session): (OwnedValue, OwnedObjectPath) =
-            tokio::time::timeout(SERVICE_TIMEOUT, service.call("OpenSession", &("plain", Value::from(""))))
-                .await
-                .map_err(|_| {
-                    StoreError::Unavailable(format!(
-                        "the keyring did not answer within {} s (is its daemon stuck?)",
-                        SERVICE_TIMEOUT.as_secs()
-                    ))
-                })?
-                .map_err(reply_error)?;
-        Ok(Open { connection, service, session, interaction: self.interaction })
+        let (_, session): (OwnedValue, OwnedObjectPath) = tokio::time::timeout(
+            SERVICE_TIMEOUT,
+            service.call("OpenSession", &("plain", Value::from(""))),
+        )
+        .await
+        .map_err(|_| {
+            StoreError::Unavailable(format!(
+                "the keyring did not answer within {} s (is its daemon stuck?)",
+                SERVICE_TIMEOUT.as_secs()
+            ))
+        })?
+        .map_err(reply_error)?;
+        Ok(Open {
+            connection,
+            service,
+            session,
+            interaction: self.interaction,
+        })
     }
 }
 
@@ -118,7 +135,11 @@ struct Open {
 impl Open {
     /// The collection new items go to: the user's default one.
     async fn default_collection(&self) -> Result<OwnedObjectPath, StoreError> {
-        let path: OwnedObjectPath = self.service.call("ReadAlias", &("default",)).await.map_err(reply_error)?;
+        let path: OwnedObjectPath = self
+            .service
+            .call("ReadAlias", &("default",))
+            .await
+            .map_err(reply_error)?;
         if path.as_str() == NOTHING {
             return Err(StoreError::Unavailable(
                 "the keyring has no default collection; create one (Seahorse, KDE Wallet Manager...)".to_string(),
@@ -129,8 +150,11 @@ impl Open {
 
     /// Items with phonia's attributes, unlocked. A locked keyring is unlocked first.
     async fn find(&self) -> Result<Vec<OwnedObjectPath>, StoreError> {
-        let (unlocked, locked): (Vec<OwnedObjectPath>, Vec<OwnedObjectPath>) =
-            self.service.call("SearchItems", &(attributes(),)).await.map_err(reply_error)?;
+        let (unlocked, locked): (Vec<OwnedObjectPath>, Vec<OwnedObjectPath>) = self
+            .service
+            .call("SearchItems", &(attributes(),))
+            .await
+            .map_err(reply_error)?;
         let mut found = unlocked;
         if !locked.is_empty() {
             found.extend(self.unlock(locked).await?);
@@ -140,23 +164,35 @@ impl Open {
 
     /// Unlocks `objects`, asking the user if that takes a prompt and that is allowed. Returns the
     /// ones that are unlocked afterwards.
-    async fn unlock(&self, objects: Vec<OwnedObjectPath>) -> Result<Vec<OwnedObjectPath>, StoreError> {
-        let (unlocked, prompt): (Vec<OwnedObjectPath>, OwnedObjectPath) =
-            self.service.call("Unlock", &(&objects,)).await.map_err(reply_error)?;
+    async fn unlock(
+        &self,
+        objects: Vec<OwnedObjectPath>,
+    ) -> Result<Vec<OwnedObjectPath>, StoreError> {
+        let (unlocked, prompt): (Vec<OwnedObjectPath>, OwnedObjectPath) = self
+            .service
+            .call("Unlock", &(&objects,))
+            .await
+            .map_err(reply_error)?;
         if prompt.as_str() == NOTHING {
             return Ok(unlocked);
         }
         if self.interaction == Interaction::Never {
             return Err(StoreError::Locked(
-                "the keyring is locked and unlocking it needs a prompt, which is not possible here".to_string(),
+                "the keyring is locked and unlocking it needs a prompt, which is not possible here"
+                    .to_string(),
             ));
         }
         self.run_prompt(&prompt).await?;
         // The prompt reports what it unlocked, but asking again is simpler than decoding that.
-        let (unlocked, prompt): (Vec<OwnedObjectPath>, OwnedObjectPath) =
-            self.service.call("Unlock", &(&objects,)).await.map_err(reply_error)?;
+        let (unlocked, prompt): (Vec<OwnedObjectPath>, OwnedObjectPath) = self
+            .service
+            .call("Unlock", &(&objects,))
+            .await
+            .map_err(reply_error)?;
         if prompt.as_str() != NOTHING || unlocked.is_empty() {
-            return Err(StoreError::Locked("the keyring is still locked".to_string()));
+            return Err(StoreError::Locked(
+                "the keyring is still locked".to_string(),
+            ));
         }
         Ok(unlocked)
     }
@@ -167,31 +203,61 @@ impl Open {
             return Ok(());
         }
         if self.interaction == Interaction::Never {
-            return Err(StoreError::Locked("the keyring needs a prompt, which is not possible here".to_string()));
+            return Err(StoreError::Locked(
+                "the keyring needs a prompt, which is not possible here".to_string(),
+            ));
         }
         let prompt = proxy(&self.connection, prompt.as_str(), PROMPT_INTERFACE).await?;
         // Listen before asking, or the answer could arrive first.
-        let mut completed = prompt.receive_signal("Completed").await.map_err(reply_error)?;
-        prompt.call_method("Prompt", &("",)).await.map_err(reply_error)?;
+        let mut completed = prompt
+            .receive_signal("Completed")
+            .await
+            .map_err(reply_error)?;
+        prompt
+            .call_method("Prompt", &("",))
+            .await
+            .map_err(reply_error)?;
         let message = tokio::time::timeout(PROMPT_TIMEOUT, completed.next())
             .await
             .map_err(|_| StoreError::Locked("nobody answered the keyring's prompt".to_string()))?
-            .ok_or_else(|| StoreError::Unavailable("the keyring went away while it was asking".to_string()))?;
-        let (dismissed, _): (bool, OwnedValue) =
-            message.body().deserialize().map_err(|error| StoreError::Other(error.to_string()))?;
-        if dismissed { Err(StoreError::Locked("the keyring's prompt was dismissed".to_string())) } else { Ok(()) }
+            .ok_or_else(|| {
+                StoreError::Unavailable("the keyring went away while it was asking".to_string())
+            })?;
+        let (dismissed, _): (bool, OwnedValue) = message
+            .body()
+            .deserialize()
+            .map_err(|error| StoreError::Other(error.to_string()))?;
+        if dismissed {
+            Err(StoreError::Locked(
+                "the keyring's prompt was dismissed".to_string(),
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     async fn read(&self, item: &OwnedObjectPath) -> Result<StoredSession, StoreError> {
         let item = proxy(&self.connection, item.as_str(), ITEM_INTERFACE).await?;
-        let secret: Secret = item.call("GetSecret", &(&self.session,)).await.map_err(reply_error)?;
-        serde_json::from_slice(&secret.value)
-            .map_err(|error| StoreError::Corrupt(format!("the keyring's item is not a phonia session: {error}")))
+        let secret: Secret = item
+            .call("GetSecret", &(&self.session,))
+            .await
+            .map_err(reply_error)?;
+        serde_json::from_slice(&secret.value).map_err(|error| {
+            StoreError::Corrupt(format!(
+                "the keyring's item is not a phonia session: {error}"
+            ))
+        })
     }
 }
 
-async fn proxy(connection: &Connection, path: &str, interface: &str) -> Result<Proxy<'static>, StoreError> {
-    Proxy::new(connection, SERVICE, path.to_string(), interface.to_string()).await.map_err(reply_error)
+async fn proxy(
+    connection: &Connection,
+    path: &str,
+    interface: &str,
+) -> Result<Proxy<'static>, StoreError> {
+    Proxy::new(connection, SERVICE, path.to_string(), interface.to_string())
+        .await
+        .map_err(reply_error)
 }
 
 /// What identifies phonia's item. The label is for the person looking at it in a keyring manager.
@@ -205,9 +271,12 @@ fn reply_error(error: zbus::Error) -> StoreError {
         _ => None,
     };
     match name {
-        Some("org.freedesktop.DBus.Error.ServiceUnknown" | "org.freedesktop.DBus.Error.NameHasNoOwner") => {
-            StoreError::Unavailable("nothing on the session bus provides org.freedesktop.secrets".to_string())
-        }
+        Some(
+            "org.freedesktop.DBus.Error.ServiceUnknown"
+            | "org.freedesktop.DBus.Error.NameHasNoOwner",
+        ) => StoreError::Unavailable(
+            "nothing on the session bus provides org.freedesktop.secrets".to_string(),
+        ),
         _ => StoreError::Other(format!("the keyring answered: {error}")),
     }
 }
@@ -235,8 +304,13 @@ impl SessionStore for SecretServiceStore {
         Box::pin(async move {
             let open = self.open().await?;
             let collection = open.default_collection().await?;
-            let collection = proxy(&open.connection, collection.as_str(), COLLECTION_INTERFACE).await?;
-            if collection.get_property::<bool>("Locked").await.unwrap_or(false) {
+            let collection =
+                proxy(&open.connection, collection.as_str(), COLLECTION_INTERFACE).await?;
+            if collection
+                .get_property::<bool>("Locked")
+                .await
+                .unwrap_or(false)
+            {
                 let path = OwnedObjectPath::try_from(collection.path().as_str())
                     .map_err(|error| StoreError::Other(error.to_string()))?;
                 open.unlock(vec![path]).await?;
@@ -249,12 +323,15 @@ impl SessionStore for SecretServiceStore {
             let secret = Secret {
                 session: open.session.clone(),
                 parameters: Vec::new(),
-                value: serde_json::to_vec(session).map_err(|error| StoreError::Other(error.to_string()))?,
+                value: serde_json::to_vec(session)
+                    .map_err(|error| StoreError::Other(error.to_string()))?,
                 content_type: "application/json".to_string(),
             };
             // `replace` makes a second login update the item instead of adding another.
-            let (_item, prompt): (OwnedObjectPath, OwnedObjectPath) =
-                collection.call("CreateItem", &(properties, secret, true)).await.map_err(reply_error)?;
+            let (_item, prompt): (OwnedObjectPath, OwnedObjectPath) = collection
+                .call("CreateItem", &(properties, secret, true))
+                .await
+                .map_err(reply_error)?;
             open.run_prompt(&prompt).await
         })
     }
@@ -265,7 +342,8 @@ impl SessionStore for SecretServiceStore {
             let items = open.find().await?;
             for item in &items {
                 let item = proxy(&open.connection, item.as_str(), ITEM_INTERFACE).await?;
-                let prompt: OwnedObjectPath = item.call("Delete", &()).await.map_err(reply_error)?;
+                let prompt: OwnedObjectPath =
+                    item.call("Delete", &()).await.map_err(reply_error)?;
                 open.run_prompt(&prompt).await?;
             }
             Ok(!items.is_empty())
@@ -279,7 +357,7 @@ impl SessionStore for SecretServiceStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::{MigratingStore, FileStore};
+    use crate::auth::{FileStore, MigratingStore};
     use crate::testutil::Bus;
     use std::sync::{Arc, Mutex};
     use zbus::fdo;
@@ -332,17 +410,26 @@ mod tests {
 
     /// Makes the object for an item exist, as a real service would for each item it holds.
     async fn expose(server: &ObjectServer, state: &Shared, id: u32) {
-        let _ = server.at(item_path(id).as_str(), FakeItem(state.clone(), id)).await;
+        let _ = server
+            .at(item_path(id).as_str(), FakeItem(state.clone(), id))
+            .await;
     }
 
     #[interface(name = "org.freedesktop.Secret.Service")]
     impl FakeService {
-        async fn open_session(&self, algorithm: &str, _input: Value<'_>) -> fdo::Result<(OwnedValue, OwnedObjectPath)> {
+        async fn open_session(
+            &self,
+            algorithm: &str,
+            _input: Value<'_>,
+        ) -> fdo::Result<(OwnedValue, OwnedObjectPath)> {
             if algorithm != "plain" {
                 return Err(fdo::Error::NotSupported("only plain".into()));
             }
             let output = OwnedValue::try_from(Value::from("")).unwrap();
-            Ok((output, OwnedObjectPath::try_from("/org/freedesktop/secrets/session/1").unwrap()))
+            Ok((
+                output,
+                OwnedObjectPath::try_from("/org/freedesktop/secrets/session/1").unwrap(),
+            ))
         }
 
         fn read_alias(&self, name: &str) -> OwnedObjectPath {
@@ -363,7 +450,11 @@ mod tests {
                 let ids = state
                     .items
                     .iter()
-                    .filter(|item| attributes.iter().all(|(k, v)| item.attributes.get(k) == Some(v)))
+                    .filter(|item| {
+                        attributes
+                            .iter()
+                            .all(|(k, v)| item.attributes.get(k) == Some(v))
+                    })
                     .map(|item| item.id)
                     .collect();
                 (state.locked, ids)
@@ -373,7 +464,11 @@ mod tests {
                 expose(server, &self.0, id).await;
                 paths.push(item_path(id));
             }
-            if locked { (Vec::new(), paths) } else { (paths, Vec::new()) }
+            if locked {
+                (Vec::new(), paths)
+            } else {
+                (paths, Vec::new())
+            }
         }
 
         fn unlock(&self, objects: Vec<OwnedObjectPath>) -> (Vec<OwnedObjectPath>, OwnedObjectPath) {
@@ -386,9 +481,10 @@ mod tests {
                     state.locked = false;
                     (objects, nothing())
                 }
-                Unlocking::Prompt | Unlocking::DismissedPrompt => {
-                    (Vec::new(), OwnedObjectPath::try_from("/org/freedesktop/secrets/prompt/1").unwrap())
-                }
+                Unlocking::Prompt | Unlocking::DismissedPrompt => (
+                    Vec::new(),
+                    OwnedObjectPath::try_from("/org/freedesktop/secrets/prompt/1").unwrap(),
+                ),
             }
         }
     }
@@ -407,9 +503,14 @@ mod tests {
             replace: bool,
             #[zbus(object_server)] server: &ObjectServer,
         ) -> (OwnedObjectPath, OwnedObjectPath) {
-            let attributes: HashMap<String, String> =
-                properties[ATTRIBUTES_PROPERTY].clone().try_into().expect("attributes are a{ss}");
-            let label: String = properties[LABEL_PROPERTY].clone().try_into().expect("the label is a string");
+            let attributes: HashMap<String, String> = properties[ATTRIBUTES_PROPERTY]
+                .clone()
+                .try_into()
+                .expect("attributes are a{ss}");
+            let label: String = properties[LABEL_PROPERTY]
+                .clone()
+                .try_into()
+                .expect("the label is a string");
             let id = {
                 let mut state = self.0.lock().unwrap();
                 if replace {
@@ -435,7 +536,11 @@ mod tests {
     impl FakeItem {
         fn get_secret(&self, session: OwnedObjectPath) -> Secret {
             let state = self.0.lock().unwrap();
-            let item = state.items.iter().find(|item| item.id == self.1).expect("the item exists");
+            let item = state
+                .items
+                .iter()
+                .find(|item| item.id == self.1)
+                .expect("the item exists");
             Secret {
                 session,
                 parameters: Vec::new(),
@@ -445,7 +550,11 @@ mod tests {
         }
 
         fn delete(&self) -> OwnedObjectPath {
-            self.0.lock().unwrap().items.retain(|item| item.id != self.1);
+            self.0
+                .lock()
+                .unwrap()
+                .items
+                .retain(|item| item.id != self.1);
             nothing()
         }
     }
@@ -457,11 +566,17 @@ mod tests {
             if !dismissed {
                 self.0.lock().unwrap().locked = false;
             }
-            Self::completed(&emitter, dismissed, Value::from("")).await.unwrap();
+            Self::completed(&emitter, dismissed, Value::from(""))
+                .await
+                .unwrap();
         }
 
         #[zbus(signal)]
-        async fn completed(emitter: &SignalEmitter<'_>, dismissed: bool, result: Value<'_>) -> zbus::Result<()>;
+        async fn completed(
+            emitter: &SignalEmitter<'_>,
+            dismissed: bool,
+            result: Value<'_>,
+        ) -> zbus::Result<()>;
     }
 
     /// A private bus with the fake service on it. Keep it alive for the test.
@@ -483,14 +598,21 @@ mod tests {
                 .unwrap()
                 .serve_at(COLLECTION, FakeCollection(state.clone()))
                 .unwrap()
-                .serve_at("/org/freedesktop/secrets/prompt/1", FakePrompt(state.clone()))
+                .serve_at(
+                    "/org/freedesktop/secrets/prompt/1",
+                    FakePrompt(state.clone()),
+                )
                 .unwrap()
                 .name(SERVICE)
                 .unwrap()
                 .build()
                 .await
                 .unwrap();
-            Fake { state, bus, _service: service }
+            Fake {
+                state,
+                bus,
+                _service: service,
+            }
         }
 
         fn store(&self, interaction: Interaction) -> SecretServiceStore {
@@ -499,7 +621,12 @@ mod tests {
     }
 
     fn session() -> StoredSession {
-        StoredSession { v: 1, refresh_token: "refresh-secret".into(), client_id: "id".into(), client_secret: "s".into() }
+        StoredSession {
+            v: 1,
+            refresh_token: "refresh-secret".into(),
+            client_id: "id".into(),
+            client_secret: "s".into(),
+        }
     }
 
     #[tokio::test]
@@ -511,7 +638,10 @@ mod tests {
 
         store.save(&session()).await.unwrap();
         assert_eq!(store.load().await.unwrap(), Some(session()));
-        let newer = StoredSession { refresh_token: "newer".into(), ..session() };
+        let newer = StoredSession {
+            refresh_token: "newer".into(),
+            ..session()
+        };
         store.save(&newer).await.unwrap();
         assert_eq!(store.load().await.unwrap(), Some(newer));
 
@@ -519,7 +649,13 @@ mod tests {
             let state = fake.state.lock().unwrap();
             assert_eq!(state.items.len(), 1, "a second save replaces the item");
             let item = &state.items[0];
-            assert_eq!(item.attributes, HashMap::from([("application".into(), "phonia".into()), ("service".into(), "tidal".into())]));
+            assert_eq!(
+                item.attributes,
+                HashMap::from([
+                    ("application".into(), "phonia".into()),
+                    ("service".into(), "tidal".into())
+                ])
+            );
             assert_eq!(item.content_type, "application/json");
             assert!(item.label.contains("phonia"));
         }
@@ -538,7 +674,10 @@ mod tests {
             state.items.push(Stored {
                 id: 1,
                 label: "phonia".into(),
-                attributes: HashMap::from([("application".into(), "phonia".into()), ("service".into(), "tidal".into())]),
+                attributes: HashMap::from([
+                    ("application".into(), "phonia".into()),
+                    ("service".into(), "tidal".into()),
+                ]),
                 value: serde_json::to_vec(&session()).unwrap(),
                 content_type: "application/json".into(),
             });
@@ -549,7 +688,10 @@ mod tests {
         let error = fake.store(Interaction::Never).load().await.unwrap_err();
         assert!(matches!(error, StoreError::Locked(_)), "{error}");
 
-        assert_eq!(fake.store(Interaction::Allow).load().await.unwrap(), Some(session()));
+        assert_eq!(
+            fake.store(Interaction::Allow).load().await.unwrap(),
+            Some(session())
+        );
         assert!(!fake.state.lock().unwrap().locked, "the prompt unlocked it");
     }
 
@@ -561,9 +703,16 @@ mod tests {
             state.unlocking = Unlocking::DismissedPrompt;
         })
         .await;
-        let error = fake.store(Interaction::Allow).save(&session()).await.unwrap_err();
+        let error = fake
+            .store(Interaction::Allow)
+            .save(&session())
+            .await
+            .unwrap_err();
         assert!(matches!(error, StoreError::Locked(_)), "{error}");
-        assert!(fake.state.lock().unwrap().items.is_empty(), "nothing was written");
+        assert!(
+            fake.state.lock().unwrap().items.is_empty(),
+            "nothing was written"
+        );
     }
 
     #[tokio::test]
@@ -574,7 +723,10 @@ mod tests {
             state.unlocking = Unlocking::Prompt;
         })
         .await;
-        fake.store(Interaction::Allow).save(&session()).await.unwrap();
+        fake.store(Interaction::Allow)
+            .save(&session())
+            .await
+            .unwrap();
         assert_eq!(fake.state.lock().unwrap().items.len(), 1);
     }
 
@@ -582,8 +734,15 @@ mod tests {
     #[ignore = "needs dbus-daemon"]
     async fn a_keyring_without_a_default_collection_says_so() {
         let fake = Fake::start(|state| state.no_default = true).await;
-        let error = fake.store(Interaction::Never).save(&session()).await.unwrap_err();
-        assert!(matches!(&error, StoreError::Unavailable(why) if why.contains("default collection")), "{error}");
+        let error = fake
+            .store(Interaction::Never)
+            .save(&session())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, StoreError::Unavailable(why) if why.contains("default collection")),
+            "{error}"
+        );
     }
 
     #[tokio::test]
@@ -597,8 +756,12 @@ mod tests {
 
     #[tokio::test]
     async fn no_bus_at_all_is_unavailable() {
-        let store = SecretServiceStore::new(Interaction::Never).on_bus("unix:path=/nonexistent/phonia-bus");
-        assert!(matches!(store.load().await, Err(StoreError::Unavailable(_))));
+        let store =
+            SecretServiceStore::new(Interaction::Never).on_bus("unix:path=/nonexistent/phonia-bus");
+        assert!(matches!(
+            store.load().await,
+            Err(StoreError::Unavailable(_))
+        ));
     }
 
     #[tokio::test]
@@ -608,7 +771,10 @@ mod tests {
             state.items.push(Stored {
                 id: 1,
                 label: "x".into(),
-                attributes: HashMap::from([("application".into(), "phonia".into()), ("service".into(), "tidal".into())]),
+                attributes: HashMap::from([
+                    ("application".into(), "phonia".into()),
+                    ("service".into(), "tidal".into()),
+                ]),
                 value: b"not json".to_vec(),
                 content_type: "text/plain".into(),
             });
@@ -629,10 +795,17 @@ mod tests {
         let path = dir.join("session.json");
         std::fs::write(&path, serde_json::to_string(&session()).unwrap()).unwrap();
 
-        let store = MigratingStore::new(Arc::new(fake.store(Interaction::Never)), FileStore::new(&path));
+        let store = MigratingStore::new(
+            Arc::new(fake.store(Interaction::Never)),
+            FileStore::new(&path),
+        );
         assert_eq!(store.load().await.unwrap(), Some(session()));
         assert!(!path.exists(), "the file is gone");
-        assert_eq!(fake.state.lock().unwrap().items.len(), 1, "and the keyring has the session");
+        assert_eq!(
+            fake.state.lock().unwrap().items.len(),
+            1,
+            "and the keyring has the session"
+        );
     }
 
     #[tokio::test]
@@ -640,7 +813,10 @@ mod tests {
     async fn the_provider_of_the_service_is_named() {
         let fake = Fake::start(|_| {}).await;
         let provider = fake.store(Interaction::Never).provider().await;
-        assert!(provider.is_some(), "the process behind the bus name is found");
+        assert!(
+            provider.is_some(),
+            "the process behind the bus name is found"
+        );
     }
 
     // Keeps the compiler from flagging the helper used only by some builds.

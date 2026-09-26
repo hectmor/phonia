@@ -7,10 +7,10 @@
 //! itself and hands the XML text to `parse_mpd` here instead of relying on that type.
 
 use anyhow::{Context, Result, anyhow, bail};
-use std::time::Duration;
 use quick_xml::Reader;
 use quick_xml::XmlVersion;
 use quick_xml::events::Event;
+use std::time::Duration;
 
 /// Decodes an attribute's raw bytes as UTF-8 and unescapes XML entities (`&amp;` -> `&`, etc.).
 /// TIDAL's manifests routinely put pre-signed CDN URLs (with `&`-separated query parameters,
@@ -74,7 +74,8 @@ impl DashSegments {
     /// Builds the absolute URL for media segment `number` (as used by `SegmentTemplate`'s
     /// `$Number$` substitution).
     pub fn segment_url(&self, number: u32) -> String {
-        self.media_url_template.replace("$Number$", &number.to_string())
+        self.media_url_template
+            .replace("$Number$", &number.to_string())
     }
 
     /// The inclusive range of segment numbers to download, when the count is known.
@@ -108,7 +109,9 @@ impl DashSegments {
                 if ticks >= *end {
                     return None;
                 }
-                let index = starts.partition_point(|start| *start <= ticks).saturating_sub(1);
+                let index = starts
+                    .partition_point(|start| *start <= ticks)
+                    .saturating_sub(1);
                 (u32::try_from(index).ok()?, *starts.get(index)?)
             }
             SegmentTiming::Constant { ticks: length } => {
@@ -132,7 +135,10 @@ impl DashSegments {
 
 fn ticks_to_duration(ticks: u64, timescale: u64) -> Duration {
     let timescale = timescale.max(1);
-    Duration::new(ticks / timescale, ((ticks % timescale) as u128 * 1_000_000_000 / timescale as u128) as u32)
+    Duration::new(
+        ticks / timescale,
+        ((ticks % timescale) as u128 * 1_000_000_000 / timescale as u128) as u32,
+    )
 }
 
 /// Rounds to the nearest tick: `ticks_to_duration` truncates to whole nanoseconds, so truncating
@@ -153,7 +159,10 @@ struct TimelineEntry {
 
 /// Turns a timeline into segment start times and the end time, minus `presentation_time_offset`.
 /// `None` when an entry repeats without a bound, which needs the period length to expand.
-fn flatten_timeline(entries: &[TimelineEntry], presentation_time_offset: u64) -> Option<(Vec<u64>, u64)> {
+fn flatten_timeline(
+    entries: &[TimelineEntry],
+    presentation_time_offset: u64,
+) -> Option<(Vec<u64>, u64)> {
     let (mut starts, mut cursor) = (Vec::new(), 0u64);
     for entry in entries {
         if entry.r < 0 {
@@ -251,59 +260,61 @@ pub fn parse_mpd(xml: &str) -> Result<DashSegments> {
             .context("error reading the MPD manifest XML")?
         {
             Event::Eof => break,
-            Event::Start(e) | Event::Empty(e) => {
-                match e.name().as_ref() {
-                    b"MPD" => {
-                        for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"mediaPresentationDuration" {
-                                media_presentation_duration = Some(attr_value(&a)?);
-                            }
+            Event::Start(e) | Event::Empty(e) => match e.name().as_ref() {
+                b"MPD" => {
+                    for a in e.attributes().flatten() {
+                        if a.key.as_ref() == b"mediaPresentationDuration" {
+                            media_presentation_duration = Some(attr_value(&a)?);
                         }
                     }
-                    b"Representation" => {
-                        for a in e.attributes().flatten() {
-                            if a.key.as_ref() == b"codecs" {
-                                codecs = Some(attr_value(&a)?);
-                            }
-                        }
-                    }
-                    b"SegmentTemplate" => {
-                        for a in e.attributes().flatten() {
-                            match a.key.as_ref() {
-                                b"initialization" => init_url = Some(attr_value(&a)?),
-                                b"media" => media_url = Some(attr_value(&a)?),
-                                b"timescale" => timescale = attr_value(&a)?.parse().ok(),
-                                b"duration" => duration = attr_value(&a)?.parse().ok(),
-                                b"startNumber" => start_number = attr_value(&a)?.parse().unwrap_or(1),
-                                b"presentationTimeOffset" => {
-                                    presentation_time_offset = attr_value(&a)?.parse().unwrap_or(0)
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    b"SegmentTimeline" => {
-                        in_segment_timeline = true;
-                        has_timeline = true;
-                    }
-                    b"S" if in_segment_timeline => {
-                        let mut entry = TimelineEntry { t: None, d: 0, r: 0 };
-                        for a in e.attributes().flatten() {
-                            match a.key.as_ref() {
-                                b"t" => entry.t = attr_value(&a)?.parse().ok(),
-                                b"d" => entry.d = attr_value(&a)?.parse().unwrap_or(0),
-                                b"r" => entry.r = attr_value(&a)?.parse().unwrap_or(0),
-                                _ => {}
-                            }
-                        }
-                        timeline.push(entry);
-                    }
-                    b"BaseURL" => {
-                        pending_base_url = true;
-                    }
-                    _ => {}
                 }
-            }
+                b"Representation" => {
+                    for a in e.attributes().flatten() {
+                        if a.key.as_ref() == b"codecs" {
+                            codecs = Some(attr_value(&a)?);
+                        }
+                    }
+                }
+                b"SegmentTemplate" => {
+                    for a in e.attributes().flatten() {
+                        match a.key.as_ref() {
+                            b"initialization" => init_url = Some(attr_value(&a)?),
+                            b"media" => media_url = Some(attr_value(&a)?),
+                            b"timescale" => timescale = attr_value(&a)?.parse().ok(),
+                            b"duration" => duration = attr_value(&a)?.parse().ok(),
+                            b"startNumber" => start_number = attr_value(&a)?.parse().unwrap_or(1),
+                            b"presentationTimeOffset" => {
+                                presentation_time_offset = attr_value(&a)?.parse().unwrap_or(0)
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                b"SegmentTimeline" => {
+                    in_segment_timeline = true;
+                    has_timeline = true;
+                }
+                b"S" if in_segment_timeline => {
+                    let mut entry = TimelineEntry {
+                        t: None,
+                        d: 0,
+                        r: 0,
+                    };
+                    for a in e.attributes().flatten() {
+                        match a.key.as_ref() {
+                            b"t" => entry.t = attr_value(&a)?.parse().ok(),
+                            b"d" => entry.d = attr_value(&a)?.parse().unwrap_or(0),
+                            b"r" => entry.r = attr_value(&a)?.parse().unwrap_or(0),
+                            _ => {}
+                        }
+                    }
+                    timeline.push(entry);
+                }
+                b"BaseURL" => {
+                    pending_base_url = true;
+                }
+                _ => {}
+            },
             Event::Text(t) => {
                 if pending_base_url {
                     // Entities (e.g. `&amp;` in a pre-signed URL's query string) arrive as
@@ -337,29 +348,45 @@ pub fn parse_mpd(xml: &str) -> Result<DashSegments> {
         buf.clear();
     }
 
-    let init_url = init_url.ok_or_else(|| anyhow!("the MPD manifest has no <SegmentTemplate initialization=...>"))?;
-    let media_url = media_url.ok_or_else(|| anyhow!("the MPD manifest has no <SegmentTemplate media=...>"))?;
+    let init_url = init_url
+        .ok_or_else(|| anyhow!("the MPD manifest has no <SegmentTemplate initialization=...>"))?;
+    let media_url =
+        media_url.ok_or_else(|| anyhow!("the MPD manifest has no <SegmentTemplate media=...>"))?;
 
     let count_from_duration = |segment_ticks: u64| -> Result<Option<u32>> {
-        let (Some(mpd_duration), Some(timescale)) = (media_presentation_duration.as_deref(), timescale) else {
+        let (Some(mpd_duration), Some(timescale)) =
+            (media_presentation_duration.as_deref(), timescale)
+        else {
             return Ok(None);
         };
         let total_secs = parse_iso8601_duration_secs(mpd_duration)?;
-        Ok(Some((total_secs * timescale as f64 / segment_ticks as f64).ceil() as u32))
+        Ok(Some(
+            (total_secs * timescale as f64 / segment_ticks as f64).ceil() as u32,
+        ))
     };
 
-    let (segment_count, timing) = match (has_timeline, flatten_timeline(&timeline, presentation_time_offset)) {
+    let (segment_count, timing) = match (
+        has_timeline,
+        flatten_timeline(&timeline, presentation_time_offset),
+    ) {
         (true, Some((starts, end))) => {
-            let count = u32::try_from(starts.len()).context("the <SegmentTimeline> segment count is too large")?;
+            let count = u32::try_from(starts.len())
+                .context("the <SegmentTimeline> segment count is too large")?;
             (Some(count), SegmentTiming::Explicit { starts, end })
         }
         // An unbounded repeat: every segment lasts the entry's `d`, and the period says how many.
         (true, None) => match timeline.first().map(|entry| entry.d).filter(|d| *d > 0) {
-            Some(ticks) => (count_from_duration(ticks)?, SegmentTiming::Constant { ticks }),
+            Some(ticks) => (
+                count_from_duration(ticks)?,
+                SegmentTiming::Constant { ticks },
+            ),
             None => (None, SegmentTiming::Unknown),
         },
         (false, _) => match duration.filter(|d| *d > 0) {
-            Some(ticks) => (count_from_duration(ticks)?, SegmentTiming::Constant { ticks }),
+            Some(ticks) => (
+                count_from_duration(ticks)?,
+                SegmentTiming::Constant { ticks },
+            ),
             None => (None, SegmentTiming::Unknown),
         },
     };
@@ -435,7 +462,10 @@ mod tests {
             </MPD>
         "#;
         let parsed = parse_mpd(xml).expect("should parse");
-        assert_eq!(parsed.init_url, "https://cdn.example.com/track/?a=1&b=2/init.mp4?x=1&y=2");
+        assert_eq!(
+            parsed.init_url,
+            "https://cdn.example.com/track/?a=1&b=2/init.mp4?x=1&y=2"
+        );
         assert_eq!(
             parsed.media_url_template,
             "https://cdn.example.com/track/?a=1&b=2/chunk-$Number$.m4s?x=1&y=2"
@@ -461,7 +491,10 @@ mod tests {
             "https://sp-ad-cf.audio.tidal.com/mediatracks/abc/chunk-$Number$.m4s"
         );
         assert_eq!(parsed.start_number, 1);
-        assert_eq!(parsed.segment_url(3), "https://sp-ad-cf.audio.tidal.com/mediatracks/abc/chunk-3.m4s");
+        assert_eq!(
+            parsed.segment_url(3),
+            "https://sp-ad-cf.audio.tidal.com/mediatracks/abc/chunk-3.m4s"
+        );
         assert_eq!(parsed.codecs.as_deref(), Some("flac"));
     }
 
@@ -548,7 +581,10 @@ mod tests {
     fn segment_for_time_finds_the_containing_segment() {
         let dash = parse_mpd(MPD_TIDAL_LIKE).unwrap();
         let first = dash.segment_for_time(Duration::ZERO).unwrap();
-        assert_eq!((first.number, first.index, first.start), (1, 0, Duration::ZERO));
+        assert_eq!(
+            (first.number, first.index, first.start),
+            (1, 0, Duration::ZERO)
+        );
 
         // 30 s is 7 full segments of 3.9893 s in, so it falls in segment 8 (index 7).
         let mid = dash.segment_for_time(at(30.0)).unwrap();
@@ -567,7 +603,12 @@ mod tests {
         // into the previous segment.
         let boundary = ticks_to_duration(765_952, 192_000);
         assert_eq!(dash.segment_for_time(boundary).unwrap().number, 2);
-        assert_eq!(dash.segment_for_time(boundary - Duration::from_millis(1)).unwrap().number, 1);
+        assert_eq!(
+            dash.segment_for_time(boundary - Duration::from_millis(1))
+                .unwrap()
+                .number,
+            1
+        );
     }
 
     #[test]
@@ -591,7 +632,11 @@ mod tests {
         let last = dash.segment_for_time(at(205.0)).unwrap();
         assert_eq!((last.number, last.start), (103, at(204.0)));
 
-        assert_eq!(dash.segment_for_time(at(205.2)), None, "past the end of the last, partial, segment");
+        assert_eq!(
+            dash.segment_for_time(at(205.2)),
+            None,
+            "past the end of the last, partial, segment"
+        );
     }
 
     #[test]
@@ -603,12 +648,22 @@ mod tests {
               </SegmentTemplate>
             </Representation></AdaptationSet></Period></MPD>"#;
         let dash = parse_mpd(xml).unwrap();
-        assert_eq!(dash.timing, SegmentTiming::Explicit { starts: vec![0, 100, 500], end: 600 });
+        assert_eq!(
+            dash.timing,
+            SegmentTiming::Explicit {
+                starts: vec![0, 100, 500],
+                end: 600
+            }
+        );
         assert_eq!(dash.segment_count, Some(3));
 
         assert_eq!(dash.segment_for_time(at(1.5)).unwrap().index, 1);
         let in_the_gap = dash.segment_for_time(at(3.0)).unwrap();
-        assert_eq!((in_the_gap.index, in_the_gap.start), (1, at(1.0)), "a gap belongs to the segment before it");
+        assert_eq!(
+            (in_the_gap.index, in_the_gap.start),
+            (1, at(1.0)),
+            "a gap belongs to the segment before it"
+        );
         assert_eq!(dash.segment_for_time(at(5.0)).unwrap().index, 2);
         assert_eq!(dash.segment_for_time(at(6.0)), None);
     }
@@ -638,7 +693,13 @@ mod tests {
               </SegmentTemplate>
             </Representation></AdaptationSet></Period></MPD>"#;
         let dash = parse_mpd(xml).unwrap();
-        assert_eq!(dash.timing, SegmentTiming::Explicit { starts: vec![0, 100], end: 200 });
+        assert_eq!(
+            dash.timing,
+            SegmentTiming::Explicit {
+                starts: vec![0, 100],
+                end: 200
+            }
+        );
         assert_eq!(dash.segment_for_time(at(1.5)).unwrap().index, 1);
     }
 

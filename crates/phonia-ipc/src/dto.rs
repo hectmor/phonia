@@ -117,7 +117,9 @@ pub enum Output {
     Open,
     /// Handed back to the desktop while a track stays loaded; resuming takes it again. `by` names
     /// the program that asked for it, if one did.
-    Released { by: Option<String> },
+    Released {
+        by: Option<String>,
+    },
 }
 
 /// Why the daemon handed the audio device back.

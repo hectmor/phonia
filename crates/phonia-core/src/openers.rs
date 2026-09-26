@@ -42,7 +42,10 @@ impl TidalSession {
         {
             let mut guard = self.client.write().await;
             if guard.is_none() {
-                let store = self.store.as_deref().ok_or_else(|| anyhow!("there is no TIDAL session"))?;
+                let store = self
+                    .store
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("there is no TIDAL session"))?;
                 *guard = Some(auth::load_client(store).await?);
             }
             let client = guard.as_mut().expect("loaded just above");
@@ -52,7 +55,9 @@ impl TidalSession {
                 .map_err(|error| anyhow!("refreshing the TIDAL access token: {error}"))?;
         }
         Ok(RwLockReadGuard::map(self.client.read().await, |client| {
-            client.as_ref().expect("a loaded client is never taken away")
+            client
+                .as_ref()
+                .expect("a loaded client is never taken away")
         }))
     }
 }
@@ -124,7 +129,9 @@ pub enum DescribeError {
 impl fmt::Display for DescribeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DescribeError::Invalid(reason) | DescribeError::Unavailable(reason) => f.write_str(reason),
+            DescribeError::Invalid(reason) | DescribeError::Unavailable(reason) => {
+                f.write_str(reason)
+            }
         }
     }
 }
@@ -144,10 +151,13 @@ impl FileOpener {
             let file = std::fs::File::open(&path)
                 .map_err(|error| DescribeError::Invalid(format!("opening {path:?}: {error}")))?;
             let extension = path.extension().and_then(|ext| ext.to_str());
-            let decoder = Decoder::open(file, extension)
-                .map_err(|error| DescribeError::Invalid(format!("{path:?} can't be played: {error:#}")))?;
+            let decoder = Decoder::open(file, extension).map_err(|error| {
+                DescribeError::Invalid(format!("{path:?} can't be played: {error:#}"))
+            })?;
             Ok(SourceInfo {
-                title: path.file_name().map(|name| name.to_string_lossy().into_owned()),
+                title: path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned()),
                 duration: decoder.duration(),
             })
         })
@@ -163,12 +173,23 @@ impl TrackOpener for FileOpener {
             let file = std::fs::File::open(&path).with_context(|| format!("opening {path:?}"))?;
             let meta = TrackMeta {
                 track,
-                title: path.file_name().map(|name| name.to_string_lossy().into_owned()),
+                title: path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned()),
                 duration: None,
             };
-            let extension = path.extension().and_then(|ext| ext.to_str()).map(str::to_string);
-            Ok(LoadedTrack::new(meta, TrackMedia::Encoded { source: Box::new(file), extension })
-                .seekable_in_place())
+            let extension = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(str::to_string);
+            Ok(LoadedTrack::new(
+                meta,
+                TrackMedia::Encoded {
+                    source: Box::new(file),
+                    extension,
+                },
+            )
+            .seekable_in_place())
         })
     }
 }
@@ -186,14 +207,36 @@ pub struct TidalOpener {
 impl TidalOpener {
     /// With a client that is already logged in.
     pub fn new(http: reqwest::Client, client: TidalClient, quality: AudioQuality) -> Self {
-        let session = TidalSession { client: RwLock::new(Some(client)), store: None };
-        Self { http, session: Arc::new(session), quality, print_info: false, save_to: Mutex::new(None) }
+        let session = TidalSession {
+            client: RwLock::new(Some(client)),
+            store: None,
+        };
+        Self {
+            http,
+            session: Arc::new(session),
+            quality,
+            print_info: false,
+            save_to: Mutex::new(None),
+        }
     }
 
     /// Logging in from `store` the first time TIDAL is used, not now.
-    pub fn from_store(http: reqwest::Client, store: Arc<dyn auth::SessionStore>, quality: AudioQuality) -> Self {
-        let session = TidalSession { client: RwLock::new(None), store: Some(store) };
-        Self { http, session: Arc::new(session), quality, print_info: false, save_to: Mutex::new(None) }
+    pub fn from_store(
+        http: reqwest::Client,
+        store: Arc<dyn auth::SessionStore>,
+        quality: AudioQuality,
+    ) -> Self {
+        let session = TidalSession {
+            client: RwLock::new(None),
+            store: Some(store),
+        };
+        Self {
+            http,
+            session: Arc::new(session),
+            quality,
+            print_info: false,
+            save_to: Mutex::new(None),
+        }
     }
 
     /// Name and length of a TIDAL track, without streaming it.
@@ -253,7 +296,11 @@ impl TrackOpener for TidalOpener {
         let quality = self.quality.clone();
         let print_info = self.print_info;
         // Only the opening from the start is copied: reopening for a seek would append a piece.
-        let tee = if at.is_zero() { self.save_to.lock().unwrap().take() } else { None };
+        let tee = if at.is_zero() {
+            self.save_to.lock().unwrap().take()
+        } else {
+            None
+        };
 
         Box::pin(async move {
             let info = {
@@ -264,7 +311,11 @@ impl TrackOpener for TidalOpener {
                 tidal::print_playback_info(&info);
             }
 
-            let mut meta = TrackMeta { track, title: None, duration: None };
+            let mut meta = TrackMeta {
+                track,
+                title: None,
+                duration: None,
+            };
             Ok(match info.manifest {
                 ManifestKind::Dash(dash) => {
                     // Mp4 fragments declare no length of their own; the manifest has it.
@@ -273,14 +324,27 @@ impl TrackOpener for TidalOpener {
                     let source = stream::open_dash_from(&http, &dash, opening.first_segment, tee);
                     let track = LoadedTrack::new(
                         meta,
-                        TrackMedia::Encoded { source: Box::new(source), extension: Some("mp4".into()) },
+                        TrackMedia::Encoded {
+                            source: Box::new(source),
+                            extension: Some("mp4".into()),
+                        },
                     );
-                    LoadedTrack { seek: opening.seek, ..track }.starting_at(opening.start)
+                    LoadedTrack {
+                        seek: opening.seek,
+                        ..track
+                    }
+                    .starting_at(opening.start)
                 }
                 ManifestKind::Json { url, .. } => {
                     let source = stream::open_url(&http, &url, tee);
-                    LoadedTrack::new(meta, TrackMedia::Encoded { source: Box::new(source), extension: None })
-                        .forward_only()
+                    LoadedTrack::new(
+                        meta,
+                        TrackMedia::Encoded {
+                            source: Box::new(source),
+                            extension: None,
+                        },
+                    )
+                    .forward_only()
                 }
             })
         })
@@ -316,7 +380,9 @@ impl TrackOpener for DispatchOpener {
     fn open(&self, track: TrackRef, at: Duration) -> BoxFuture<'static, Result<LoadedTrack>> {
         match Source::parse(&track.0) {
             Err(error) => Box::pin(async move { Err(error) }),
-            Ok(Source::File(path)) => FileOpener.open(TrackRef(path.to_string_lossy().into_owned()), at),
+            Ok(Source::File(path)) => {
+                FileOpener.open(TrackRef(path.to_string_lossy().into_owned()), at)
+            }
             Ok(Source::Tidal(id)) => match &self.tidal {
                 Some(tidal) => tidal.open(TrackRef(id), at),
                 None => Box::pin(async { Err(anyhow!(TIDAL_UNAVAILABLE)) }),
@@ -339,11 +405,23 @@ fn dash_opening(dash: &DashSegments, at: Duration) -> DashOpening {
     // Without segment timing there's no way to find a position, so the stream is only good for
     // reading forward.
     if dash.timing == SegmentTiming::Unknown {
-        return DashOpening { first_segment: dash.start_number, start: Duration::ZERO, seek: SeekMode::ForwardOnly };
+        return DashOpening {
+            first_segment: dash.start_number,
+            start: Duration::ZERO,
+            seek: SeekMode::ForwardOnly,
+        };
     }
     match dash.segment_for_time(at).filter(|_| !at.is_zero()) {
-        Some(segment) => DashOpening { first_segment: segment.number, start: segment.start, seek: SeekMode::Reopen },
-        None => DashOpening { first_segment: dash.start_number, start: Duration::ZERO, seek: SeekMode::Reopen },
+        Some(segment) => DashOpening {
+            first_segment: segment.number,
+            start: segment.start,
+            seek: SeekMode::Reopen,
+        },
+        None => DashOpening {
+            first_segment: dash.start_number,
+            start: Duration::ZERO,
+            seek: SeekMode::Reopen,
+        },
     }
 }
 
@@ -352,13 +430,20 @@ mod tests {
     use crate::auth::{MemoryStore, StoredSession};
 
     fn session_with(store: Option<Arc<MemoryStore>>) -> TidalSession {
-        TidalSession { client: RwLock::new(None), store: store.map(|store| store as Arc<dyn auth::SessionStore>) }
+        TidalSession {
+            client: RwLock::new(None),
+            store: store.map(|store| store as Arc<dyn auth::SessionStore>),
+        }
     }
 
     #[tokio::test]
     async fn without_a_login_the_first_use_says_to_log_in() {
         let store = Arc::new(MemoryStore::new());
-        let error = session_with(Some(store.clone())).fresh().await.err().unwrap();
+        let error = session_with(Some(store.clone()))
+            .fresh()
+            .await
+            .err()
+            .unwrap();
         assert!(format!("{error:#}").contains("phonia login"), "{error:#}");
         assert_eq!(store.loads(), 1, "the store is asked when TIDAL is used");
     }
@@ -370,13 +455,29 @@ mod tests {
         assert!(session.fresh().await.is_err());
 
         // `phonia login` runs in another process, writing to the same store.
-        let stored = StoredSession { v: 1, refresh_token: "r".into(), client_id: "c".into(), client_secret: "s".into() };
-        crate::auth::SessionStore::save(&*store, &stored).await.unwrap();
+        let stored = StoredSession {
+            v: 1,
+            refresh_token: "r".into(),
+            client_id: "c".into(),
+            client_secret: "s".into(),
+        };
+        crate::auth::SessionStore::save(&*store, &stored)
+            .await
+            .unwrap();
         // It loads now; refreshing then needs TIDAL, which is not asked in a test.
         let mut guard = session.client.write().await;
         assert!(guard.is_none());
         *guard = Some(auth::load_client(&*store).await.unwrap());
-        assert!(guard.as_ref().unwrap().session.auth.refresh_token.as_deref() == Some("r"));
+        assert!(
+            guard
+                .as_ref()
+                .unwrap()
+                .session
+                .auth
+                .refresh_token
+                .as_deref()
+                == Some("r")
+        );
     }
 
     #[tokio::test]
@@ -411,7 +512,11 @@ mod tests {
         let dash = parse_mpd(TIDAL_LIKE).unwrap();
         assert_eq!(
             dash_opening(&dash, Duration::ZERO),
-            DashOpening { first_segment: 1, start: Duration::ZERO, seek: SeekMode::Reopen }
+            DashOpening {
+                first_segment: 1,
+                start: Duration::ZERO,
+                seek: SeekMode::Reopen
+            }
         );
     }
 
@@ -422,7 +527,10 @@ mod tests {
         // 30 s falls in the eighth 3.989 s segment.
         assert_eq!((opening.first_segment, opening.seek), (8, SeekMode::Reopen));
         assert!(opening.start <= Duration::from_secs(30));
-        assert!(Duration::from_secs(30) - opening.start < Duration::from_secs(4), "the rest is skipped by the engine");
+        assert!(
+            Duration::from_secs(30) - opening.start < Duration::from_secs(4),
+            "the rest is skipped by the engine"
+        );
     }
 
     #[test]
@@ -433,12 +541,17 @@ mod tests {
         let dash = parse_mpd(xml).unwrap();
         assert_eq!(
             dash_opening(&dash, Duration::from_secs(30)),
-            DashOpening { first_segment: 1, start: Duration::ZERO, seek: SeekMode::ForwardOnly }
+            DashOpening {
+                first_segment: 1,
+                start: Duration::ZERO,
+                seek: SeekMode::ForwardOnly
+            }
         );
     }
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("phonia-openers-test-{}-{name}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("phonia-openers-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -452,12 +565,18 @@ mod tests {
 
     /// Runs a future to completion on a throwaway runtime.
     fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
-        tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(future)
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(future)
     }
 
     #[test]
     fn file_opener_reports_a_missing_file_clearly() {
-        let error = block_on(FileOpener.open(TrackRef("/no/such/file.flac".into()), Duration::ZERO)).err().unwrap();
+        let error =
+            block_on(FileOpener.open(TrackRef("/no/such/file.flac".into()), Duration::ZERO))
+                .err()
+                .unwrap();
         assert!(error.to_string().contains("opening"), "{error}");
     }
 
@@ -465,7 +584,11 @@ mod tests {
     fn file_opener_opens_a_file_that_can_be_repositioned_and_names_it() {
         let dir = temp_dir("open");
         let path = write_wav(&dir, "one.wav", 100);
-        let loaded = block_on(FileOpener.open(TrackRef(path.to_string_lossy().into_owned()), Duration::ZERO)).unwrap();
+        let loaded = block_on(FileOpener.open(
+            TrackRef(path.to_string_lossy().into_owned()),
+            Duration::ZERO,
+        ))
+        .unwrap();
         assert_eq!(loaded.seek, SeekMode::InPlace);
         assert_eq!(loaded.meta.title.as_deref(), Some("one.wav"));
         assert_eq!(loaded.start, Duration::ZERO);
@@ -478,7 +601,10 @@ mod tests {
     fn source_text_forms_are_pinned() {
         let cases = [
             ("file:/music/a.flac", Source::File("/music/a.flac".into())),
-            ("file:/música/a b (1).flac", Source::File("/música/a b (1).flac".into())),
+            (
+                "file:/música/a b (1).flac",
+                Source::File("/música/a b (1).flac".into()),
+            ),
             ("tidal:12345678", Source::Tidal("12345678".into())),
         ];
         for (text, source) in cases {
@@ -531,12 +657,18 @@ mod tests {
     fn a_missing_or_unplayable_file_is_invalid() {
         let dir = temp_dir("invalid");
         let missing = block_on(FileOpener.describe(&dir.join("nope.flac"))).unwrap_err();
-        assert!(matches!(&missing, DescribeError::Invalid(reason) if reason.contains("opening")), "{missing:?}");
+        assert!(
+            matches!(&missing, DescribeError::Invalid(reason) if reason.contains("opening")),
+            "{missing:?}"
+        );
 
         let text = dir.join("notes.flac");
         std::fs::write(&text, "this is not audio at all, just some words").unwrap();
         let garbage = block_on(FileOpener.describe(&text)).unwrap_err();
-        assert!(matches!(&garbage, DescribeError::Invalid(reason) if reason.contains("can't be played")), "{garbage:?}");
+        assert!(
+            matches!(&garbage, DescribeError::Invalid(reason) if reason.contains("can't be played")),
+            "{garbage:?}"
+        );
     }
 
     // ---- DispatchOpener --------------------------------------------------------------------
@@ -555,18 +687,26 @@ mod tests {
     #[test]
     fn the_dispatcher_says_when_tidal_is_not_available() {
         let opener = DispatchOpener::new(None);
-        let error = block_on(opener.open(TrackRef("tidal:123".into()), Duration::ZERO)).err().unwrap();
+        let error = block_on(opener.open(TrackRef("tidal:123".into()), Duration::ZERO))
+            .err()
+            .unwrap();
         assert!(error.to_string().contains("phonia login"), "{error}");
 
         let info = block_on(opener.describe(&Source::Tidal("123".into()))).unwrap_err();
-        assert!(matches!(info, DescribeError::Unavailable(ref reason) if reason.contains("phonia login")), "{info:?}");
+        assert!(
+            matches!(info, DescribeError::Unavailable(ref reason) if reason.contains("phonia login")),
+            "{info:?}"
+        );
     }
 
     #[test]
     fn the_dispatcher_refuses_a_source_it_cannot_read() {
         let opener = DispatchOpener::new(None);
         for bad in ["not a source", "file:relative.flac", "tidal:x"] {
-            assert!(block_on(opener.open(TrackRef(bad.into()), Duration::ZERO)).is_err(), "{bad:?}");
+            assert!(
+                block_on(opener.open(TrackRef(bad.into()), Duration::ZERO)).is_err(),
+                "{bad:?}"
+            );
         }
     }
 
@@ -574,14 +714,18 @@ mod tests {
     fn the_dispatcher_describes_files() {
         let dir = temp_dir("dispatch-describe");
         let path = write_wav(&dir, "two.wav", crate::testutil::RATE as usize);
-        let info = block_on(DispatchOpener::new(None).describe(&Source::file(&path).unwrap())).unwrap();
+        let info =
+            block_on(DispatchOpener::new(None).describe(&Source::file(&path).unwrap())).unwrap();
         assert_eq!(info.duration, Some(Duration::from_secs(1)));
     }
 
     #[test]
     fn describe_errors_read_as_their_reason() {
         assert_eq!(DescribeError::Invalid("bad".into()).to_string(), "bad");
-        assert_eq!(DescribeError::Unavailable("later".into()).to_string(), "later");
+        assert_eq!(
+            DescribeError::Unavailable("later".into()).to_string(),
+            "later"
+        );
     }
 
     // ---- classifying TIDAL's answers -------------------------------------------------------
@@ -597,7 +741,10 @@ mod tests {
     #[test]
     fn a_404_from_tidal_means_the_track_does_not_exist() {
         let error = classify_track_error("12", &status_error(reqwest::StatusCode::NOT_FOUND));
-        assert_eq!(error, DescribeError::Invalid("TIDAL has no track 12".into()));
+        assert_eq!(
+            error,
+            DescribeError::Invalid("TIDAL has no track 12".into())
+        );
         assert_eq!(
             classify_track_error("12", &tidlers::TidalError::NotFound),
             DescribeError::Invalid("TIDAL has no track 12".into())
@@ -613,10 +760,15 @@ mod tests {
             reqwest::StatusCode::FORBIDDEN,
         ] {
             let error = classify_track_error("12", &status_error(status));
-            assert!(matches!(error, DescribeError::Unavailable(_)), "{status}: {error:?}");
+            assert!(
+                matches!(error, DescribeError::Unavailable(_)),
+                "{status}: {error:?}"
+            );
         }
         let unauthorized = classify_track_error("12", &tidlers::TidalError::NotAuthenticated);
-        assert!(matches!(unauthorized, DescribeError::Unavailable(_)), "{unauthorized:?}");
+        assert!(
+            matches!(unauthorized, DescribeError::Unavailable(_)),
+            "{unauthorized:?}"
+        );
     }
 }
-

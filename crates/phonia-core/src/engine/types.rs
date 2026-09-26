@@ -90,7 +90,9 @@ pub enum OutputState {
     Open,
     /// A track is loaded but the device was handed back (see [`Command::Release`]); `by` is the
     /// program that asked for it, if one did. Resuming takes the device again.
-    Released { by: Option<String> },
+    Released {
+        by: Option<String>,
+    },
 }
 
 /// Why the engine gave the audio device back.
@@ -121,24 +123,42 @@ pub enum EndReason {
 pub enum Event {
     StateChanged(State),
     /// Sent just before `StateChanged(Playing)`.
-    TrackStarted { meta: TrackMeta, spec: SourceSpec },
-    TrackEnded { meta: TrackMeta, reason: EndReason },
+    TrackStarted {
+        meta: TrackMeta,
+        spec: SourceSpec,
+    },
+    TrackEnded {
+        meta: TrackMeta,
+        reason: EndReason,
+    },
     /// How much of the current track has actually been heard (not merely handed to the device),
     /// sent about four times a second while playing, and also when a track starts, pauses or
     /// ends. The last one of a completed track equals its length.
-    Position { position: Duration, duration: Option<Duration> },
+    Position {
+        position: Duration,
+        duration: Option<Duration>,
+    },
     /// A seek was applied: the position playback will continue from. Sent as soon as the seek is
     /// accepted, so for a track that has to be reopened it precedes the audio actually resuming
     /// (see [`State::Seeking`]).
-    Seeked { position: Duration },
+    Seeked {
+        position: Duration,
+    },
     /// A seek could not be done, with why. Playback carries on as if it had not been requested.
-    SeekRejected { reason: String },
+    SeekRejected {
+        reason: String,
+    },
     /// The supplier has no further track to offer.
     QueueExhausted,
     /// The engine paused and gave the audio device back; the track and position are kept.
-    OutputReleased { by: Option<String>, reason: ReleaseReason },
+    OutputReleased {
+        by: Option<String>,
+        reason: ReleaseReason,
+    },
     /// It took the device again, on resume or for a new track.
     OutputAcquired,
     /// Something went wrong; the engine has stopped, but stays usable.
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }

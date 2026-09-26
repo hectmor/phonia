@@ -32,8 +32,14 @@ mod tests {
 
     #[test]
     fn well_formed_sources() {
-        assert_eq!(file(Path::new("/music/a b.flac")).unwrap(), "file:/music/a b.flac");
-        assert_eq!(file(Path::new("/música/ñ.flac")).unwrap(), "file:/música/ñ.flac");
+        assert_eq!(
+            file(Path::new("/music/a b.flac")).unwrap(),
+            "file:/music/a b.flac"
+        );
+        assert_eq!(
+            file(Path::new("/música/ñ.flac")).unwrap(),
+            "file:/música/ñ.flac"
+        );
         assert_eq!(tidal("12345678").unwrap(), "tidal:12345678");
     }
 

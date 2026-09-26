@@ -12,7 +12,9 @@ mod store;
 
 pub use migrate::MigratingStore;
 pub use secret_service::{Interaction, SecretServiceStore};
-pub use store::{FileStore, MemoryStore, SessionStore, StoreError, StoredSession, client_from, stored_from};
+pub use store::{
+    FileStore, MemoryStore, SessionStore, StoreError, StoredSession, client_from, stored_from,
+};
 
 use crate::config::SessionStoreKind;
 use anyhow::{Context, Result, anyhow, bail};
@@ -31,7 +33,8 @@ use tidlers::auth::TidalAuth;
 const PENDING_LOGIN_MAX_AGE_SECS: u64 = 5 * 60;
 
 fn config_dir() -> Result<PathBuf> {
-    let dir = crate::config::dir().ok_or_else(|| anyhow!("could not determine the user's config directory"))?;
+    let dir = crate::config::dir()
+        .ok_or_else(|| anyhow!("could not determine the user's config directory"))?;
     fs::create_dir_all(&dir).with_context(|| format!("creating config directory {dir:?}"))?;
     Ok(dir)
 }
@@ -45,7 +48,10 @@ fn pending_login_path() -> Result<PathBuf> {
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Writes `contents` to `path`, readable only by the owner (the files we store hold tokens or
@@ -61,7 +67,8 @@ fn write_secret_file(path: &Path, contents: &str) -> Result<()> {
         .with_context(|| format!("opening {path:?}"))?;
     file.set_permissions(fs::Permissions::from_mode(0o600))
         .with_context(|| format!("restricting permissions on {path:?}"))?;
-    file.write_all(contents.as_bytes()).with_context(|| format!("writing {path:?}"))?;
+    file.write_all(contents.as_bytes())
+        .with_context(|| format!("writing {path:?}"))?;
     Ok(())
 }
 
@@ -69,7 +76,10 @@ fn write_secret_file(path: &Path, contents: &str) -> Result<()> {
 ///
 /// `interaction` says whether a locked keyring may ask the user to unlock it; a daemon starting up
 /// says no, and asks again later when TIDAL is actually used.
-pub fn open_store(kind: SessionStoreKind, interaction: Interaction) -> Result<Arc<dyn SessionStore>> {
+pub fn open_store(
+    kind: SessionStoreKind,
+    interaction: Interaction,
+) -> Result<Arc<dyn SessionStore>> {
     match kind {
         SessionStoreKind::File => Ok(Arc::new(FileStore::new(session_path()?))),
         SessionStoreKind::Keyring => Ok(Arc::new(MigratingStore::new(
@@ -88,7 +98,10 @@ pub fn legacy_session_file() -> Result<PathBuf> {
 /// started but not finished. Whether there was a session.
 pub async fn logout(store: &dyn SessionStore) -> Result<bool> {
     delete_pending_login(&pending_login_path()?);
-    store.delete().await.with_context(|| format!("removing the session from {}", store.describe()))
+    store
+        .delete()
+        .await
+        .with_context(|| format!("removing the session from {}", store.describe()))
 }
 
 /// A PKCE login that has been started but not finished. The PKCE `code_verifier` only exists in
@@ -101,7 +114,10 @@ struct PendingLogin {
 }
 
 fn save_pending_login(path: &Path, client_json: &str, now: u64) -> Result<()> {
-    let pending = PendingLogin { created_at: now, client_json: client_json.to_string() };
+    let pending = PendingLogin {
+        created_at: now,
+        client_json: client_json.to_string(),
+    };
     let json = serde_json::to_string(&pending).context("serializing the pending login")?;
     write_secret_file(path, &json).context("saving the pending login")
 }
@@ -147,13 +163,18 @@ pub async fn load_client(store: &dyn SessionStore) -> Result<TidalClient> {
         Ok(Some(stored)) => Ok(client_from(&stored)),
         Ok(None) => bail!("no session saved yet. Run `phonia login` first."),
         Err(error @ StoreError::Corrupt(_)) => bail!("{error}; run `phonia login` again"),
-        Err(error) => Err(anyhow!(error)).with_context(|| format!("reading the session from {}", store.describe())),
+        Err(error) => Err(anyhow!(error))
+            .with_context(|| format!("reading the session from {}", store.describe())),
     }
 }
 
 /// Finishes a PKCE login: exchanges the redirect URL's authorization code for tokens and saves
 /// the session.
-async fn complete_login(store: &dyn SessionStore, mut client: TidalClient, redirect_url: &str) -> Result<()> {
+async fn complete_login(
+    store: &dyn SessionStore,
+    mut client: TidalClient,
+    redirect_url: &str,
+) -> Result<()> {
     let redirect_url = redirect_url.trim();
     if redirect_url.is_empty() {
         bail!("no redirect URL was received");
@@ -251,7 +272,8 @@ mod tests {
     use super::*;
 
     fn temp_path(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("phonia-auth-test-{}-{name}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("phonia-auth-test-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir.join("pending-login.json")
@@ -276,7 +298,10 @@ mod tests {
         // (and therefore still hold the matching `code_verifier`).
         let (client, url) = pkce_client();
         let mut restored = TidalClient::from_json(&client.get_json()).unwrap();
-        assert_eq!(query_params(&restored.initiate_pkce_login().unwrap()), query_params(&url));
+        assert_eq!(
+            query_params(&restored.initiate_pkce_login().unwrap()),
+            query_params(&url)
+        );
     }
 
     #[test]
@@ -285,10 +310,16 @@ mod tests {
         let (client, url) = pkce_client();
         save_pending_login(&path, &client.get_json(), 1_000).unwrap();
 
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
 
         let mut loaded = load_pending_login(&path, 1_000 + 10).unwrap();
-        assert_eq!(query_params(&loaded.initiate_pkce_login().unwrap()), query_params(&url));
+        assert_eq!(
+            query_params(&loaded.initiate_pkce_login().unwrap()),
+            query_params(&url)
+        );
     }
 
     #[test]
@@ -297,7 +328,9 @@ mod tests {
         let (client, _) = pkce_client();
         save_pending_login(&path, &client.get_json(), 1_000).unwrap();
 
-        let err = load_pending_login(&path, 1_000 + PENDING_LOGIN_MAX_AGE_SECS + 1).err().unwrap();
+        let err = load_pending_login(&path, 1_000 + PENDING_LOGIN_MAX_AGE_SECS + 1)
+            .err()
+            .unwrap();
         assert!(err.to_string().contains("expired"), "{err}");
         assert!(!path.exists());
     }
@@ -341,7 +374,10 @@ mod tests {
         });
         let client = load_client(&store).await.unwrap();
         assert_eq!(client.session.auth.refresh_token.as_deref(), Some("r"));
-        assert!(client.session.auth.access_token.is_none(), "the access token is fetched, not stored");
+        assert!(
+            client.session.auth.access_token.is_none(),
+            "the access token is fetched, not stored"
+        );
     }
 
     #[tokio::test]
@@ -349,7 +385,10 @@ mod tests {
         let store = MemoryStore::new();
         store.fail_with("no bus");
         let error = format!("{:#}", load_client(&store).await.err().unwrap());
-        assert!(error.contains("memory") && error.contains("no bus"), "{error}");
+        assert!(
+            error.contains("memory") && error.contains("no bus"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

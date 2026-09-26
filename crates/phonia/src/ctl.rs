@@ -3,8 +3,9 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use phonia_ipc::{
-    AddAt, CAP_OUTPUT_RELEASE, CAP_OUTPUT_SELECT, CAP_VOLUME, Client, ClientError, ClientInfo, Event, ItemId, NewTrack, Output,
-    OutputInfo, OutputMode, Payload, Queue, ReleaseReason, Repeat, Request, SeekTarget, State, Status, Volume,
+    AddAt, CAP_OUTPUT_RELEASE, CAP_OUTPUT_SELECT, CAP_VOLUME, Client, ClientError, ClientInfo,
+    Event, ItemId, NewTrack, Output, OutputInfo, OutputMode, Payload, Queue, ReleaseReason, Repeat,
+    Request, SeekTarget, State, Status, Volume,
 };
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -31,7 +32,9 @@ pub enum CtlCommand {
     /// Shows what is playing.
     Status,
     /// Plays entry N of the queue (as `queue list` numbers them), or starts the queue.
-    Play { entry: Option<usize> },
+    Play {
+        entry: Option<usize>,
+    },
     Pause,
     /// Continues after a pause. If the DAC was handed back, takes it again first, and says so if
     /// someone else has it and won't let go.
@@ -47,7 +50,9 @@ pub enum CtlCommand {
         change: Option<String>,
     },
     /// Mutes (`on`), unmutes (`off`) or flips (`toggle`, the default) a shared output; the level is kept.
-    Mute { mode: Option<MuteMode> },
+    Mute {
+        mode: Option<MuteMode>,
+    },
     /// Lists the outputs and shows which one is playing; `output set <n>` plays through another
     /// one from now on, keeping the track and the position. An exclusive card is bit-perfect;
     /// a shared output goes through the desktop's sound server and is not.
@@ -71,8 +76,12 @@ pub enum CtlCommand {
         #[command(subcommand)]
         action: QueueAction,
     },
-    Shuffle { mode: Switch },
-    Repeat { mode: RepeatMode },
+    Shuffle {
+        mode: Switch,
+    },
+    Repeat {
+        mode: RepeatMode,
+    },
     /// Prints events as they happen, until interrupted.
     Watch,
     /// Stops the daemon.
@@ -106,7 +115,10 @@ pub enum QueueAction {
     },
     Clear,
     /// Moves an entry to another position.
-    Move { entry: usize, to: usize },
+    Move {
+        entry: usize,
+        to: usize,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -130,20 +142,31 @@ pub enum RepeatMode {
 }
 
 pub async fn run(args: CtlArgs, config_flag: Option<&Path>) -> Result<()> {
-    let info = ClientInfo { name: "phonia-ctl".to_string(), version: env!("CARGO_PKG_VERSION").to_string() };
-    let loaded = phonia_core::config::load(phonia_core::config::discover_from_env(config_flag).as_ref())?;
+    let info = ClientInfo {
+        name: "phonia-ctl".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    let loaded =
+        phonia_core::config::load(phonia_core::config::discover_from_env(config_flag).as_ref())?;
     let settings = phonia_core::config::resolve(
-        phonia_core::config::Overrides { socket: args.socket.clone(), ..Default::default() },
+        phonia_core::config::Overrides {
+            socket: args.socket.clone(),
+            ..Default::default()
+        },
         &loaded.file,
     );
     let socket = settings.socket_path(phonia_ipc::socket::default_socket_path);
-    let client = Client::connect(Some(&socket), info).await.map_err(explain_connection_error)?;
+    let client = Client::connect(Some(&socket), info)
+        .await
+        .map_err(explain_connection_error)?;
     let json = args.json;
 
     match args.command {
         CtlCommand::Status => {
             let status = client.status().await?;
-            print_payload(json, &Payload::Status(status.clone()), || format_status(&status))
+            print_payload(json, &Payload::Status(status.clone()), || {
+                format_status(&status)
+            })
         }
         CtlCommand::Play { entry } => {
             let item = match entry {
@@ -155,8 +178,15 @@ pub async fn run(args: CtlArgs, config_flag: Option<&Path>) -> Result<()> {
         CtlCommand::Pause => ack(&client, json, Request::Pause).await,
         CtlCommand::Resume => resume(&client, json).await,
         CtlCommand::Release => {
-            if !client.server().capabilities.iter().any(|capability| capability == CAP_OUTPUT_RELEASE) {
-                bail!("this phoniad is too old to hand the DAC back (protocol 1.0): restart it after updating");
+            if !client
+                .server()
+                .capabilities
+                .iter()
+                .any(|capability| capability == CAP_OUTPUT_RELEASE)
+            {
+                bail!(
+                    "this phoniad is too old to hand the DAC back (protocol 1.0): restart it after updating"
+                );
             }
             ack(&client, json, Request::Release).await
         }
@@ -164,13 +194,29 @@ pub async fn run(args: CtlArgs, config_flag: Option<&Path>) -> Result<()> {
         CtlCommand::Next => ack(&client, json, Request::Next).await,
         CtlCommand::Prev => ack(&client, json, Request::Previous).await,
         CtlCommand::Stop => ack(&client, json, Request::Stop).await,
-        CtlCommand::Seek { position } => ack(&client, json, Request::Seek { target: parse_seek(&position)? }).await,
+        CtlCommand::Seek { position } => {
+            ack(
+                &client,
+                json,
+                Request::Seek {
+                    target: parse_seek(&position)?,
+                },
+            )
+            .await
+        }
         CtlCommand::Volume { change } => volume(&client, json, change).await,
         CtlCommand::Mute { mode } => mute(&client, json, mode.unwrap_or(MuteMode::Toggle)).await,
         CtlCommand::Output { action } => output(&client, json, action).await,
         CtlCommand::Queue { action } => queue(&client, json, action).await,
         CtlCommand::Shuffle { mode } => {
-            ack(&client, json, Request::SetShuffle { shuffle: matches!(mode, Switch::On) }).await
+            ack(
+                &client,
+                json,
+                Request::SetShuffle {
+                    shuffle: matches!(mode, Switch::On),
+                },
+            )
+            .await
         }
         CtlCommand::Repeat { mode } => {
             let repeat = match mode {
@@ -187,7 +233,9 @@ pub async fn run(args: CtlArgs, config_flag: Option<&Path>) -> Result<()> {
 
 fn explain_connection_error(error: ClientError) -> anyhow::Error {
     match error {
-        ClientError::Io(error) => anyhow!("{error}. Is phoniad running? Start it with `phoniad --device hw:N,0`."),
+        ClientError::Io(error) => {
+            anyhow!("{error}. Is phoniad running? Start it with `phoniad --device hw:N,0`.")
+        }
         other => anyhow!(other),
     }
 }
@@ -211,7 +259,10 @@ async fn resume(client: &Client, json: bool) -> Result<()> {
     let outcome = tokio::time::timeout(RESUME_WAIT, async {
         loop {
             match events.next().await {
-                Some(Event::StateChanged { state: State::Playing }) | None => return Ok(()),
+                Some(Event::StateChanged {
+                    state: State::Playing,
+                })
+                | None => return Ok(()),
                 Some(Event::Error { message }) => return Err(anyhow!(message)),
                 Some(_) => {}
             }
@@ -220,7 +271,10 @@ async fn resume(client: &Client, json: bool) -> Result<()> {
     .await;
     match outcome {
         Ok(result) => result?,
-        Err(_) => bail!("resume was sent, but playback has not started after {} s", RESUME_WAIT.as_secs()),
+        Err(_) => bail!(
+            "resume was sent, but playback has not started after {} s",
+            RESUME_WAIT.as_secs()
+        ),
     }
     println!("ok");
     Ok(())
@@ -239,7 +293,9 @@ async fn queue(client: &Client, json: bool, action: QueueAction) -> Result<()> {
     match action {
         QueueAction::List => {
             let queue = client.queue().await?;
-            print_payload(json, &Payload::Queue(queue.clone()), || format_queue(&queue))
+            print_payload(json, &Payload::Queue(queue.clone()), || {
+                format_queue(&queue)
+            })
         }
         QueueAction::Add { sources, next, at } => {
             let tracks = sources
@@ -248,7 +304,9 @@ async fn queue(client: &Client, json: bool, action: QueueAction) -> Result<()> {
                 .collect::<Result<Vec<_>>>()?;
             let at = match (next, at) {
                 (true, _) => AddAt::Next,
-                (false, Some(position)) => AddAt::Index { index: position.saturating_sub(1) },
+                (false, Some(position)) => AddAt::Index {
+                    index: position.saturating_sub(1),
+                },
                 (false, None) => AddAt::End,
             };
             let payload = client.request(Request::QueueAdd { tracks, at }).await?;
@@ -256,7 +314,10 @@ async fn queue(client: &Client, json: bool, action: QueueAction) -> Result<()> {
         }
         QueueAction::Rm { entries } => {
             let queue = client.queue().await?;
-            let ids = entries.iter().map(|number| entry_id(&queue, *number)).collect::<Result<Vec<_>>>()?;
+            let ids = entries
+                .iter()
+                .map(|number| entry_id(&queue, *number))
+                .collect::<Result<Vec<_>>>()?;
             let payload = client.request(Request::QueueRemove { ids }).await?;
             print_payload(json, &payload, || match &payload {
                 Payload::Removed { count } => format!("removed {count} entries"),
@@ -266,15 +327,30 @@ async fn queue(client: &Client, json: bool, action: QueueAction) -> Result<()> {
         QueueAction::Clear => ack(client, json, Request::QueueClear).await,
         QueueAction::Move { entry, to } => {
             let id = entry_id(&client.queue().await?, entry)?;
-            ack(client, json, Request::QueueMove { id, to: to.saturating_sub(1) }).await
+            ack(
+                client,
+                json,
+                Request::QueueMove {
+                    id,
+                    to: to.saturating_sub(1),
+                },
+            )
+            .await
         }
     }
 }
 
 /// The volume the output has now, or why it has none.
 async fn current_volume(client: &Client) -> Result<Volume> {
-    if !client.server().capabilities.iter().any(|capability| capability == CAP_VOLUME) {
-        bail!("this phoniad is too old to set the volume (protocol 1.2): restart it after updating");
+    if !client
+        .server()
+        .capabilities
+        .iter()
+        .any(|capability| capability == CAP_VOLUME)
+    {
+        bail!(
+            "this phoniad is too old to set the volume (protocol 1.2): restart it after updating"
+        );
     }
     client.status().await?.volume.ok_or_else(|| {
         anyhow!(
@@ -287,7 +363,9 @@ async fn current_volume(client: &Client) -> Result<Volume> {
 async fn volume(client: &Client, json: bool, change: Option<String>) -> Result<()> {
     let current = current_volume(client).await?;
     match change {
-        None => print_payload(json, &Payload::Status(client.status().await?), || format_volume(&current)),
+        None => print_payload(json, &Payload::Status(client.status().await?), || {
+            format_volume(&current)
+        }),
         Some(change) => {
             let percent = parse_volume(&change, current.percent)?;
             ack(client, json, Request::SetVolume { percent }).await
@@ -306,13 +384,24 @@ async fn mute(client: &Client, json: bool, mode: MuteMode) -> Result<()> {
 }
 
 async fn output(client: &Client, json: bool, action: Option<OutputAction>) -> Result<()> {
-    if !client.server().capabilities.iter().any(|capability| capability == CAP_OUTPUT_SELECT) {
-        bail!("this phoniad is too old to switch outputs (protocol 1.1): restart it after updating");
+    if !client
+        .server()
+        .capabilities
+        .iter()
+        .any(|capability| capability == CAP_OUTPUT_SELECT)
+    {
+        bail!(
+            "this phoniad is too old to switch outputs (protocol 1.1): restart it after updating"
+        );
     }
     let listing = client.request(Request::Outputs).await?;
-    let Payload::Outputs { outputs, current } = &listing else { bail!("the daemon answered something unexpected") };
+    let Payload::Outputs { outputs, current } = &listing else {
+        bail!("the daemon answered something unexpected")
+    };
     match action {
-        None => print_payload(json, &listing, || format_outputs(outputs, current.as_deref())),
+        None => print_payload(json, &listing, || {
+            format_outputs(outputs, current.as_deref())
+        }),
         Some(OutputAction::Set { output }) => {
             let id = resolve_output(&output, outputs)?;
             ack(client, json, Request::SetOutput { output: id }).await
@@ -323,9 +412,20 @@ async fn output(client: &Client, json: bool, action: Option<OutputAction>) -> Re
 async fn watch(client: &Client, json: bool) -> Result<()> {
     let (snapshot, mut events) = client.subscribe().await?;
     if json {
-        println!("{}", serde_json::to_string(&Payload::Snapshot { seq: snapshot.seq, status: snapshot.status, queue: snapshot.queue })?);
+        println!(
+            "{}",
+            serde_json::to_string(&Payload::Snapshot {
+                seq: snapshot.seq,
+                status: snapshot.status,
+                queue: snapshot.queue
+            })?
+        );
     } else {
-        println!("{}\n{}", format_status(&snapshot.status), format_queue(&snapshot.queue));
+        println!(
+            "{}\n{}",
+            format_status(&snapshot.status),
+            format_queue(&snapshot.queue)
+        );
     }
     loop {
         tokio::select! {
@@ -357,7 +457,10 @@ fn parse_seek(text: &str) -> Result<SeekTarget> {
         Some('-') => ('-', &text[1..]),
         _ => (' ', text),
     };
-    let seconds: f64 = digits.trim().parse().map_err(|_| anyhow!("{text:?} is not a position: use 90, +10 or -10 (seconds)"))?;
+    let seconds: f64 = digits
+        .trim()
+        .parse()
+        .map_err(|_| anyhow!("{text:?} is not a position: use 90, +10 or -10 (seconds)"))?;
     if !seconds.is_finite() || seconds < 0.0 {
         bail!("{text:?} is not a position: use 90, +10 or -10 (seconds)");
     }
@@ -379,7 +482,8 @@ fn resolve_source(text: &str) -> Result<String> {
     if !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()) {
         return Ok(format!("tidal:{text}"));
     }
-    let path = std::path::absolute(Path::new(text)).with_context(|| format!("{text:?} is not a usable path"))?;
+    let path = std::path::absolute(Path::new(text))
+        .with_context(|| format!("{text:?} is not a usable path"))?;
     phonia_ipc::source::file(&path).map_err(|reason| anyhow!(reason))
 }
 
@@ -389,13 +493,23 @@ fn entry_id(queue: &Queue, number: usize) -> Result<ItemId> {
         .checked_sub(1)
         .and_then(|index| queue.items.get(index))
         .map(|item| item.id)
-        .ok_or_else(|| anyhow!("there is no queue entry {number} (the queue has {})", queue.items.len()))
+        .ok_or_else(|| {
+            anyhow!(
+                "there is no queue entry {number} (the queue has {})",
+                queue.items.len()
+            )
+        })
 }
 
 fn format_ms(ms: u64) -> String {
     let seconds = ms / 1000;
     if seconds >= 3600 {
-        format!("{}:{:02}:{:02}", seconds / 3600, seconds % 3600 / 60, seconds % 60)
+        format!(
+            "{}:{:02}:{:02}",
+            seconds / 3600,
+            seconds % 3600 / 60,
+            seconds % 60
+        )
     } else {
         format!("{}:{:02}", seconds / 60, seconds % 60)
     }
@@ -420,7 +534,11 @@ fn parse_volume(text: &str, current: u8) -> Result<u8> {
 }
 
 fn format_volume(volume: &Volume) -> String {
-    if volume.muted { format!("Volume: {}% (muted)", volume.percent) } else { format!("Volume: {}%", volume.percent) }
+    if volume.muted {
+        format!("Volume: {}% (muted)", volume.percent)
+    } else {
+        format!("Volume: {}%", volume.percent)
+    }
 }
 
 /// The output a person meant: its number in the list, its id, or a part of its id or name that only
@@ -431,7 +549,12 @@ fn resolve_output(wanted: &str, outputs: &[OutputInfo]) -> Result<String> {
             .checked_sub(1)
             .and_then(|index| outputs.get(index))
             .map(|output| output.id.clone())
-            .ok_or_else(|| anyhow!("there is no output {number} (`phonia ctl output` lists {})", outputs.len()));
+            .ok_or_else(|| {
+                anyhow!(
+                    "there is no output {number} (`phonia ctl output` lists {})",
+                    outputs.len()
+                )
+            });
     }
     if let Some(exact) = outputs.iter().find(|output| output.id == wanted) {
         return Ok(exact.id.clone());
@@ -439,7 +562,9 @@ fn resolve_output(wanted: &str, outputs: &[OutputInfo]) -> Result<String> {
     let lower = wanted.to_lowercase();
     let matching: Vec<&OutputInfo> = outputs
         .iter()
-        .filter(|output| output.id.to_lowercase().contains(&lower) || output.name.to_lowercase().contains(&lower))
+        .filter(|output| {
+            output.id.to_lowercase().contains(&lower) || output.name.to_lowercase().contains(&lower)
+        })
         .collect();
     match matching.as_slice() {
         [one] => Ok(one.id.clone()),
@@ -447,7 +572,10 @@ fn resolve_output(wanted: &str, outputs: &[OutputInfo]) -> Result<String> {
         many => bail!(
             "{wanted:?} matches {} outputs; be more specific: {}",
             many.len(),
-            many.iter().map(|output| output.id.as_str()).collect::<Vec<_>>().join(", ")
+            many.iter()
+                .map(|output| output.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
     }
 }
@@ -467,11 +595,24 @@ fn format_outputs(outputs: &[OutputInfo], current: Option<&str>) -> String {
     if outputs.is_empty() {
         return "No outputs found.".to_string();
     }
-    let width = outputs.iter().map(|output| output.id.len()).max().unwrap_or(0);
-    let mut text = "Outputs (`phonia ctl output set <n>` moves playback, keeping the position):".to_string();
+    let width = outputs
+        .iter()
+        .map(|output| output.id.len())
+        .max()
+        .unwrap_or(0);
+    let mut text =
+        "Outputs (`phonia ctl output set <n>` moves playback, keeping the position):".to_string();
     for (index, output) in outputs.iter().enumerate() {
-        let marker = if current == Some(output.id.as_str()) { '*' } else { ' ' };
-        let detail = output.detail.as_deref().map(|detail| format!(" ({detail})")).unwrap_or_default();
+        let marker = if current == Some(output.id.as_str()) {
+            '*'
+        } else {
+            ' '
+        };
+        let detail = output
+            .detail
+            .as_deref()
+            .map(|detail| format!(" ({detail})"))
+            .unwrap_or_default();
         text.push_str(&format!(
             "\n {marker} {:>2}. {:<width$}  {}{detail}  [{}]",
             index + 1,
@@ -502,10 +643,20 @@ fn format_status(status: &Status) -> String {
         }
     }
     if let Some(track) = &status.track {
-        let name = track.title.as_deref().or(track.source.as_deref()).unwrap_or("?");
+        let name = track
+            .title
+            .as_deref()
+            .or(track.source.as_deref())
+            .unwrap_or("?");
         text.push_str(&format!("\nTrack:    {name}"));
-        let total = status.duration_ms.map(|ms| format!(" / {}", format_ms(ms))).unwrap_or_default();
-        text.push_str(&format!("\nPosition: {}{total}", format_ms(status.position_ms)));
+        let total = status
+            .duration_ms
+            .map(|ms| format!(" / {}", format_ms(ms)))
+            .unwrap_or_default();
+        text.push_str(&format!(
+            "\nPosition: {}{total}",
+            format_ms(status.position_ms)
+        ));
     }
     if let Some(route) = &status.route {
         let how = match route.mode {
@@ -516,10 +667,16 @@ fn format_status(status: &Status) -> String {
         text.push_str(&format!("\nOutput:   {} [{how}]", route.description));
     }
     if let Some(volume) = &status.volume {
-        text.push_str(&format!("\n{}", format_volume(volume).replacen("Volume: ", "Volume:   ", 1)));
+        text.push_str(&format!(
+            "\n{}",
+            format_volume(volume).replacen("Volume: ", "Volume:   ", 1)
+        ));
     }
     if let Some(spec) = status.spec {
-        text.push_str(&format!("\nFormat:   {}-bit / {} Hz / {} ch", spec.bits_per_sample, spec.sample_rate, spec.channels));
+        text.push_str(&format!(
+            "\nFormat:   {}-bit / {} Hz / {} ch",
+            spec.bits_per_sample, spec.sample_rate, spec.channels
+        ));
     }
     text
 }
@@ -536,22 +693,42 @@ fn format_queue(queue: &Queue) -> String {
         if queue.shuffle { "on" } else { "off" }
     );
     for (index, item) in queue.items.iter().enumerate() {
-        let marker = if queue.current == Some(item.id) { '>' } else { ' ' };
+        let marker = if queue.current == Some(item.id) {
+            '>'
+        } else {
+            ' '
+        };
         let name = item.title.as_deref().unwrap_or(&item.source);
-        let length = item.duration_ms.map(|ms| format!("  [{}]", format_ms(ms))).unwrap_or_default();
+        let length = item
+            .duration_ms
+            .map(|ms| format!("  [{}]", format_ms(ms)))
+            .unwrap_or_default();
         text.push_str(&format!("\n {marker} {:>3}. {name}{length}", index + 1));
     }
     text
 }
 
 fn format_added(payload: &Payload) -> String {
-    let Payload::Added { ids, rejected, unresolved } = payload else { return "ok".to_string() };
+    let Payload::Added {
+        ids,
+        rejected,
+        unresolved,
+    } = payload
+    else {
+        return "ok".to_string();
+    };
     let mut text = format!("added {} tracks", ids.len());
     for refused in rejected {
-        text.push_str(&format!("\n  not added: {} ({})", refused.source, refused.reason));
+        text.push_str(&format!(
+            "\n  not added: {} ({})",
+            refused.source, refused.reason
+        ));
     }
     for item in unresolved {
-        text.push_str(&format!("\n  added, but its details could not be fetched: {}", item.reason));
+        text.push_str(&format!(
+            "\n  added, but its details could not be fetched: {}",
+            item.reason
+        ));
     }
     text
 }
@@ -559,15 +736,27 @@ fn format_added(payload: &Payload) -> String {
 fn format_event(event: &Event) -> String {
     match event {
         Event::StateChanged { state } => format!("state {}", state_name(*state)),
-        Event::TrackStarted { title, source, spec, .. } => format!(
+        Event::TrackStarted {
+            title,
+            source,
+            spec,
+            ..
+        } => format!(
             "started {} ({}-bit / {} Hz)",
             title.as_deref().or(source.as_deref()).unwrap_or("?"),
             spec.bits_per_sample,
             spec.sample_rate
         ),
         Event::TrackEnded { reason, .. } => format!("ended ({reason:?})").to_lowercase(),
-        Event::Position { position_ms, duration_ms } => match duration_ms {
-            Some(total) => format!("position {} / {}", format_ms(*position_ms), format_ms(*total)),
+        Event::Position {
+            position_ms,
+            duration_ms,
+        } => match duration_ms {
+            Some(total) => format!(
+                "position {} / {}",
+                format_ms(*position_ms),
+                format_ms(*total)
+            ),
             None => format!("position {}", format_ms(*position_ms)),
         },
         Event::Seeked { position_ms } => format!("seeked to {}", format_ms(*position_ms)),
@@ -605,7 +794,9 @@ fn format_event(event: &Event) -> String {
             }
         }
         Event::OutputAcquired => "DAC taken again".to_string(),
-        Event::OutputChanged { route } => format!("output now {} ({})", route.description, route.id),
+        Event::OutputChanged { route } => {
+            format!("output now {} ({})", route.description, route.id)
+        }
         Event::OutputsChanged => "the outputs changed (`phonia ctl output` lists them)".to_string(),
         Event::VolumeChanged { percent, muted } => {
             format!("volume {percent}%{}", if *muted { " (muted)" } else { "" })
@@ -624,11 +815,23 @@ mod tests {
 
     #[test]
     fn seek_positions() {
-        assert_eq!(parse_seek("90").unwrap(), SeekTarget::Absolute { ms: 90_000 });
+        assert_eq!(
+            parse_seek("90").unwrap(),
+            SeekTarget::Absolute { ms: 90_000 }
+        );
         assert_eq!(parse_seek("0").unwrap(), SeekTarget::Absolute { ms: 0 });
-        assert_eq!(parse_seek("+10").unwrap(), SeekTarget::Forward { ms: 10_000 });
-        assert_eq!(parse_seek("-2.5").unwrap(), SeekTarget::Backward { ms: 2_500 });
-        assert_eq!(parse_seek(" 12.345 ").unwrap(), SeekTarget::Absolute { ms: 12_345 });
+        assert_eq!(
+            parse_seek("+10").unwrap(),
+            SeekTarget::Forward { ms: 10_000 }
+        );
+        assert_eq!(
+            parse_seek("-2.5").unwrap(),
+            SeekTarget::Backward { ms: 2_500 }
+        );
+        assert_eq!(
+            parse_seek(" 12.345 ").unwrap(),
+            SeekTarget::Absolute { ms: 12_345 }
+        );
     }
 
     #[test]
@@ -640,19 +843,35 @@ mod tests {
 
     #[test]
     fn sources_as_the_user_writes_them() {
-        assert_eq!(resolve_source("tidal:233059491").unwrap(), "tidal:233059491");
-        assert_eq!(resolve_source("233059491").unwrap(), "tidal:233059491", "a bare number is a TIDAL id");
-        assert_eq!(resolve_source("file:/music/a.flac").unwrap(), "file:/music/a.flac");
+        assert_eq!(
+            resolve_source("tidal:233059491").unwrap(),
+            "tidal:233059491"
+        );
+        assert_eq!(
+            resolve_source("233059491").unwrap(),
+            "tidal:233059491",
+            "a bare number is a TIDAL id"
+        );
+        assert_eq!(
+            resolve_source("file:/music/a.flac").unwrap(),
+            "file:/music/a.flac"
+        );
     }
 
     #[test]
     fn a_path_becomes_an_absolute_file_source() {
-        assert_eq!(resolve_source("/music/a track.flac").unwrap(), "file:/music/a track.flac");
+        assert_eq!(
+            resolve_source("/music/a track.flac").unwrap(),
+            "file:/music/a track.flac"
+        );
 
         // A relative path is resolved against where the user is, whether or not the file exists:
         // it is the daemon's job to say a file can't be played.
         let cwd = std::env::current_dir().unwrap();
-        assert_eq!(resolve_source("missing.flac").unwrap(), format!("file:{}", cwd.join("missing.flac").display()));
+        assert_eq!(
+            resolve_source("missing.flac").unwrap(),
+            format!("file:{}", cwd.join("missing.flac").display())
+        );
     }
 
     fn queue() -> Queue {
@@ -664,7 +883,11 @@ mod tests {
         };
         Queue {
             version: 1,
-            items: vec![item(10, Some("One"), Some(65_000)), item(11, None, None), item(12, Some("Three"), Some(3_725_000))],
+            items: vec![
+                item(10, Some("One"), Some(65_000)),
+                item(11, None, None),
+                item(12, Some("Three"), Some(3_725_000)),
+            ],
             order: vec![ItemId(10), ItemId(11), ItemId(12)],
             current: Some(ItemId(11)),
             shuffle: true,
@@ -679,7 +902,10 @@ mod tests {
         assert_eq!(entry_id(&queue, 3).unwrap(), ItemId(12));
         for bad in [0, 4, 99] {
             let error = entry_id(&queue, bad).unwrap_err();
-            assert!(error.to_string().contains("no queue entry"), "{bad}: {error}");
+            assert!(
+                error.to_string().contains("no queue entry"),
+                "{bad}: {error}"
+            );
         }
     }
 
@@ -703,22 +929,54 @@ mod tests {
     fn the_status_shows_what_is_known() {
         let status = Status {
             state: State::Playing,
-            track: Some(Track { item_id: Some(ItemId(10)), source: Some("tidal:1".into()), title: Some("Song".into()), duration_ms: Some(348_680) }),
-            spec: Some(Spec { sample_rate: 192_000, channels: 2, bits_per_sample: 24 }),
+            track: Some(Track {
+                item_id: Some(ItemId(10)),
+                source: Some("tidal:1".into()),
+                title: Some("Song".into()),
+                duration_ms: Some(348_680),
+            }),
+            spec: Some(Spec {
+                sample_rate: 192_000,
+                channels: 2,
+                bits_per_sample: 24,
+            }),
             position_ms: 83_000,
             duration_ms: Some(348_680),
             output: Output::Open,
             route: None,
             volume: None,
         };
-        assert_eq!(format_status(&status), "State:    playing\nTrack:    Song\nPosition: 1:23 / 5:48\nFormat:   24-bit / 192000 Hz / 2 ch");
-        let idle =
-            Status { state: State::Stopped, track: None, spec: None, position_ms: 0, duration_ms: None, output: Output::Closed, route: None, volume: None };
+        assert_eq!(
+            format_status(&status),
+            "State:    playing\nTrack:    Song\nPosition: 1:23 / 5:48\nFormat:   24-bit / 192000 Hz / 2 ch"
+        );
+        let idle = Status {
+            state: State::Stopped,
+            track: None,
+            spec: None,
+            position_ms: 0,
+            duration_ms: None,
+            output: Output::Closed,
+            route: None,
+            volume: None,
+        };
         assert_eq!(format_status(&idle), "State:    stopped");
 
-        let released = Status { state: State::Paused, output: Output::Released { by: Some("jackd".into()) }, ..idle.clone() };
-        assert_eq!(format_status(&released), "State:    paused (DAC released to jackd)");
-        let released = Status { output: Output::Released { by: None }, ..released };
+        let released = Status {
+            state: State::Paused,
+            output: Output::Released {
+                by: Some("jackd".into()),
+            },
+            ..idle.clone()
+        };
+        assert_eq!(
+            format_status(&released),
+            "State:    paused (DAC released to jackd)"
+        );
+        let released = Status {
+            output: Output::Released { by: None },
+            ..released
+        };
         assert_eq!(format_status(&released), "State:    paused (DAC released)");
     }
 
@@ -726,8 +984,14 @@ mod tests {
     fn the_result_of_adding_lists_what_went_wrong() {
         let payload = Payload::Added {
             ids: vec![ItemId(1)],
-            rejected: vec![phonia_ipc::Rejected { source: "file:/x.flac".into(), reason: "no such file".into() }],
-            unresolved: vec![phonia_ipc::Unresolved { id: ItemId(1), reason: "TIDAL unreachable".into() }],
+            rejected: vec![phonia_ipc::Rejected {
+                source: "file:/x.flac".into(),
+                reason: "no such file".into(),
+            }],
+            unresolved: vec![phonia_ipc::Unresolved {
+                id: ItemId(1),
+                reason: "TIDAL unreachable".into(),
+            }],
         };
         assert_eq!(
             format_added(&payload),
@@ -737,22 +1001,49 @@ mod tests {
 
     #[test]
     fn events_read_as_one_line_each() {
-        assert_eq!(format_event(&Event::StateChanged { state: State::Paused }), "state paused");
-        assert_eq!(format_event(&Event::Position { position_ms: 61_000, duration_ms: Some(120_000) }), "position 1:01 / 2:00");
+        assert_eq!(
+            format_event(&Event::StateChanged {
+                state: State::Paused
+            }),
+            "state paused"
+        );
+        assert_eq!(
+            format_event(&Event::Position {
+                position_ms: 61_000,
+                duration_ms: Some(120_000)
+            }),
+            "position 1:01 / 2:00"
+        );
         assert_eq!(format_event(&Event::QueueExhausted), "end of the queue");
         assert_eq!(
-            format_event(&Event::OutputReleased { by: Some("jackd".into()), reason: ReleaseReason::Requested }),
+            format_event(&Event::OutputReleased {
+                by: Some("jackd".into()),
+                reason: ReleaseReason::Requested
+            }),
             "DAC released to jackd (another program asked for it)"
         );
         assert_eq!(
-            format_event(&Event::OutputReleased { by: None, reason: ReleaseReason::Idle }),
+            format_event(&Event::OutputReleased {
+                by: None,
+                reason: ReleaseReason::Idle
+            }),
             "DAC released (paused for a while)"
         );
         assert_eq!(format_event(&Event::OutputAcquired), "DAC taken again");
-        assert_eq!(format_event(&Event::Unknown), "(an event this client does not know)");
+        assert_eq!(
+            format_event(&Event::Unknown),
+            "(an event this client does not know)"
+        );
     }
 
-    fn out(id: &str, mode: OutputMode, name: &str, bit_perfect: bool, lossy: bool, codec: Option<&str>) -> OutputInfo {
+    fn out(
+        id: &str,
+        mode: OutputMode,
+        name: &str,
+        bit_perfect: bool,
+        lossy: bool,
+        codec: Option<&str>,
+    ) -> OutputInfo {
         OutputInfo {
             id: id.into(),
             mode,
@@ -767,9 +1058,30 @@ mod tests {
 
     fn outputs() -> Vec<OutputInfo> {
         vec![
-            out("exclusive:hw:DS2,0", OutputMode::Exclusive, "Fosi Audio DS2", true, false, None),
-            out("shared:alsa_output.usb-DS2", OutputMode::Shared, "Fosi Audio DS2 Analog Stereo", false, false, None),
-            out("shared:bluez_output.AA", OutputMode::Shared, "Soundcore Life P2", false, true, Some("SBC")),
+            out(
+                "exclusive:hw:DS2,0",
+                OutputMode::Exclusive,
+                "Fosi Audio DS2",
+                true,
+                false,
+                None,
+            ),
+            out(
+                "shared:alsa_output.usb-DS2",
+                OutputMode::Shared,
+                "Fosi Audio DS2 Analog Stereo",
+                false,
+                false,
+                None,
+            ),
+            out(
+                "shared:bluez_output.AA",
+                OutputMode::Shared,
+                "Soundcore Life P2",
+                false,
+                true,
+                Some("SBC"),
+            ),
         ]
     }
 
@@ -788,16 +1100,33 @@ mod tests {
     #[test]
     fn an_output_is_picked_by_number_id_or_a_part_of_its_name() {
         let all = outputs();
-        assert_eq!(resolve_output("2", &all).unwrap(), "shared:alsa_output.usb-DS2");
-        assert_eq!(resolve_output("exclusive:hw:DS2,0", &all).unwrap(), "exclusive:hw:DS2,0");
-        assert_eq!(resolve_output("soundcore", &all).unwrap(), "shared:bluez_output.AA");
-        assert_eq!(resolve_output("bluez", &all).unwrap(), "shared:bluez_output.AA");
+        assert_eq!(
+            resolve_output("2", &all).unwrap(),
+            "shared:alsa_output.usb-DS2"
+        );
+        assert_eq!(
+            resolve_output("exclusive:hw:DS2,0", &all).unwrap(),
+            "exclusive:hw:DS2,0"
+        );
+        assert_eq!(
+            resolve_output("soundcore", &all).unwrap(),
+            "shared:bluez_output.AA"
+        );
+        assert_eq!(
+            resolve_output("bluez", &all).unwrap(),
+            "shared:bluez_output.AA"
+        );
     }
 
     #[test]
     fn a_wrong_or_ambiguous_output_is_explained() {
         let all = outputs();
-        for (wanted, expect) in [("0", "no output 0"), ("9", "no output 9"), ("nothing", "no output matches"), ("ds2", "matches 2 outputs")] {
+        for (wanted, expect) in [
+            ("0", "no output 0"),
+            ("9", "no output 9"),
+            ("nothing", "no output matches"),
+            ("ds2", "matches 2 outputs"),
+        ] {
             let error = resolve_output(wanted, &all).unwrap_err().to_string();
             assert!(error.contains(expect), "{wanted}: {error}");
         }
@@ -817,7 +1146,10 @@ mod tests {
                 mode: OutputMode::Shared,
                 description: "Soundcore Life P2".into(),
             }),
-            volume: Some(Volume { percent: 72, muted: false }),
+            volume: Some(Volume {
+                percent: 72,
+                muted: false,
+            }),
         };
         assert_eq!(
             format_status(&status),
@@ -827,18 +1159,32 @@ mod tests {
 
     #[test]
     fn output_events_and_shared_reports_read_naturally() {
-        let route = phonia_ipc::Route { id: "shared:x".into(), mode: OutputMode::Shared, description: "Speaker".into() };
-        assert_eq!(format_event(&Event::OutputChanged { route }), "output now Speaker (shared:x)");
+        let route = phonia_ipc::Route {
+            id: "shared:x".into(),
+            mode: OutputMode::Shared,
+            description: "Speaker".into(),
+        };
+        assert_eq!(
+            format_event(&Event::OutputChanged { route }),
+            "output now Speaker (shared:x)"
+        );
         assert!(format_event(&Event::OutputsChanged).contains("outputs changed"));
         assert_eq!(
-            format_event(&Event::OutputReleased { by: None, reason: ReleaseReason::Lost }),
+            format_event(&Event::OutputReleased {
+                by: None,
+                reason: ReleaseReason::Lost
+            }),
             "DAC released (the output went away)"
         );
 
         let report = |mode, bit_perfect, codec: Option<&str>, lossy, resampled| {
             Event::SinkReport(phonia_ipc::SinkReport {
                 device: "Soundcore Life P2".into(),
-                source: Spec { sample_rate: 96_000, channels: 2, bits_per_sample: 24 },
+                source: Spec {
+                    sample_rate: 96_000,
+                    channels: 2,
+                    bits_per_sample: 24,
+                },
                 negotiated_format: "S32LE".into(),
                 bit_perfect,
                 problem: Some("why".into()),
@@ -850,11 +1196,23 @@ mod tests {
             })
         };
         assert_eq!(
-            format_event(&report(OutputMode::Shared, false, Some("SBC"), true, Some(48_000))),
+            format_event(&report(
+                OutputMode::Shared,
+                false,
+                Some("SBC"),
+                true,
+                Some(48_000)
+            )),
             "output Soundcore Life P2: S32LE SHARED, LOSSY CODEC (SBC)"
         );
         assert_eq!(
-            format_event(&report(OutputMode::Shared, false, None, false, Some(48_000))),
+            format_event(&report(
+                OutputMode::Shared,
+                false,
+                None,
+                false,
+                Some(48_000)
+            )),
             "output Soundcore Life P2: S32LE SHARED (not bit-perfect, resampled to 48000 Hz)"
         );
         assert_eq!(
@@ -867,7 +1225,11 @@ mod tests {
     fn volumes_are_set_or_changed_within_zero_to_a_hundred() {
         assert_eq!(parse_volume("60", 20).unwrap(), 60);
         assert_eq!(parse_volume("60%", 20).unwrap(), 60);
-        assert_eq!(parse_volume("+5", 98).unwrap(), 100, "never above unity gain");
+        assert_eq!(
+            parse_volume("+5", 98).unwrap(),
+            100,
+            "never above unity gain"
+        );
         assert_eq!(parse_volume("-5", 3).unwrap(), 0);
         assert_eq!(parse_volume("-10", 50).unwrap(), 40);
         assert_eq!(parse_volume("250", 50).unwrap(), 100);
@@ -878,8 +1240,26 @@ mod tests {
 
     #[test]
     fn the_volume_and_volume_events_read_simply() {
-        assert_eq!(format_volume(&Volume { percent: 72, muted: false }), "Volume: 72%");
-        assert_eq!(format_volume(&Volume { percent: 72, muted: true }), "Volume: 72% (muted)");
-        assert_eq!(format_event(&Event::VolumeChanged { percent: 40, muted: true }), "volume 40% (muted)");
+        assert_eq!(
+            format_volume(&Volume {
+                percent: 72,
+                muted: false
+            }),
+            "Volume: 72%"
+        );
+        assert_eq!(
+            format_volume(&Volume {
+                percent: 72,
+                muted: true
+            }),
+            "Volume: 72% (muted)"
+        );
+        assert_eq!(
+            format_event(&Event::VolumeChanged {
+                percent: 40,
+                muted: true
+            }),
+            "volume 40% (muted)"
+        );
     }
 }

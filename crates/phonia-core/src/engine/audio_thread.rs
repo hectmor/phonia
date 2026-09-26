@@ -8,7 +8,8 @@
 use super::PREVIOUS_RESTART_AFTER;
 use super::supplier::{Advance, LoadedTrack, SeekMode, TrackMedia, TrackSupplier};
 use super::types::{
-    Command, EndReason, Event, OutputState, ReleaseReason, SeekTarget, State, Status, TrackMeta, TrackRef,
+    Command, EndReason, Event, OutputState, ReleaseReason, SeekTarget, State, Status, TrackMeta,
+    TrackRef,
 };
 use crate::decode::{Decoder, SourceSpec, duration_to_frames, frames_to_duration};
 use crate::output::{AudioSink, OutputGone, ReleaseHandler, SinkFactory};
@@ -26,13 +27,27 @@ const RAW_CHUNK_FRAMES: usize = 4096;
 /// Everything the audio thread can be told, from callers and from its own load tasks.
 pub(super) enum Msg {
     Command(Command),
-    Loaded { generation: u64, track: Box<LoadedTrack> },
-    LoadFailed { generation: u64, error: String },
-    QueueExhausted { generation: u64 },
+    Loaded {
+        generation: u64,
+        track: Box<LoadedTrack>,
+    },
+    LoadFailed {
+        generation: u64,
+        error: String,
+    },
+    QueueExhausted {
+        generation: u64,
+    },
     /// Another program wants the audio device; `done` gets whether the engine gave it up.
-    ReleaseRequested { by: Option<String>, done: Sender<bool> },
+    ReleaseRequested {
+        by: Option<String>,
+        done: Sender<bool>,
+    },
     /// Play through another output from now on; `done` gets whether that worked.
-    SetOutput { sinks: Arc<dyn SinkFactory>, done: Sender<Result<(), String>> },
+    SetOutput {
+        sinks: Arc<dyn SinkFactory>,
+        done: Sender<Result<(), String>>,
+    },
     Shutdown,
 }
 
@@ -74,7 +89,11 @@ enum LoadTarget {
 
 enum Source {
     Decoder(Decoder),
-    Raw { samples: Vec<i32>, next: usize, spec: SourceSpec },
+    Raw {
+        samples: Vec<i32>,
+        next: usize,
+        spec: SourceSpec,
+    },
 }
 
 impl Source {
@@ -88,9 +107,10 @@ impl Source {
     fn duration(&self) -> Option<Duration> {
         match self {
             Source::Decoder(decoder) => decoder.duration(),
-            Source::Raw { samples, spec, .. } => {
-                Some(frames_to_duration((samples.len() / spec.channels as usize) as u64, spec.sample_rate))
-            }
+            Source::Raw { samples, spec, .. } => Some(frames_to_duration(
+                (samples.len() / spec.channels as usize) as u64,
+                spec.sample_rate,
+            )),
         }
     }
 
@@ -98,7 +118,11 @@ impl Source {
     fn seek(&mut self, at: Duration) -> Result<Duration> {
         match self {
             Source::Decoder(decoder) => decoder.seek(at),
-            Source::Raw { samples, next, spec } => {
+            Source::Raw {
+                samples,
+                next,
+                spec,
+            } => {
                 let total_frames = (samples.len() / spec.channels as usize) as u64;
                 let frame = duration_to_frames(at, spec.sample_rate).min(total_frames);
                 *next = frame as usize * spec.channels as usize;
@@ -111,7 +135,11 @@ impl Source {
     fn skip_frames(&mut self, frames: u64) {
         match self {
             Source::Decoder(decoder) => decoder.skip_frames(frames),
-            Source::Raw { samples, next, spec } => {
+            Source::Raw {
+                samples,
+                next,
+                spec,
+            } => {
                 let skipped = (frames as usize).saturating_mul(spec.channels as usize);
                 *next = next.saturating_add(skipped).min(samples.len());
             }
@@ -122,7 +150,11 @@ impl Source {
     fn next_chunk_into(&mut self, out: &mut Vec<i32>) -> Result<bool> {
         match self {
             Source::Decoder(decoder) => decoder.next_chunk_into(out),
-            Source::Raw { samples, next, spec } => {
+            Source::Raw {
+                samples,
+                next,
+                spec,
+            } => {
                 if *next >= samples.len() {
                     return Ok(false);
                 }
@@ -211,10 +243,18 @@ impl AudioThread {
                     Err(TryRecvError::Disconnected) => break,
                 }
             } else if let Some(deadline) = self.idle_deadline() {
-                match self.ctx.rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                match self
+                    .ctx
+                    .rx
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                {
                     Ok(msg) => Some(msg),
                     Err(RecvTimeoutError::Timeout) => {
-                        self.release_output(Release { reason: ReleaseReason::Idle, by: None, done: None });
+                        self.release_output(Release {
+                            reason: ReleaseReason::Idle,
+                            by: None,
+                            done: None,
+                        });
                         continue;
                     }
                     Err(RecvTimeoutError::Disconnected) => break,
@@ -269,22 +309,32 @@ impl AudioThread {
             Msg::Command(Command::Previous) => {
                 let restart = self.heard_position() >= PREVIOUS_RESTART_AFTER;
                 self.interrupt_current();
-                self.request_load(LoadTarget::Advance(if restart { Advance::Restart } else { Advance::Previous }));
+                self.request_load(LoadTarget::Advance(if restart {
+                    Advance::Restart
+                } else {
+                    Advance::Previous
+                }));
             }
             Msg::Command(Command::Stop) => self.stop(),
             Msg::Command(Command::Pause) => self.pause(),
             Msg::Command(Command::Resume) => self.resume(),
             Msg::Command(Command::TogglePause) => match self.state {
-                State::Playing | State::Loading | State::Seeking if !self.pause_when_ready => self.pause(),
+                State::Playing | State::Loading | State::Seeking if !self.pause_when_ready => {
+                    self.pause()
+                }
                 _ => self.resume(),
             },
             Msg::Command(Command::Seek(target)) => self.seek(target),
-            Msg::Command(Command::Release) => {
-                self.release_output(Release { reason: ReleaseReason::Command, by: None, done: None })
-            }
-            Msg::ReleaseRequested { by, done } => {
-                self.release_output(Release { reason: ReleaseReason::Requested, by, done: Some(done) })
-            }
+            Msg::Command(Command::Release) => self.release_output(Release {
+                reason: ReleaseReason::Command,
+                by: None,
+                done: None,
+            }),
+            Msg::ReleaseRequested { by, done } => self.release_output(Release {
+                reason: ReleaseReason::Requested,
+                by,
+                done: Some(done),
+            }),
             Msg::Loaded { generation, track } if self.is_awaited(generation) => {
                 let result = if self.state == State::Seeking {
                     self.finish_seek(*track)
@@ -318,9 +368,15 @@ impl AudioThread {
 
     /// Writes at most one period of the current track to the sink.
     fn play_step(&mut self) -> Result<()> {
-        let Some(playing) = self.current.as_mut() else { return Ok(()) };
-        let Some(sink) = self.sink.as_mut() else { return Err(anyhow!("playing without an audio output")) };
-        let Some(source) = playing.source.as_mut() else { return Err(anyhow!("playing without a source")) };
+        let Some(playing) = self.current.as_mut() else {
+            return Ok(());
+        };
+        let Some(sink) = self.sink.as_mut() else {
+            return Err(anyhow!("playing without an audio output"));
+        };
+        let Some(source) = playing.source.as_mut() else {
+            return Err(anyhow!("playing without a source"));
+        };
 
         if playing.offset >= playing.pending.len() {
             if !source.next_chunk_into(&mut playing.pending)? {
@@ -335,13 +391,19 @@ impl AudioThread {
         // A sink that takes nothing from a partial frame would otherwise spin forever.
         if frames > 0 {
             let written_to = playing.offset + frames * channels;
-            playing.recent.extend_from_slice(&playing.pending[playing.offset..written_to]);
+            playing
+                .recent
+                .extend_from_slice(&playing.pending[playing.offset..written_to]);
             let keep = sink.capacity_frames() as usize * channels;
             if playing.recent.len() > keep * 2 {
                 playing.recent.drain(..playing.recent.len() - keep);
             }
         }
-        playing.offset = if frames == 0 { playing.pending.len() } else { playing.offset + frames * channels };
+        playing.offset = if frames == 0 {
+            playing.pending.len()
+        } else {
+            playing.offset + frames * channels
+        };
         playing.frames_written += frames as u64;
 
         if playing.last_position_at.elapsed() >= self.ctx.position_interval {
@@ -353,16 +415,23 @@ impl AudioThread {
     /// What the listener has actually heard: everything handed to the device except what it has
     /// not played yet. Counting only what was written would run ahead by the device's buffer.
     fn heard_position(&mut self) -> Duration {
-        let Some(playing) = self.current.as_ref() else { return Duration::ZERO };
+        let Some(playing) = self.current.as_ref() else {
+            return Duration::ZERO;
+        };
         // If the device can't say, or was handed back, nothing is queued.
-        let queued = self.sink.as_mut().map_or(0, |sink| sink.delay_frames().unwrap_or(0));
+        let queued = self
+            .sink
+            .as_mut()
+            .map_or(0, |sink| sink.delay_frames().unwrap_or(0));
         let heard = playing.frames_written.saturating_sub(queued);
         playing.base + frames_to_duration(heard, playing.spec.sample_rate)
     }
 
     fn emit_position(&mut self) {
         let position = self.heard_position();
-        let Some(playing) = self.current.as_mut() else { return };
+        let Some(playing) = self.current.as_mut() else {
+            return;
+        };
         playing.position = position;
         playing.last_position_at = Instant::now();
         let duration = playing.duration;
@@ -379,22 +448,34 @@ impl AudioThread {
         }
         self.emit_position();
         if let Some(playing) = self.current.take() {
-            self.emit(Event::TrackEnded { meta: playing.meta, reason: EndReason::Completed });
+            self.emit(Event::TrackEnded {
+                meta: playing.meta,
+                reason: EndReason::Completed,
+            });
         }
         self.request_load(LoadTarget::Advance(Advance::Auto));
     }
 
     fn open_source(media: TrackMedia) -> Result<Source> {
         Ok(match media {
-            TrackMedia::Encoded { source, extension } => {
-                Source::Decoder(Decoder::open_boxed(source, extension.as_deref()).context("opening the decoder")?)
-            }
-            TrackMedia::RawPcm { samples, spec } => Source::Raw { samples, next: 0, spec },
+            TrackMedia::Encoded { source, extension } => Source::Decoder(
+                Decoder::open_boxed(source, extension.as_deref()).context("opening the decoder")?,
+            ),
+            TrackMedia::RawPcm { samples, spec } => Source::Raw {
+                samples,
+                next: 0,
+                spec,
+            },
         })
     }
 
     fn start_track(&mut self, track: LoadedTrack) -> Result<()> {
-        let LoadedTrack { meta, media, seek, start } = track;
+        let LoadedTrack {
+            meta,
+            media,
+            seek,
+            start,
+        } = track;
         let source = Self::open_source(media)?;
 
         let spec = source.spec();
@@ -419,7 +500,11 @@ impl AudioThread {
             last_position_at: Instant::now(),
         });
         self.emit(Event::TrackStarted { meta, spec });
-        let state = if self.pause_when_ready { State::Paused } else { State::Playing };
+        let state = if self.pause_when_ready {
+            State::Paused
+        } else {
+            State::Playing
+        };
         self.pause_when_ready = false;
         self.set_state(state);
         self.emit_position();
@@ -431,8 +516,15 @@ impl AudioThread {
     fn open_sink(&mut self, spec: SourceSpec) -> Result<()> {
         // The device can only be opened once, so the old configuration has to go first.
         self.sink = None;
-        self.sink = Some(self.ctx.sinks.open(spec).context("opening the audio output")?);
+        self.sink = Some(
+            self.ctx
+                .sinks
+                .open(spec)
+                .context("opening the audio output")?,
+        );
         if self.released.take().is_some() {
+            // The status first: whoever hears the event and asks for the status must see it.
+            self.publish_status();
             self.emit(Event::OutputAcquired);
         }
         Ok(())
@@ -449,7 +541,9 @@ impl AudioThread {
     }
 
     fn seek(&mut self, target: SeekTarget) {
-        if !matches!(self.state, State::Playing | State::Paused | State::Seeking) || self.current.is_none() {
+        if !matches!(self.state, State::Playing | State::Paused | State::Seeking)
+            || self.current.is_none()
+        {
             self.reject_seek("nothing is playing");
             return;
         }
@@ -462,7 +556,11 @@ impl AudioThread {
             SeekTarget::Forward(by) => from.saturating_add(by),
             SeekTarget::Backward(by) => from.saturating_sub(by),
         };
-        let Some((mode, duration)) = self.current.as_ref().map(|playing| (playing.seek, playing.duration)) else {
+        let Some((mode, duration)) = self
+            .current
+            .as_ref()
+            .map(|playing| (playing.seek, playing.duration))
+        else {
             return;
         };
 
@@ -471,7 +569,8 @@ impl AudioThread {
         } else if duration.is_some_and(|duration| at >= duration) {
             self.seek_past_the_end();
         } else {
-            let was_paused = self.state == State::Paused || (self.state == State::Seeking && self.pause_when_ready);
+            let was_paused = self.state == State::Paused
+                || (self.state == State::Seeking && self.pause_when_ready);
             match mode {
                 SeekMode::InPlace => self.seek_in_place(at),
                 SeekMode::ForwardOnly => self.seek_forward_only(at),
@@ -482,14 +581,19 @@ impl AudioThread {
     }
 
     fn reject_seek(&self, reason: &str) {
-        self.emit(Event::SeekRejected { reason: reason.to_string() });
+        self.emit(Event::SeekRejected {
+            reason: reason.to_string(),
+        });
     }
 
     /// Seeking beyond the end ends the track, as in MPRIS, instead of clamping to just before it.
     fn seek_past_the_end(&mut self) {
         self.flush_sink();
         if let Some(playing) = self.current.take() {
-            self.emit(Event::TrackEnded { meta: playing.meta, reason: EndReason::Completed });
+            self.emit(Event::TrackEnded {
+                meta: playing.meta,
+                reason: EndReason::Completed,
+            });
         }
         self.request_load(LoadTarget::Advance(Advance::Auto));
     }
@@ -497,7 +601,11 @@ impl AudioThread {
     /// The source can be repositioned directly.
     fn seek_in_place(&mut self, at: Duration) {
         self.flush_sink();
-        let result = self.current.as_mut().and_then(|playing| playing.source.as_mut()).map(|source| source.seek(at));
+        let result = self
+            .current
+            .as_mut()
+            .and_then(|playing| playing.source.as_mut())
+            .map(|source| source.seek(at));
         match result {
             Some(Ok(landed)) => self.finish_reposition(landed),
             Some(Err(error)) => self.fail(error.context("seeking in the track")),
@@ -508,8 +616,11 @@ impl AudioThread {
     /// The source is one continuous stream: it can skip ahead of what it has already decoded, and
     /// nothing else.
     fn seek_forward_only(&mut self, at: Duration) {
-        let Some(playing) = self.current.as_ref() else { return };
-        let queued_in_chunk = playing.pending.len().saturating_sub(playing.offset) / playing.spec.channels as usize;
+        let Some(playing) = self.current.as_ref() else {
+            return;
+        };
+        let queued_in_chunk =
+            playing.pending.len().saturating_sub(playing.offset) / playing.spec.channels as usize;
         let decoded = playing.frames_written + queued_in_chunk as u64;
         let decoded_until = playing.base + frames_to_duration(decoded, playing.spec.sample_rate);
         if at < decoded_until {
@@ -519,7 +630,11 @@ impl AudioThread {
 
         let skip = duration_to_frames(at - decoded_until, playing.spec.sample_rate);
         self.flush_sink();
-        if let Some(source) = self.current.as_mut().and_then(|playing| playing.source.as_mut()) {
+        if let Some(source) = self
+            .current
+            .as_mut()
+            .and_then(|playing| playing.source.as_mut())
+        {
             source.skip_frames(skip);
         }
         self.finish_reposition(at);
@@ -528,7 +643,9 @@ impl AudioThread {
     /// The stream can't rewind: drop it and ask the supplier to open the track at the target.
     fn seek_reopen(&mut self, at: Duration, was_paused: bool) {
         self.flush_sink();
-        let Some(playing) = self.current.as_mut() else { return };
+        let Some(playing) = self.current.as_mut() else {
+            return;
+        };
         playing.source = None; // dropping the old stream stops its download
         let track = playing.meta.track.clone();
         self.rebase(at);
@@ -560,16 +677,23 @@ impl AudioThread {
 
     /// The reopened track has arrived: skip to the exact target within it and carry on.
     fn finish_seek(&mut self, track: LoadedTrack) -> Result<()> {
-        let LoadedTrack { media, seek, start, .. } = track;
+        let LoadedTrack {
+            media, seek, start, ..
+        } = track;
         let mut source = Self::open_source(media)?;
-        let Some(playing) = self.current.as_mut() else { return Ok(()) };
+        let Some(playing) = self.current.as_mut() else {
+            return Ok(());
+        };
         if source.spec() != playing.spec {
             bail!("the reopened track has a different format than the one that was playing");
         }
 
         // The supplier starts at a boundary at or before the target; the rest is skipped here.
         let landed = if start <= playing.base {
-            source.skip_frames(duration_to_frames(playing.base - start, playing.spec.sample_rate));
+            source.skip_frames(duration_to_frames(
+                playing.base - start,
+                playing.spec.sample_rate,
+            ));
             playing.base
         } else {
             start
@@ -579,7 +703,11 @@ impl AudioThread {
         playing.base = landed;
         playing.position = landed;
 
-        let state = if self.pause_when_ready { State::Paused } else { State::Playing };
+        let state = if self.pause_when_ready {
+            State::Paused
+        } else {
+            State::Playing
+        };
         self.pause_when_ready = false;
         self.set_state(state);
         self.emit_position();
@@ -620,7 +748,9 @@ impl AudioThread {
             State::Loading | State::Seeking => self.pause_when_ready = false,
             State::Paused => {
                 if let Err(error) = self.reopen_output() {
-                    self.emit(Event::Error { message: format!("{error:#}") });
+                    self.emit(Event::Error {
+                        message: format!("{error:#}"),
+                    });
                     return;
                 }
                 if let (Some(playing), Some(sink)) = (self.current.as_mut(), self.sink.as_mut())
@@ -641,9 +771,14 @@ impl AudioThread {
     /// Cuts the current track short, discarding whatever is queued in the device so it is never
     /// heard. The sink stays open for the next track.
     fn interrupt_current(&mut self) {
-        let Some(playing) = self.current.take() else { return };
+        let Some(playing) = self.current.take() else {
+            return;
+        };
         self.flush_sink();
-        self.emit(Event::TrackEnded { meta: playing.meta, reason: EndReason::Interrupted });
+        self.emit(Event::TrackEnded {
+            meta: playing.meta,
+            reason: EndReason::Interrupted,
+        });
     }
 
     /// Throws away everything queued in the device, so it is never heard.
@@ -651,7 +786,9 @@ impl AudioThread {
         if let Some(sink) = self.sink.as_mut()
             && let Err(error) = sink.flush()
         {
-            self.emit(Event::Error { message: format!("{:#}", error.context("flushing the audio output")) });
+            self.emit(Event::Error {
+                message: format!("{:#}", error.context("flushing the audio output")),
+            });
         }
     }
 
@@ -678,7 +815,9 @@ impl AudioThread {
 
     /// The output went away while a track was loaded.
     fn output_lost(&mut self, error: anyhow::Error) {
-        self.emit(Event::Error { message: format!("{error:#}") });
+        self.emit(Event::Error {
+            message: format!("{error:#}"),
+        });
         // The dead sink can't be paused; the audio it still held is set aside as if it had been.
         if self.state == State::Playing {
             self.set_state(State::Paused);
@@ -687,7 +826,11 @@ impl AudioThread {
         self.sink = None;
         self.ctx.sinks.release();
         self.released = Some(None);
-        self.emit(Event::OutputReleased { by: None, reason: ReleaseReason::Lost });
+        self.publish_status();
+        self.emit(Event::OutputReleased {
+            by: None,
+            reason: ReleaseReason::Lost,
+        });
         self.emit_position();
         self.publish_status();
     }
@@ -722,7 +865,9 @@ impl AudioThread {
                 }
                 Err(error) => {
                     let message = format!("{error:#}");
-                    self.emit(Event::Error { message: message.clone() });
+                    self.emit(Event::Error {
+                        message: message.clone(),
+                    });
                     Err(message)
                 }
             }
@@ -777,8 +922,12 @@ impl AudioThread {
                 self.sink = None;
                 self.ctx.sinks.release();
                 self.released = Some(request.by.clone());
-                self.emit(Event::OutputReleased { by: request.by.clone(), reason: request.reason });
+                // The status first: whoever hears the event and asks for the status must see it.
                 self.publish_status();
+                self.emit(Event::OutputReleased {
+                    by: request.by.clone(),
+                    reason: request.reason,
+                });
                 request.answer(true);
             }
         }
@@ -787,16 +936,23 @@ impl AudioThread {
     /// Moves what the device holds but the listener has not heard back into `pending`, and
     /// rebases the position on what has been heard.
     fn set_aside_unheard(&mut self) {
-        let (Some(playing), Some(sink)) = (self.current.as_mut(), self.sink.as_mut()) else { return };
+        let (Some(playing), Some(sink)) = (self.current.as_mut(), self.sink.as_mut()) else {
+            return;
+        };
         let channels = playing.spec.channels as usize;
         let queued = sink.delay_frames().unwrap_or(0) as usize;
-        let keep = queued.min(playing.recent.len() / channels).min(playing.frames_written as usize);
+        let keep = queued
+            .min(playing.recent.len() / channels)
+            .min(playing.frames_written as usize);
 
         let mut carried = playing.recent[playing.recent.len() - keep * channels..].to_vec();
         carried.extend_from_slice(&playing.pending[playing.offset.min(playing.pending.len())..]);
         playing.pending = carried;
         playing.offset = 0;
-        playing.base += frames_to_duration(playing.frames_written - keep as u64, playing.spec.sample_rate);
+        playing.base += frames_to_duration(
+            playing.frames_written - keep as u64,
+            playing.spec.sample_rate,
+        );
         playing.frames_written = 0;
         playing.recent.clear();
         playing.sink_paused = false;
@@ -804,9 +960,14 @@ impl AudioThread {
     }
 
     fn fail(&mut self, error: anyhow::Error) {
-        self.emit(Event::Error { message: format!("{error:#}") });
+        self.emit(Event::Error {
+            message: format!("{error:#}"),
+        });
         if let Some(playing) = self.current.take() {
-            self.emit(Event::TrackEnded { meta: playing.meta, reason: EndReason::Failed });
+            self.emit(Event::TrackEnded {
+                meta: playing.meta,
+                reason: EndReason::Failed,
+            });
         }
         self.cancel_load();
         self.pause_when_ready = false;
@@ -827,7 +988,13 @@ impl AudioThread {
     }
 
     /// Asks the supplier for a track, from `at` if it can, and waits in `state` for the answer.
-    fn begin_load(&mut self, target: LoadTarget, at: Duration, state: State, pause_when_ready: bool) {
+    fn begin_load(
+        &mut self,
+        target: LoadTarget,
+        at: Duration,
+        state: State,
+        pause_when_ready: bool,
+    ) {
         self.cancel_load();
         if let Some(pending) = self.release_when_ready.take() {
             // Asking for a track again means the device is wanted.
@@ -847,8 +1014,14 @@ impl AudioThread {
             let msg = match track {
                 None => Msg::QueueExhausted { generation },
                 Some(track) => match supplier.open(track, at).await {
-                    Ok(track) => Msg::Loaded { generation, track: Box::new(track) },
-                    Err(error) => Msg::LoadFailed { generation, error: format!("{error:#}") },
+                    Ok(track) => Msg::Loaded {
+                        generation,
+                        track: Box::new(track),
+                    },
+                    Err(error) => Msg::LoadFailed {
+                        generation,
+                        error: format!("{error:#}"),
+                    },
                 },
             };
             let _ = tx.send(msg);

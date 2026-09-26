@@ -5,8 +5,8 @@ mod session_cmd;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use phonia_core::engine::TrackRef;
 use phonia_core::config::{self, Overrides, Quality, Settings};
+use phonia_core::engine::TrackRef;
 use phonia_core::openers::{DispatchOpener, Source, TidalOpener};
 use phonia_core::output::{alsa, device};
 use phonia_core::queue::{Queue, QueueTrack, Repeat};
@@ -149,7 +149,12 @@ fn settings(config_flag: Option<&Path>, overrides: Overrides) -> Result<Settings
 
 /// Where the TIDAL login is kept, according to the settings.
 fn session_store(config_flag: Option<&Path>) -> Result<Arc<dyn auth::SessionStore>> {
-    auth::open_store(settings(config_flag, Overrides::default())?.session_store.value, auth::Interaction::Allow)
+    auth::open_store(
+        settings(config_flag, Overrides::default())?
+            .session_store
+            .value,
+        auth::Interaction::Allow,
+    )
 }
 
 #[tokio::main]
@@ -173,23 +178,56 @@ async fn main() -> ExitCode {
             Ok(settings) => session_cmd::whoami(settings.session_store.value, check).await,
             Err(error) => Err(error),
         },
-        Command::Play { track_ids, device, output, quality, save_mp4, interactive, shuffle, repeat } => {
-            match (Overrides { device, max_quality: quality, ..Overrides::default() })
-                .with_output(output.as_deref())
-                .and_then(|overrides| settings(cli.config.as_deref(), overrides))
+        Command::Play {
+            track_ids,
+            device,
+            output,
+            quality,
+            save_mp4,
+            interactive,
+            shuffle,
+            repeat,
+        } => {
+            match (Overrides {
+                device,
+                max_quality: quality,
+                ..Overrides::default()
+            })
+            .with_output(output.as_deref())
+            .and_then(|overrides| settings(cli.config.as_deref(), overrides))
             {
                 Ok(settings) => {
-                    run_play(&track_ids, &settings, save_mp4.as_deref(), interactive, shuffle, repeat.into()).await
+                    run_play(
+                        &track_ids,
+                        &settings,
+                        save_mp4.as_deref(),
+                        interactive,
+                        shuffle,
+                        repeat.into(),
+                    )
+                    .await
                 }
                 Err(error) => Err(error),
             }
         }
-        Command::PlayFile { paths, device, output, interactive, shuffle, repeat } => {
-            match (Overrides { device, ..Overrides::default() })
-                .with_output(output.as_deref())
-                .and_then(|overrides| settings(cli.config.as_deref(), overrides))
+        Command::PlayFile {
+            paths,
+            device,
+            output,
+            interactive,
+            shuffle,
+            repeat,
+        } => {
+            match (Overrides {
+                device,
+                ..Overrides::default()
+            })
+            .with_output(output.as_deref())
+            .and_then(|overrides| settings(cli.config.as_deref(), overrides))
             {
-                Ok(settings) => run_play_file(&paths, &settings, interactive, shuffle, repeat.into()).await,
+                Ok(settings) => {
+                    run_play_file(&paths, &settings, interactive, shuffle, repeat.into()).await
+                }
                 Err(error) => Err(error),
             }
         }
@@ -197,8 +235,14 @@ async fn main() -> ExitCode {
         Command::Devices => run_devices().await,
         Command::Config { action } => config_cmd::run(action, cli.config.as_deref()),
         Command::ProbeDevice { device } => {
-            match settings(cli.config.as_deref(), Overrides { device, ..Overrides::default() })
-                .and_then(|settings| settings.require_device().map(str::to_string))
+            match settings(
+                cli.config.as_deref(),
+                Overrides {
+                    device,
+                    ..Overrides::default()
+                },
+            )
+            .and_then(|settings| settings.require_device().map(str::to_string))
             {
                 Ok(device) => {
                     let reserver = probe_reserver(cli.config.as_deref());
@@ -235,7 +279,9 @@ async fn run_play_file(
         let path = std::fs::canonicalize(path).with_context(|| format!("opening {path:?}"))?;
         queue.add([QueueTrack {
             source: TrackRef(Source::file(&path)?.to_wire()),
-            title: path.file_name().map(|name| name.to_string_lossy().into_owned()),
+            title: path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned()),
             duration: None,
         }]);
     }
@@ -256,7 +302,10 @@ async fn run_play(
     let store = auth::open_store(settings.session_store.value, auth::Interaction::Allow)?;
     let mut client = auth::load_client(&*store).await?;
     // Only to fail now, with a clear message, if the login no longer works.
-    client.refresh_access_token(false).await.context("refreshing the access token")?;
+    client
+        .refresh_access_token(false)
+        .await
+        .context("refreshing the access token")?;
     let http = tidal::build_http_client()?;
 
     let mut opener = TidalOpener::new(http, client, settings.max_quality.value.into()).print_info();
@@ -288,7 +337,9 @@ fn player_options(settings: &phonia_core::config::Settings) -> phonia_core::engi
 }
 
 /// The reservation to probe under, unless the settings turn reservation off.
-fn probe_reserver(config_flag: Option<&std::path::Path>) -> Option<Arc<dyn phonia_core::output::reserve::DeviceReserver>> {
+fn probe_reserver(
+    config_flag: Option<&std::path::Path>,
+) -> Option<Arc<dyn phonia_core::output::reserve::DeviceReserver>> {
     let settings = settings(config_flag, Overrides::default()).ok()?;
     reserver(&settings)
 }
@@ -297,7 +348,10 @@ fn probe_reserver(config_flag: Option<&std::path::Path>) -> Option<Arc<dyn phoni
 async fn run_devices() -> Result<()> {
     println!("{}\n", device::list(std::path::Path::new(device::ASOUND))?);
     match phonia_core::output::shared::pulse::outputs().await {
-        Ok(outputs) => println!("{}", phonia_core::output::shared::pulse::format_outputs(&outputs)),
+        Ok(outputs) => println!(
+            "{}",
+            phonia_core::output::shared::pulse::format_outputs(&outputs)
+        ),
         Err(error) => println!("PipeWire outputs (shared mode): not available ({error:#})."),
     }
     Ok(())
@@ -317,7 +371,9 @@ fn sinks_for(settings: &Settings) -> Result<Arc<dyn phonia_core::output::SinkFac
 }
 
 /// Asks the desktop for the sound card through D-Bus, unless `[output] reserve` is off.
-fn reserver(settings: &phonia_core::config::Settings) -> Option<Arc<dyn phonia_core::output::reserve::DeviceReserver>> {
+fn reserver(
+    settings: &phonia_core::config::Settings,
+) -> Option<Arc<dyn phonia_core::output::reserve::DeviceReserver>> {
     settings.reserve.value.then(|| {
         Arc::new(phonia_core::output::dbus::DbusReserver::new(
             tokio::runtime::Handle::current(),

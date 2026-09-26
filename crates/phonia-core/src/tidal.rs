@@ -170,13 +170,18 @@ pub async fn fetch_playback_info(
     let manifest_text =
         String::from_utf8(manifest_bytes).context("the decoded manifest is not valid UTF-8")?;
 
-    let manifest = if let Ok(json_manifest) = serde_json::from_str::<RawJsonManifest>(&manifest_text) {
+    let manifest = if let Ok(json_manifest) =
+        serde_json::from_str::<RawJsonManifest>(&manifest_text)
+    {
         let url = json_manifest
             .urls
             .into_iter()
             .next()
             .ok_or_else(|| anyhow!("the JSON manifest contains no URL"))?;
-        ManifestKind::Json { url, codecs: json_manifest.codecs }
+        ManifestKind::Json {
+            url,
+            codecs: json_manifest.codecs,
+        }
     } else {
         let dash = dash::parse_mpd(&manifest_text).context("parsing the DASH (MPD) manifest")?;
         ManifestKind::Dash(dash)
@@ -199,11 +204,15 @@ pub fn print_playback_info(info: &PlaybackInfo) {
     println!("Quality:         {}", info.audio_quality);
     println!(
         "Bit depth:       {}",
-        info.bit_depth.map(|b| b.to_string()).unwrap_or_else(|| "?".to_string())
+        info.bit_depth
+            .map(|b| b.to_string())
+            .unwrap_or_else(|| "?".to_string())
     );
     println!(
         "Sample rate:     {}",
-        info.sample_rate.map(|r| format!("{r} Hz")).unwrap_or_else(|| "?".to_string())
+        info.sample_rate
+            .map(|r| format!("{r} Hz"))
+            .unwrap_or_else(|| "?".to_string())
     );
     println!("Manifest MIME:   {}", info.manifest_mime_type);
     println!("Codecs:          {}", info.codecs().unwrap_or("?"));
@@ -218,7 +227,10 @@ mod tests {
         // Regression test: `AudioQuality::HiRes`'s `Display` impl on tidlers 0.5.0 prints
         // "HI_RES" (the legacy MQA tier), which is NOT what the API wants for true HiRes FLAC.
         assert_eq!(api_quality(&AudioQuality::HiRes), "HI_RES_LOSSLESS");
-        assert_ne!(api_quality(&AudioQuality::HiRes), AudioQuality::HiRes.to_string());
+        assert_ne!(
+            api_quality(&AudioQuality::HiRes),
+            AudioQuality::HiRes.to_string()
+        );
     }
 
     #[test]

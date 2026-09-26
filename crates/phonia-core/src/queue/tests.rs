@@ -6,7 +6,11 @@ use rand::{RngExt, SeedableRng};
 use std::collections::HashSet;
 
 fn track(name: &str) -> QueueTrack {
-    QueueTrack { source: TrackRef(name.to_string()), title: Some(name.to_string()), duration: None }
+    QueueTrack {
+        source: TrackRef(name.to_string()),
+        title: Some(name.to_string()),
+        duration: None,
+    }
 }
 
 /// A queue holding `names` in order, and the ids of its entries.
@@ -18,7 +22,12 @@ fn queue_of(names: &[&str]) -> (Inner, Vec<ItemId>) {
 
 /// The queue as a list shows it.
 fn listed(inner: &Inner) -> Vec<String> {
-    inner.snapshot().items.iter().map(|item| item.track.source.0.clone()).collect()
+    inner
+        .snapshot()
+        .items
+        .iter()
+        .map(|item| item.track.source.0.clone())
+        .collect()
 }
 
 fn name_of(inner: &Inner, id: Option<ItemId>) -> Option<String> {
@@ -49,12 +58,20 @@ fn item_ids_round_trip_through_track_refs() {
 fn the_same_track_queued_twice_is_two_entries() {
     let mut inner = Inner::new(1);
     let ids = inner.add([track("a"), track("a"), track("b")]);
-    assert_eq!(ids.iter().collect::<HashSet<_>>().len(), 3, "each entry has its own id");
+    assert_eq!(
+        ids.iter().collect::<HashSet<_>>().len(),
+        3,
+        "each entry has its own id"
+    );
 
     set_current(&mut inner, ids[1]);
     assert_eq!(answer(&mut inner, Advance::Next), Some("b".into()));
     inner.commit(ids[1]); // the offer was only looked at
-    assert_eq!(inner.advance(Advance::Previous), Some(ids[0]), "back to the FIRST a, which is a different entry");
+    assert_eq!(
+        inner.advance(Advance::Previous),
+        Some(ids[0]),
+        "back to the FIRST a, which is a different entry"
+    );
 }
 
 #[test]
@@ -82,9 +99,18 @@ fn answer(inner: &mut Inner, how: Advance) -> Option<String> {
 
 #[test]
 fn repeat_off_in_the_middle() {
-    for (how, expected) in [(Advance::Auto, Some("c")), (Advance::Next, Some("c")), (Advance::Previous, Some("a")), (Advance::Restart, Some("b"))] {
+    for (how, expected) in [
+        (Advance::Auto, Some("c")),
+        (Advance::Next, Some("c")),
+        (Advance::Previous, Some("a")),
+        (Advance::Restart, Some("b")),
+    ] {
         let (mut inner, _) = positioned(Repeat::Off, 1);
-        assert_eq!(answer(&mut inner, how), expected.map(String::from), "{how:?}");
+        assert_eq!(
+            answer(&mut inner, how),
+            expected.map(String::from),
+            "{how:?}"
+        );
     }
 }
 
@@ -96,7 +122,11 @@ fn repeat_off_at_the_end_and_at_the_start() {
     assert_eq!(answer(&mut inner, Advance::Next), None);
 
     let (mut inner, _) = positioned(Repeat::Off, 0);
-    assert_eq!(answer(&mut inner, Advance::Previous), None, "nothing before the first");
+    assert_eq!(
+        answer(&mut inner, Advance::Previous),
+        None,
+        "nothing before the first"
+    );
 }
 
 #[test]
@@ -112,11 +142,23 @@ fn repeat_all_wraps_in_both_directions() {
 #[test]
 fn repeat_one_repeats_on_auto_but_a_skip_moves_on() {
     let (mut inner, _) = positioned(Repeat::One, 1);
-    assert_eq!(answer(&mut inner, Advance::Auto), Some("b".into()), "the track ended by itself");
+    assert_eq!(
+        answer(&mut inner, Advance::Auto),
+        Some("b".into()),
+        "the track ended by itself"
+    );
     let (mut inner, _) = positioned(Repeat::One, 1);
-    assert_eq!(answer(&mut inner, Advance::Next), Some("c".into()), "the user skipped");
+    assert_eq!(
+        answer(&mut inner, Advance::Next),
+        Some("c".into()),
+        "the user skipped"
+    );
     let (mut inner, _) = positioned(Repeat::One, 2);
-    assert_eq!(answer(&mut inner, Advance::Next), Some("a".into()), "and a skip from the last wraps");
+    assert_eq!(
+        answer(&mut inner, Advance::Next),
+        Some("a".into()),
+        "and a skip from the last wraps"
+    );
     let (mut inner, _) = positioned(Repeat::One, 1);
     assert_eq!(answer(&mut inner, Advance::Restart), Some("b".into()));
 }
@@ -134,7 +176,12 @@ fn with_nothing_playing_everything_but_restart_starts_at_the_first_entry() {
 #[test]
 fn an_empty_queue_has_nothing_for_anything() {
     for repeat in [Repeat::Off, Repeat::One, Repeat::All] {
-        for how in [Advance::Auto, Advance::Next, Advance::Previous, Advance::Restart] {
+        for how in [
+            Advance::Auto,
+            Advance::Next,
+            Advance::Previous,
+            Advance::Restart,
+        ] {
             let mut inner = Inner::new(1);
             inner.set_repeat(repeat);
             assert_eq!(inner.advance(how), None, "{repeat:?} {how:?}");
@@ -161,7 +208,11 @@ fn advance_does_not_move_the_cursor_only_opening_does() {
     set_current(&mut inner, ids[0]);
 
     assert_eq!(inner.advance(Advance::Next), Some(ids[1]));
-    assert_eq!(inner.snapshot().current, Some(ids[0]), "offered, not opened");
+    assert_eq!(
+        inner.snapshot().current,
+        Some(ids[0]),
+        "offered, not opened"
+    );
 
     inner.commit(ids[1]);
     assert_eq!(inner.snapshot().current, Some(ids[1]));
@@ -172,7 +223,11 @@ fn advancing_twice_before_an_open_chains() {
     let (mut inner, ids) = queue_of(&["a", "b", "c", "d"]);
     set_current(&mut inner, ids[0]);
     assert_eq!(inner.advance(Advance::Next), Some(ids[1]));
-    assert_eq!(inner.advance(Advance::Next), Some(ids[2]), "two skips in a row are two entries ahead");
+    assert_eq!(
+        inner.advance(Advance::Next),
+        Some(ids[2]),
+        "two skips in a row are two entries ahead"
+    );
 }
 
 #[test]
@@ -181,7 +236,11 @@ fn opening_something_else_supersedes_what_was_offered() {
     set_current(&mut inner, ids[0]);
     inner.advance(Advance::Next); // offered b ...
     inner.commit(ids[2]); // ... but the user jumped to c
-    assert_eq!(inner.advance(Advance::Next), None, "measured from c, not from the abandoned offer");
+    assert_eq!(
+        inner.advance(Advance::Next),
+        None,
+        "measured from c, not from the abandoned offer"
+    );
 }
 
 #[test]
@@ -193,7 +252,11 @@ fn reopening_the_current_entry_changes_nothing() {
     // A restart, a repeat and a seek that reopens the stream all open the current entry again.
     set_current(&mut inner, ids[1]);
     assert_eq!(inner.snapshot().current, before.current);
-    assert_eq!(answer(&mut inner, Advance::Previous), Some("a".into()), "history is untouched");
+    assert_eq!(
+        answer(&mut inner, Advance::Previous),
+        Some("a".into()),
+        "history is untouched"
+    );
 }
 
 #[test]
@@ -211,11 +274,19 @@ fn previous_goes_back_to_what_was_actually_played() {
     for id in [ids[0], ids[2], ids[3]] {
         set_current(&mut inner, id); // a, then jumped to c, then d
     }
-    assert_eq!(answer(&mut inner, Advance::Previous), Some("c".into()), "not b, which was never played");
+    assert_eq!(
+        answer(&mut inner, Advance::Previous),
+        Some("c".into()),
+        "not b, which was never played"
+    );
     inner.commit(ids[2]);
     assert_eq!(answer(&mut inner, Advance::Previous), Some("a".into()));
     inner.commit(ids[0]);
-    assert_eq!(answer(&mut inner, Advance::Previous), None, "history is used up and a is first");
+    assert_eq!(
+        answer(&mut inner, Advance::Previous),
+        None,
+        "history is used up and a is first"
+    );
 }
 
 #[test]
@@ -236,7 +307,11 @@ fn history_is_bounded() {
     for id in &ids {
         set_current(&mut inner, *id);
     }
-    assert_eq!(inner.history_len(), 200, "only the most recent entries are remembered");
+    assert_eq!(
+        inner.history_len(),
+        200,
+        "only the most recent entries are remembered"
+    );
 }
 
 #[test]
@@ -336,7 +411,11 @@ fn removing_the_playing_entry_makes_the_next_one_take_its_place() {
     inner.remove(&[ids[1]]);
 
     assert_eq!(inner.snapshot().current, None);
-    assert_eq!(answer(&mut inner, Advance::Auto), Some("c".into()), "c slid into b's slot");
+    assert_eq!(
+        answer(&mut inner, Advance::Auto),
+        Some("c".into()),
+        "c slid into b's slot"
+    );
 }
 
 #[test]
@@ -396,12 +475,19 @@ fn shuffle_keeps_the_current_entry_first_and_off_restores_queue_order() {
     inner.set_shuffle(true);
     let shuffled = inner.snapshot();
     assert!(is_permutation(&inner));
-    assert_eq!(shuffled.order[0], ids[5], "the playing entry stays where the cursor is");
+    assert_eq!(
+        shuffled.order[0], ids[5],
+        "the playing entry stays where the cursor is"
+    );
     assert_ne!(shuffled.order, ids, "and the rest is in a different order");
 
     inner.set_shuffle(false);
     assert_eq!(inner.snapshot().order, ids);
-    assert_eq!(inner.snapshot().current, Some(ids[5]), "the cursor did not move");
+    assert_eq!(
+        inner.snapshot().current,
+        Some(ids[5]),
+        "the cursor did not move"
+    );
 }
 
 #[test]
@@ -444,10 +530,16 @@ fn repeat_all_reshuffles_each_cycle_without_repeating_at_the_boundary() {
             sorted.sort();
             let mut all = ids.clone();
             all.sort();
-            assert_eq!(sorted, all, "seed {seed}: every cycle plays each entry once");
+            assert_eq!(
+                sorted, all,
+                "seed {seed}: every cycle plays each entry once"
+            );
         }
         for pair in played.windows(2) {
-            assert_ne!(pair[0], pair[1], "seed {seed}: the same entry twice in a row");
+            assert_ne!(
+                pair[0], pair[1],
+                "seed {seed}: the same entry twice in a row"
+            );
         }
     }
 }
@@ -461,7 +553,11 @@ fn entries_added_while_shuffled_go_to_the_end_of_the_play_order() {
 
     let added = inner.add([track("x")]);
     let after = inner.snapshot().order;
-    assert_eq!(after[..before.len()], before[..], "the existing order is untouched");
+    assert_eq!(
+        after[..before.len()],
+        before[..],
+        "the existing order is untouched"
+    );
     assert_eq!(after.last(), added.last());
     assert!(is_permutation(&inner));
 }
@@ -483,17 +579,33 @@ fn the_same_seed_shuffles_the_same_way() {
 #[test]
 fn opening_a_track_fills_in_only_what_was_missing() {
     let mut inner = Inner::new(1);
-    let ids = inner.add([QueueTrack { source: TrackRef("a".into()), title: None, duration: None }]);
+    let ids = inner.add([QueueTrack {
+        source: TrackRef("a".into()),
+        title: None,
+        duration: None,
+    }]);
     let before = inner.snapshot().version;
 
-    inner.record_meta(ids[0], Some("Title"), Some(std::time::Duration::from_secs(9)));
+    inner.record_meta(
+        ids[0],
+        Some("Title"),
+        Some(std::time::Duration::from_secs(9)),
+    );
     let item = inner.snapshot().items[0].clone();
     assert_eq!(item.track.title.as_deref(), Some("Title"));
     assert_eq!(item.track.duration, Some(std::time::Duration::from_secs(9)));
     assert!(inner.snapshot().version > before);
 
-    inner.record_meta(ids[0], Some("Other"), Some(std::time::Duration::from_secs(1)));
-    assert_eq!(inner.snapshot().items[0], item, "what is already known is kept");
+    inner.record_meta(
+        ids[0],
+        Some("Other"),
+        Some(std::time::Duration::from_secs(1)),
+    );
+    assert_eq!(
+        inner.snapshot().items[0],
+        item,
+        "what is already known is kept"
+    );
 }
 
 // ---- random edit scripts -------------------------------------------------------------------
@@ -515,7 +627,8 @@ fn invariants_hold_under_random_edit_scripts() {
         for step in 0..300 {
             let snapshot = inner.snapshot();
             let ids: Vec<ItemId> = snapshot.items.iter().map(|item| item.id).collect();
-            let pick = |script: &mut StdRng| ids.get(script.random_range(0..ids.len().max(1))).copied();
+            let pick =
+                |script: &mut StdRng| ids.get(script.random_range(0..ids.len().max(1))).copied();
 
             match script.random_range(0..11) {
                 0 => {
@@ -539,7 +652,8 @@ fn invariants_hold_under_random_edit_scripts() {
                     }
                 }
                 5 => inner.set_shuffle(script.random_bool(0.5)),
-                6 => inner.set_repeat([Repeat::Off, Repeat::One, Repeat::All][script.random_range(0..3)]),
+                6 => inner
+                    .set_repeat([Repeat::Off, Repeat::One, Repeat::All][script.random_range(0..3)]),
                 7 => {
                     if script.random_range(0..10) == 0 {
                         inner.clear();
@@ -551,19 +665,37 @@ fn invariants_hold_under_random_edit_scripts() {
                     }
                 }
                 _ => {
-                    let how = [Advance::Auto, Advance::Next, Advance::Previous, Advance::Restart][script.random_range(0..4)];
+                    let how = [
+                        Advance::Auto,
+                        Advance::Next,
+                        Advance::Previous,
+                        Advance::Restart,
+                    ][script.random_range(0..4)];
                     if let Some(id) = inner.advance(how) {
-                        assert!(inner.commit(id), "seed {seed} step {step}: advance offered a missing entry");
+                        assert!(
+                            inner.commit(id),
+                            "seed {seed} step {step}: advance offered a missing entry"
+                        );
                     }
                 }
             }
 
             let snapshot = inner.snapshot();
-            assert!(is_permutation(&inner), "seed {seed} step {step}: order is not a permutation of the entries");
+            assert!(
+                is_permutation(&inner),
+                "seed {seed} step {step}: order is not a permutation of the entries"
+            );
             let unique: HashSet<_> = snapshot.items.iter().map(|item| item.id).collect();
-            assert_eq!(unique.len(), snapshot.items.len(), "seed {seed} step {step}: duplicate ids");
+            assert_eq!(
+                unique.len(),
+                snapshot.items.len(),
+                "seed {seed} step {step}: duplicate ids"
+            );
             if let Some(current) = snapshot.current {
-                assert!(unique.contains(&current), "seed {seed} step {step}: the cursor is on an entry that is gone");
+                assert!(
+                    unique.contains(&current),
+                    "seed {seed} step {step}: the cursor is on an entry that is gone"
+                );
             }
         }
     }

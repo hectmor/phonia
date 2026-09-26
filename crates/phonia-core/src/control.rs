@@ -66,7 +66,9 @@ impl Controller {
     /// playing anything, however recently it was: removing "the last entry that played" must not
     /// start playback.
     fn playing_entry(&self) -> Option<ItemId> {
-        (self.engine.status().state != State::Stopped).then(|| self.queue.snapshot().current).flatten()
+        (self.engine.status().state != State::Stopped)
+            .then(|| self.queue.snapshot().current)
+            .flatten()
     }
 
     pub fn status(&self) -> Status {
@@ -98,7 +100,11 @@ mod tests {
     use std::time::{Duration, Instant};
     use tokio::sync::broadcast::error::TryRecvError;
 
-    const SPEC: SourceSpec = SourceSpec { sample_rate: 48_000, channels: 2, bits_per_sample: 24 };
+    const SPEC: SourceSpec = SourceSpec {
+        sample_rate: 48_000,
+        channels: 2,
+        bits_per_sample: 24,
+    };
     const PERIOD: usize = 1024;
     const CAPACITY: usize = 4096;
     const TIMEOUT: Duration = Duration::from_secs(5);
@@ -110,14 +116,28 @@ mod tests {
         fn open(&self, track: TrackRef, _at: Duration) -> BoxFuture<'static, Result<LoadedTrack>> {
             Box::pin(async move {
                 let frames: usize = track.0.parse()?;
-                let meta = TrackMeta { track, title: None, duration: None };
-                Ok(LoadedTrack::new(meta, TrackMedia::RawPcm { samples: vec![0; frames * 2], spec: SPEC }))
+                let meta = TrackMeta {
+                    track,
+                    title: None,
+                    duration: None,
+                };
+                Ok(LoadedTrack::new(
+                    meta,
+                    TrackMedia::RawPcm {
+                        samples: vec![0; frames * 2],
+                        spec: SPEC,
+                    },
+                ))
             })
         }
     }
 
     fn entry(frames: usize, title: &str) -> QueueTrack {
-        QueueTrack { source: TrackRef(frames.to_string()), title: Some(title.to_string()), duration: None }
+        QueueTrack {
+            source: TrackRef(frames.to_string()),
+            title: Some(title.to_string()),
+            duration: None,
+        }
     }
 
     struct Harness {
@@ -129,13 +149,25 @@ mod tests {
     }
 
     fn harness(entries: &[(usize, &str)]) -> (Harness, Vec<ItemId>) {
-        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
         let queue = Queue::with_seed(Arc::new(LengthOpener), 1);
         let ids = queue.add(entries.iter().map(|(frames, title)| entry(*frames, title)));
         let sinks = FakeSinkFactory::blocking();
         let engine = Engine::spawn(rt.handle().clone(), sinks.clone(), queue.clone()).unwrap();
         let events = engine.subscribe();
-        (Harness { controller: Controller::new(engine, queue), sinks, events, _rt: rt }, ids)
+        (
+            Harness {
+                controller: Controller::new(engine, queue),
+                sinks,
+                events,
+                _rt: rt,
+            },
+            ids,
+        )
     }
 
     impl Harness {
@@ -147,7 +179,9 @@ mod tests {
                     Ok(event) => return event,
                     Err(TryRecvError::Lagged(_)) => continue,
                     Err(TryRecvError::Closed) => panic!("the event channel closed"),
-                    Err(TryRecvError::Empty) if Instant::now() > deadline => panic!("timed out waiting for an event"),
+                    Err(TryRecvError::Empty) if Instant::now() > deadline => {
+                        panic!("timed out waiting for an event")
+                    }
                     Err(TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(2)),
                 }
             }
@@ -164,7 +198,8 @@ mod tests {
         }
 
         fn started(&mut self) -> Option<String> {
-            match self.wait_for(|e| matches!(e, Event::TrackStarted { .. } | Event::QueueExhausted)) {
+            match self.wait_for(|e| matches!(e, Event::TrackStarted { .. } | Event::QueueExhausted))
+            {
                 Event::TrackStarted { meta, .. } => meta.title,
                 _ => None,
             }
@@ -227,7 +262,11 @@ mod tests {
 
         h.controller.remove(&[ids[0]]);
         h.sinks.handles()[0].advance(PERIOD);
-        assert_eq!(h.started(), None, "nothing is left to play: the queue is exhausted");
+        assert_eq!(
+            h.started(),
+            None,
+            "nothing is left to play: the queue is exhausted"
+        );
     }
 
     #[test]
@@ -237,11 +276,19 @@ mod tests {
         h.sinks.handles(); // (the sink appears once the first track starts)
         h.wait_for(|e| matches!(e, Event::QueueExhausted));
         h.wait_for(|e| matches!(e, Event::StateChanged(State::Stopped)));
-        assert_eq!(h.controller.snapshot().current, Some(ids[1]), "the queue remembers the last entry");
+        assert_eq!(
+            h.controller.snapshot().current,
+            Some(ids[1]),
+            "the queue remembers the last entry"
+        );
 
         h.controller.remove(&[ids[1]]);
         std::thread::sleep(Duration::from_millis(150));
-        assert_eq!(h.controller.status().state, State::Stopped, "removing it must not start anything");
+        assert_eq!(
+            h.controller.status().state,
+            State::Stopped,
+            "removing it must not start anything"
+        );
     }
 
     #[test]

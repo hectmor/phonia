@@ -3,15 +3,15 @@
 
 use phonia_core::config::OutputSpec;
 use phonia_core::openers::DispatchOpener;
-use phonia_core::output::catalog::{Entry, Mode};
-use phonia_core::output::alsa::{ProcReading, SinkReport};
 use phonia_core::output::VolumeControl as _;
+use phonia_core::output::alsa::{ProcReading, SinkReport};
+use phonia_core::output::catalog::{Entry, Mode};
 use phonia_core::output::fake::FakeSinkFactory;
+use phonia_ipc::framing::{read_frame, write_frame};
+use phonia_ipc::*;
 use phoniad::daemon::{Daemon, DaemonParts};
 use phoniad::outputs::{Build, Outputs};
 use phoniad::server::serve_connection;
-use phonia_ipc::framing::{read_frame, write_frame};
-use phonia_ipc::*;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -34,7 +34,11 @@ struct Fixture {
 /// A daemon with a fake device. A blocking device holds the engine mid-track, which is what lets
 /// a test act on a track that is "playing".
 async fn fixture(name: &str, blocking: bool) -> Fixture {
-    let sinks = if blocking { FakeSinkFactory::blocking() } else { FakeSinkFactory::autoplay() };
+    let sinks = if blocking {
+        FakeSinkFactory::blocking()
+    } else {
+        FakeSinkFactory::autoplay()
+    };
     let (reports, report_rx) = mpsc::unbounded_channel();
     let switched: Switched = Arc::default();
     let built = switched.clone();
@@ -47,7 +51,13 @@ async fn fixture(name: &str, blocking: bool) -> Fixture {
         built.lock().unwrap().push((spec.id(), factory.clone()));
         factory
     });
-    let outputs = Outputs::new(OutputSpec::Exclusive { device: "hw:fake,0".into() }, build).with_lister(Arc::new(|| {
+    let outputs = Outputs::new(
+        OutputSpec::Exclusive {
+            device: "hw:fake,0".into(),
+        },
+        build,
+    )
+    .with_lister(Arc::new(|| {
         Box::pin(async {
             let entry = |id: &str, mode, name: &str, bit_perfect| Entry {
                 id: id.into(),
@@ -73,10 +83,19 @@ async fn fixture(name: &str, blocking: bool) -> Fixture {
         engine: Default::default(),
     })
     .unwrap();
-    let dir = std::env::temp_dir().join(format!("phoniad-protocol-test-{}-{name}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "phoniad-protocol-test-{}-{name}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    Fixture { daemon, sinks, switched, reports, dir }
+    Fixture {
+        daemon,
+        sinks,
+        switched,
+        reports,
+        dir,
+    }
 }
 
 impl Fixture {
@@ -109,12 +128,24 @@ impl Fixture {
     }
 
     async fn client(&self) -> Client {
-        Client::from_stream(self.serve(), ClientInfo { name: "test".into(), version: "0".into() }).await.unwrap()
+        Client::from_stream(
+            self.serve(),
+            ClientInfo {
+                name: "test".into(),
+                version: "0".into(),
+            },
+        )
+        .await
+        .unwrap()
     }
 
     async fn raw(&self) -> Raw {
         let (read_half, write_half) = tokio::io::split(self.serve());
-        Raw { reader: BufReader::new(read_half), writer: write_half, buffer: Vec::new() }
+        Raw {
+            reader: BufReader::new(read_half),
+            writer: write_half,
+            buffer: Vec::new(),
+        }
     }
 
     async fn finish(self) {
@@ -133,7 +164,9 @@ struct Raw {
 
 impl Raw {
     async fn send(&mut self, line: &str) {
-        write_frame(&mut self.writer, line.as_bytes()).await.unwrap();
+        write_frame(&mut self.writer, line.as_bytes())
+            .await
+            .unwrap();
     }
 
     async fn recv(&mut self) -> Option<ServerMessage> {
@@ -141,29 +174,49 @@ impl Raw {
             .await
             .expect("timed out waiting for the daemon")
             .unwrap()?;
-        Some(serde_json::from_slice(frame).unwrap_or_else(|error| panic!("bad message {}: {error}", String::from_utf8_lossy(frame))))
+        Some(serde_json::from_slice(frame).unwrap_or_else(|error| {
+            panic!("bad message {}: {error}", String::from_utf8_lossy(frame))
+        }))
     }
 
     async fn hello(&mut self) {
-        assert!(matches!(self.recv().await, Some(ServerMessage::Hello(_))), "the server speaks first");
+        assert!(
+            matches!(self.recv().await, Some(ServerMessage::Hello(_))),
+            "the server speaks first"
+        );
         self.send(r#"{"id":1,"request":{"type":"hello","protocol":{"major":1,"minor":0},"client":{"name":"raw","version":"0"}}}"#).await;
-        assert_eq!(self.recv().await, Some(ServerMessage::Response { id: RequestId(1), reply: Reply::Ok(Payload::Ack) }));
+        assert_eq!(
+            self.recv().await,
+            Some(ServerMessage::Response {
+                id: RequestId(1),
+                reply: Reply::Ok(Payload::Ack)
+            })
+        );
     }
 }
 
 fn code_of(reply: Option<ServerMessage>) -> (RequestId, ErrorCode) {
     match reply {
-        Some(ServerMessage::Response { id, reply: Reply::Err(error) }) => (id, error.code),
+        Some(ServerMessage::Response {
+            id,
+            reply: Reply::Err(error),
+        }) => (id, error.code),
         other => panic!("expected an error response, got {other:?}"),
     }
 }
 
 async fn next_event(events: &mut EventStream) -> (u64, Event) {
-    tokio::time::timeout(TIMEOUT, events.next_seq()).await.expect("timed out waiting for an event").expect("the connection closed")
+    tokio::time::timeout(TIMEOUT, events.next_seq())
+        .await
+        .expect("timed out waiting for an event")
+        .expect("the connection closed")
 }
 
 /// Events until one satisfies `stop`, which is included.
-async fn events_until(events: &mut EventStream, stop: impl Fn(&Event) -> bool) -> Vec<(u64, Event)> {
+async fn events_until(
+    events: &mut EventStream,
+    stop: impl Fn(&Event) -> bool,
+) -> Vec<(u64, Event)> {
     let mut collected = Vec::new();
     loop {
         let event = next_event(events).await;
@@ -177,13 +230,25 @@ async fn events_until(events: &mut EventStream, stop: impl Fn(&Event) -> bool) -
 
 fn added(payload: Payload) -> (Vec<ItemId>, Vec<Rejected>, Vec<Unresolved>) {
     match payload {
-        Payload::Added { ids, rejected, unresolved } => (ids, rejected, unresolved),
+        Payload::Added {
+            ids,
+            rejected,
+            unresolved,
+        } => (ids, rejected, unresolved),
         other => panic!("expected added, got {other:?}"),
     }
 }
 
 fn add(tracks: &[&str], at: AddAt) -> Request {
-    Request::QueueAdd { tracks: tracks.iter().map(|source| NewTrack { source: source.to_string() }).collect(), at }
+    Request::QueueAdd {
+        tracks: tracks
+            .iter()
+            .map(|source| NewTrack {
+                source: source.to_string(),
+            })
+            .collect(),
+        at,
+    }
 }
 
 fn protocol_code(error: ClientError) -> ErrorCode {
@@ -201,7 +266,13 @@ async fn a_client_connects_and_reads_the_state() {
     let client = f.client().await;
     assert_eq!(client.server().server.name, "phoniad");
     assert_eq!(client.server().protocol, PROTOCOL);
-    assert!(client.server().capabilities.iter().any(|capability| capability == CAP_OUTPUT_RELEASE));
+    assert!(
+        client
+            .server()
+            .capabilities
+            .iter()
+            .any(|capability| capability == CAP_OUTPUT_RELEASE)
+    );
 
     let status = client.status().await.unwrap();
     assert_eq!(status.state, State::Stopped);
@@ -217,13 +288,31 @@ async fn requests_before_the_handshake_are_refused() {
     assert!(matches!(raw.recv().await, Some(ServerMessage::Hello(_))));
 
     raw.send(r#"{"id":4,"request":{"type":"status"}}"#).await;
-    assert_eq!(code_of(raw.recv().await), (RequestId(4), ErrorCode::HandshakeRequired));
+    assert_eq!(
+        code_of(raw.recv().await),
+        (RequestId(4), ErrorCode::HandshakeRequired)
+    );
 
     // After the handshake the same request works.
     raw.send(r#"{"id":5,"request":{"type":"hello","protocol":{"major":1,"minor":3},"client":{"name":"raw","version":"0"}}}"#).await;
-    assert!(matches!(raw.recv().await, Some(ServerMessage::Response { reply: Reply::Ok(Payload::Ack), .. })), "a newer minor version is fine");
+    assert!(
+        matches!(
+            raw.recv().await,
+            Some(ServerMessage::Response {
+                reply: Reply::Ok(Payload::Ack),
+                ..
+            })
+        ),
+        "a newer minor version is fine"
+    );
     raw.send(r#"{"id":6,"request":{"type":"status"}}"#).await;
-    assert!(matches!(raw.recv().await, Some(ServerMessage::Response { reply: Reply::Ok(Payload::Status(_)), .. })));
+    assert!(matches!(
+        raw.recv().await,
+        Some(ServerMessage::Response {
+            reply: Reply::Ok(Payload::Status(_)),
+            ..
+        })
+    ));
     f.finish().await;
 }
 
@@ -236,7 +325,10 @@ async fn a_client_of_another_major_version_is_refused_and_disconnected() {
     raw.send(r#"{"id":1,"request":{"type":"hello","protocol":{"major":2,"minor":0},"client":{"name":"raw","version":"0"}}}"#).await;
     let (id, code) = code_of(raw.recv().await);
     assert_eq!((id, code), (RequestId(1), ErrorCode::UnsupportedVersion));
-    assert!(raw.recv().await.is_none(), "the connection is closed after refusing the version");
+    assert!(
+        raw.recv().await.is_none(),
+        "the connection is closed after refusing the version"
+    );
     f.finish().await;
 }
 
@@ -248,19 +340,34 @@ async fn a_malformed_request_is_answered_and_the_connection_survives() {
 
     // Not JSON at all: nothing to match the answer to.
     raw.send("this is not json").await;
-    assert_eq!(code_of(raw.recv().await), (RequestId(0), ErrorCode::BadRequest));
+    assert_eq!(
+        code_of(raw.recv().await),
+        (RequestId(0), ErrorCode::BadRequest)
+    );
 
     // Valid JSON of the wrong shape, with an id: the answer names it.
     raw.send(r#"{"id":7,"request":{"type":"seek"}}"#).await;
-    assert_eq!(code_of(raw.recv().await), (RequestId(7), ErrorCode::BadRequest));
+    assert_eq!(
+        code_of(raw.recv().await),
+        (RequestId(7), ErrorCode::BadRequest)
+    );
 
     // A request this version has never heard of.
     raw.send(r#"{"id":8,"request":{"type":"teleport"}}"#).await;
-    assert_eq!(code_of(raw.recv().await), (RequestId(8), ErrorCode::UnknownRequest));
+    assert_eq!(
+        code_of(raw.recv().await),
+        (RequestId(8), ErrorCode::UnknownRequest)
+    );
 
     // And the connection still works.
     raw.send(r#"{"id":9,"request":{"type":"status"}}"#).await;
-    assert!(matches!(raw.recv().await, Some(ServerMessage::Response { id: RequestId(9), reply: Reply::Ok(Payload::Status(_)) })));
+    assert!(matches!(
+        raw.recv().await,
+        Some(ServerMessage::Response {
+            id: RequestId(9),
+            reply: Reply::Ok(Payload::Status(_))
+        })
+    ));
     f.finish().await;
 }
 
@@ -270,7 +377,9 @@ async fn an_oversized_message_is_refused_and_the_connection_closed() {
     let mut raw = f.raw().await;
     raw.hello().await;
 
-    let Raw { reader, mut writer, .. } = raw;
+    let Raw {
+        reader, mut writer, ..
+    } = raw;
     let sender = tokio::spawn(async move {
         let chunk = vec![b'x'; 1024 * 1024];
         for _ in 0..10 {
@@ -279,7 +388,11 @@ async fn an_oversized_message_is_refused_and_the_connection_closed() {
             }
         }
     });
-    let mut receiver = Raw { reader, writer: tokio::io::split(tokio::io::duplex(1).0).1, buffer: Vec::new() };
+    let mut receiver = Raw {
+        reader,
+        writer: tokio::io::split(tokio::io::duplex(1).0).1,
+        buffer: Vec::new(),
+    };
     assert_eq!(code_of(receiver.recv().await).1, ErrorCode::BadRequest);
     assert!(receiver.recv().await.is_none());
     sender.abort();
@@ -295,17 +408,38 @@ async fn adding_tracks_resolves_their_details_and_refuses_the_wrong_ones() {
     let (one, two) = (f.wav("one.wav", 44_100), f.wav("two.wav", 88_200));
     let missing = format!("file:{}", f.dir.join("missing.flac").display());
 
-    let payload = client.request(add(&[&one, "not a source", &missing, &two], AddAt::End)).await.unwrap();
+    let payload = client
+        .request(add(&[&one, "not a source", &missing, &two], AddAt::End))
+        .await
+        .unwrap();
     let (ids, rejected, unresolved) = added(payload);
     assert_eq!(ids.len(), 2, "the two real files");
     assert!(unresolved.is_empty());
-    let reasons: Vec<(&str, bool)> = rejected.iter().map(|r| (r.source.as_str(), r.reason.contains("unknown source") || r.reason.contains("opening"))).collect();
-    assert_eq!(reasons, [("not a source", true), (missing.as_str(), true)], "each refusal says why");
+    let reasons: Vec<(&str, bool)> = rejected
+        .iter()
+        .map(|r| {
+            (
+                r.source.as_str(),
+                r.reason.contains("unknown source") || r.reason.contains("opening"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        reasons,
+        [("not a source", true), (missing.as_str(), true)],
+        "each refusal says why"
+    );
 
     let queue = client.queue().await.unwrap();
     assert_eq!(queue.items.len(), 2);
-    assert_eq!((queue.items[0].title.as_deref(), queue.items[0].duration_ms), (Some("one.wav"), Some(1_000)));
-    assert_eq!((queue.items[1].title.as_deref(), queue.items[1].duration_ms), (Some("two.wav"), Some(2_000)));
+    assert_eq!(
+        (queue.items[0].title.as_deref(), queue.items[0].duration_ms),
+        (Some("one.wav"), Some(1_000))
+    );
+    assert_eq!(
+        (queue.items[1].title.as_deref(), queue.items[1].duration_ms),
+        (Some("two.wav"), Some(2_000))
+    );
     assert_eq!(queue.items[0].source, one);
     f.finish().await;
 }
@@ -314,13 +448,35 @@ async fn adding_tracks_resolves_their_details_and_refuses_the_wrong_ones() {
 async fn where_tracks_are_added_is_honoured() {
     let f = fixture("at", false).await;
     let client = f.client().await;
-    let sources: Vec<String> = ["a", "b", "c", "d"].iter().map(|name| f.wav(&format!("{name}.wav"), 100)).collect();
-    client.request(add(&[&sources[0], &sources[1]], AddAt::End)).await.unwrap();
-    client.request(add(&[&sources[2]], AddAt::Index { index: 0 })).await.unwrap();
-    client.request(add(&[&sources[3]], AddAt::Index { index: 99 })).await.unwrap();
+    let sources: Vec<String> = ["a", "b", "c", "d"]
+        .iter()
+        .map(|name| f.wav(&format!("{name}.wav"), 100))
+        .collect();
+    client
+        .request(add(&[&sources[0], &sources[1]], AddAt::End))
+        .await
+        .unwrap();
+    client
+        .request(add(&[&sources[2]], AddAt::Index { index: 0 }))
+        .await
+        .unwrap();
+    client
+        .request(add(&[&sources[3]], AddAt::Index { index: 99 }))
+        .await
+        .unwrap();
 
-    let titles = |queue: &Queue| queue.items.iter().map(|item| item.title.clone().unwrap()).collect::<Vec<_>>();
-    assert_eq!(titles(&client.queue().await.unwrap()), ["c.wav", "a.wav", "b.wav", "d.wav"], "an index is clamped to the end");
+    let titles = |queue: &Queue| {
+        queue
+            .items
+            .iter()
+            .map(|item| item.title.clone().unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        titles(&client.queue().await.unwrap()),
+        ["c.wav", "a.wav", "b.wav", "d.wav"],
+        "an index is clamped to the end"
+    );
     f.finish().await;
 }
 
@@ -331,14 +487,30 @@ async fn a_track_whose_details_cannot_be_fetched_is_added_without_them() {
 
     // There is no TIDAL in this daemon, so nothing can be learned about the track: that is not a
     // reason to refuse it.
-    let (ids, rejected, unresolved) = added(client.request(add(&["tidal:233059491"], AddAt::End)).await.unwrap());
+    let (ids, rejected, unresolved) = added(
+        client
+            .request(add(&["tidal:233059491"], AddAt::End))
+            .await
+            .unwrap(),
+    );
     assert_eq!((ids.len(), rejected.len()), (1, 0));
     assert_eq!(unresolved.len(), 1);
     assert_eq!(unresolved[0].id, ids[0]);
-    assert!(unresolved[0].reason.contains("phonia login"), "{:?}", unresolved[0].reason);
+    assert!(
+        unresolved[0].reason.contains("phonia login"),
+        "{:?}",
+        unresolved[0].reason
+    );
 
     let item = &client.queue().await.unwrap().items[0];
-    assert_eq!((item.source.as_str(), item.title.as_deref(), item.duration_ms), ("tidal:233059491", None, None));
+    assert_eq!(
+        (
+            item.source.as_str(),
+            item.title.as_deref(),
+            item.duration_ms
+        ),
+        ("tidal:233059491", None, None)
+    );
     f.finish().await;
 }
 
@@ -348,7 +520,10 @@ async fn too_many_tracks_at_once_is_a_bad_request() {
     let client = f.client().await;
     let many: Vec<String> = (0..1001).map(|i| format!("tidal:{i}")).collect();
     let refs: Vec<&str> = many.iter().map(String::as_str).collect();
-    assert_eq!(protocol_code(client.request(add(&refs, AddAt::End)).await.unwrap_err()), ErrorCode::BadRequest);
+    assert_eq!(
+        protocol_code(client.request(add(&refs, AddAt::End)).await.unwrap_err()),
+        ErrorCode::BadRequest
+    );
     f.finish().await;
 }
 
@@ -356,22 +531,77 @@ async fn too_many_tracks_at_once_is_a_bad_request() {
 async fn editing_the_queue_and_asking_for_what_does_not_exist() {
     let f = fixture("edit", false).await;
     let client = f.client().await;
-    let sources: Vec<String> = ["a", "b", "c"].iter().map(|name| f.wav(&format!("{name}.wav"), 100)).collect();
+    let sources: Vec<String> = ["a", "b", "c"]
+        .iter()
+        .map(|name| f.wav(&format!("{name}.wav"), 100))
+        .collect();
     let refs: Vec<&str> = sources.iter().map(String::as_str).collect();
     let (ids, _, _) = added(client.request(add(&refs, AddAt::End)).await.unwrap());
 
-    assert_eq!(client.request(Request::QueueMove { id: ids[2], to: 0 }).await.unwrap(), Payload::Ack);
-    assert_eq!(client.request(Request::SetShuffle { shuffle: true }).await.unwrap(), Payload::Ack);
-    assert_eq!(client.request(Request::SetRepeat { repeat: Repeat::All }).await.unwrap(), Payload::Ack);
+    assert_eq!(
+        client
+            .request(Request::QueueMove { id: ids[2], to: 0 })
+            .await
+            .unwrap(),
+        Payload::Ack
+    );
+    assert_eq!(
+        client
+            .request(Request::SetShuffle { shuffle: true })
+            .await
+            .unwrap(),
+        Payload::Ack
+    );
+    assert_eq!(
+        client
+            .request(Request::SetRepeat {
+                repeat: Repeat::All
+            })
+            .await
+            .unwrap(),
+        Payload::Ack
+    );
     let queue = client.queue().await.unwrap();
     assert_eq!(queue.items[0].id, ids[2]);
     assert_eq!((queue.shuffle, queue.repeat), (true, Repeat::All));
 
-    assert_eq!(client.request(Request::QueueRemove { ids: vec![ids[0], ItemId(9999)] }).await.unwrap(), Payload::Removed { count: 1 });
-    assert_eq!(protocol_code(client.request(Request::QueueMove { id: ItemId(9999), to: 0 }).await.unwrap_err()), ErrorCode::NotFound);
-    assert_eq!(protocol_code(client.request(Request::Play { item: Some(ItemId(9999)) }).await.unwrap_err()), ErrorCode::NotFound);
+    assert_eq!(
+        client
+            .request(Request::QueueRemove {
+                ids: vec![ids[0], ItemId(9999)]
+            })
+            .await
+            .unwrap(),
+        Payload::Removed { count: 1 }
+    );
+    assert_eq!(
+        protocol_code(
+            client
+                .request(Request::QueueMove {
+                    id: ItemId(9999),
+                    to: 0
+                })
+                .await
+                .unwrap_err()
+        ),
+        ErrorCode::NotFound
+    );
+    assert_eq!(
+        protocol_code(
+            client
+                .request(Request::Play {
+                    item: Some(ItemId(9999))
+                })
+                .await
+                .unwrap_err()
+        ),
+        ErrorCode::NotFound
+    );
 
-    assert_eq!(client.request(Request::QueueClear).await.unwrap(), Payload::Ack);
+    assert_eq!(
+        client.request(Request::QueueClear).await.unwrap(),
+        Payload::Ack
+    );
     assert!(client.queue().await.unwrap().items.is_empty());
     f.finish().await;
 }
@@ -392,18 +622,40 @@ async fn subscribing_gives_a_snapshot_and_then_every_event_in_order() {
     let seen = events_until(&mut events, |event| matches!(event, Event::QueueExhausted)).await;
     let seqs: Vec<u64> = seen.iter().map(|(seq, _)| *seq).collect();
     let expected: Vec<u64> = (snapshot.seq + 1..=snapshot.seq + seqs.len() as u64).collect();
-    assert_eq!(seqs, expected, "consecutive numbers: no event was missed or repeated");
+    assert_eq!(
+        seqs, expected,
+        "consecutive numbers: no event was missed or repeated"
+    );
 
     let kinds: Vec<&Event> = seen.iter().map(|(_, event)| event).collect();
-    assert!(kinds.iter().any(|e| matches!(e, Event::QueueChanged { queue } if queue.items.len() == 1)));
+    assert!(
+        kinds
+            .iter()
+            .any(|e| matches!(e, Event::QueueChanged { queue } if queue.items.len() == 1))
+    );
     let started = kinds.iter().find_map(|e| match e {
-        Event::TrackStarted { item_id, source, title, spec, .. } => Some((*item_id, source.clone(), title.clone(), *spec)),
+        Event::TrackStarted {
+            item_id,
+            source,
+            title,
+            spec,
+            ..
+        } => Some((*item_id, source.clone(), title.clone(), *spec)),
         _ => None,
     });
     let (item_id, started_source, title, spec) = started.expect("a track started");
-    assert_eq!((item_id, started_source.as_deref(), title.as_deref()), (Some(ids[0]), Some(source.as_str()), Some("song.wav")));
+    assert_eq!(
+        (item_id, started_source.as_deref(), title.as_deref()),
+        (Some(ids[0]), Some(source.as_str()), Some("song.wav"))
+    );
     assert_eq!((spec.sample_rate, spec.bits_per_sample), (44_100, 16));
-    assert!(kinds.iter().any(|e| matches!(e, Event::TrackEnded { reason: EndReason::Completed, .. })));
+    assert!(kinds.iter().any(|e| matches!(
+        e,
+        Event::TrackEnded {
+            reason: EndReason::Completed,
+            ..
+        }
+    )));
     assert!(kinds.iter().any(|e| matches!(e, Event::Position { .. })));
     f.finish().await;
 }
@@ -422,7 +674,10 @@ async fn every_client_sees_the_same_events_in_the_same_order() {
     a.request(Request::Play { item: None }).await.unwrap();
 
     let stop = |event: &Event| matches!(event, Event::QueueExhausted);
-    let (seen_a, seen_b) = (events_until(&mut events_a, stop).await, events_until(&mut events_b, stop).await);
+    let (seen_a, seen_b) = (
+        events_until(&mut events_a, stop).await,
+        events_until(&mut events_b, stop).await,
+    );
     assert_eq!(seen_a, seen_b);
     f.finish().await;
 }
@@ -432,13 +687,28 @@ async fn unsubscribing_stops_the_events() {
     let f = fixture("unsubscribe", false).await;
     let client = f.client().await;
     let (_, mut events) = client.subscribe().await.unwrap();
-    client.request(Request::SetShuffle { shuffle: true }).await.unwrap();
-    assert!(matches!(next_event(&mut events).await.1, Event::QueueChanged { .. }));
+    client
+        .request(Request::SetShuffle { shuffle: true })
+        .await
+        .unwrap();
+    assert!(matches!(
+        next_event(&mut events).await.1,
+        Event::QueueChanged { .. }
+    ));
 
-    assert_eq!(client.request(Request::Unsubscribe).await.unwrap(), Payload::Ack);
-    client.request(Request::SetShuffle { shuffle: false }).await.unwrap();
+    assert_eq!(
+        client.request(Request::Unsubscribe).await.unwrap(),
+        Payload::Ack
+    );
+    client
+        .request(Request::SetShuffle { shuffle: false })
+        .await
+        .unwrap();
     let silence = tokio::time::timeout(Duration::from_millis(300), events.next_seq()).await;
-    assert!(silence.is_err(), "nothing may arrive after unsubscribing: {silence:?}");
+    assert!(
+        silence.is_err(),
+        "nothing may arrive after unsubscribing: {silence:?}"
+    );
     f.finish().await;
 }
 
@@ -447,24 +717,48 @@ async fn a_client_that_falls_behind_is_resynced_not_dropped() {
     let f = fixture("lag", false).await;
     let mut slow = f.raw().await;
     slow.hello().await;
-    slow.send(r#"{"id":2,"request":{"type":"subscribe"}}"#).await;
-    let Some(ServerMessage::Response { reply: Reply::Ok(Payload::Snapshot { .. }), .. }) = slow.recv().await else { panic!("no snapshot") };
+    slow.send(r#"{"id":2,"request":{"type":"subscribe"}}"#)
+        .await;
+    let Some(ServerMessage::Response {
+        reply: Reply::Ok(Payload::Snapshot { .. }),
+        ..
+    }) = slow.recv().await
+    else {
+        panic!("no snapshot")
+    };
 
     // The slow client stops reading while thousands of events go by: far more than the daemon
     // keeps for it.
     let busy = f.client().await;
     for i in 0..2_500 {
-        busy.request(Request::SetShuffle { shuffle: i % 2 == 0 }).await.unwrap();
+        busy.request(Request::SetShuffle {
+            shuffle: i % 2 == 0,
+        })
+        .await
+        .unwrap();
     }
 
     // When it reads again it gets a resync with the current state (after whatever the daemon had
     // already queued for it).
     let mut resync = None;
     for _ in 0..3_000 {
-        if let Some(ServerMessage::Event { seq, event: Event::Resync { skipped, seq: at, queue, .. } }) = slow.recv().await {
+        if let Some(ServerMessage::Event {
+            seq,
+            event:
+                Event::Resync {
+                    skipped,
+                    seq: at,
+                    queue,
+                    ..
+                },
+        }) = slow.recv().await
+        {
             assert!(skipped > 0);
             assert_eq!(seq, at);
-            assert!(queue.version >= 1_000, "the resync carries the current state");
+            assert!(
+                queue.version >= 1_000,
+                "the resync carries the current state"
+            );
             resync = Some(at);
             break;
         }
@@ -472,9 +766,16 @@ async fn a_client_that_falls_behind_is_resynced_not_dropped() {
     let resync_seq = resync.expect("a lagging client must be told to resync");
 
     // From then on it is in step again: a new event arrives, numbered after the resync.
-    busy.request(Request::SetShuffle { shuffle: true }).await.unwrap();
-    let Some(ServerMessage::Event { seq, event }) = slow.recv().await else { panic!("no event after the resync") };
-    assert!(seq > resync_seq, "event {seq} came at or before the resync {resync_seq}");
+    busy.request(Request::SetShuffle { shuffle: true })
+        .await
+        .unwrap();
+    let Some(ServerMessage::Event { seq, event }) = slow.recv().await else {
+        panic!("no event after the resync")
+    };
+    assert!(
+        seq > resync_seq,
+        "event {seq} came at or before the resync {resync_seq}"
+    );
     assert!(matches!(event, Event::QueueChanged { .. }), "{event:?}");
     f.finish().await;
 }
@@ -489,16 +790,31 @@ async fn the_bit_perfect_report_reaches_subscribers() {
     f.reports
         .send(SinkReport::new(
             "hw:1,0".into(),
-            phonia_core::decode::SourceSpec { sample_rate: 96_000, channels: 2, bits_per_sample: 24 },
+            phonia_core::decode::SourceSpec {
+                sample_rate: 96_000,
+                channels: 2,
+                bits_per_sample: 24,
+            },
             "S24_3LE".into(),
-            ProcReading::Read { path: "/p".into(), contents: contents.into() },
+            ProcReading::Read {
+                path: "/p".into(),
+                contents: contents.into(),
+            },
         ))
         .unwrap();
 
-    let (_, event) = events_until(&mut events, |event| matches!(event, Event::SinkReport(_))).await.pop().unwrap();
-    let Event::SinkReport(report) = event else { unreachable!() };
+    let (_, event) = events_until(&mut events, |event| matches!(event, Event::SinkReport(_)))
+        .await
+        .pop()
+        .unwrap();
+    let Event::SinkReport(report) = event else {
+        unreachable!()
+    };
     assert!(report.bit_perfect);
-    assert_eq!((report.device.as_str(), report.negotiated_format.as_str()), ("hw:1,0", "S24_3LE"));
+    assert_eq!(
+        (report.device.as_str(), report.negotiated_format.as_str()),
+        ("hw:1,0", "S24_3LE")
+    );
     assert_eq!(report.hw_params.as_deref(), Some(contents));
     f.finish().await;
 }
@@ -509,15 +825,35 @@ async fn the_bit_perfect_report_reaches_subscribers() {
 async fn the_outputs_are_listed_and_the_status_says_which_one_is_playing() {
     let f = fixture("outputs", false).await;
     let client = f.client().await;
-    assert!(client.server().capabilities.iter().any(|capability| capability == CAP_OUTPUT_SELECT));
+    assert!(
+        client
+            .server()
+            .capabilities
+            .iter()
+            .any(|capability| capability == CAP_OUTPUT_SELECT)
+    );
 
-    let Payload::Outputs { outputs, current } = client.request(Request::Outputs).await.unwrap() else { panic!("not a list") };
-    assert_eq!(outputs.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(), ["exclusive:hw:fake,0", "shared:speaker"]);
+    let Payload::Outputs { outputs, current } = client.request(Request::Outputs).await.unwrap()
+    else {
+        panic!("not a list")
+    };
+    assert_eq!(
+        outputs.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
+        ["exclusive:hw:fake,0", "shared:speaker"]
+    );
     assert_eq!(current.as_deref(), Some("exclusive:hw:fake,0"));
     assert!(outputs[0].bit_perfect && !outputs[1].bit_perfect);
 
-    let route = client.status().await.unwrap().route.expect("the daemon says where the sound goes");
-    assert_eq!((route.id.as_str(), route.mode), ("exclusive:hw:fake,0", OutputMode::Exclusive));
+    let route = client
+        .status()
+        .await
+        .unwrap()
+        .route
+        .expect("the daemon says where the sound goes");
+    assert_eq!(
+        (route.id.as_str(), route.mode),
+        ("exclusive:hw:fake,0", OutputMode::Exclusive)
+    );
     f.finish().await;
 }
 
@@ -528,23 +864,46 @@ async fn switching_the_output_moves_playback_keeps_the_position_and_tells_everyo
     let a = f.wav("a.wav", 300_000);
     let (ids, _, _) = added(client.request(add(&[&a], AddAt::End)).await.unwrap());
     let (_, mut events) = client.subscribe().await.unwrap();
-    client.request(Request::Play { item: Some(ids[0]) }).await.unwrap();
-    events_until(&mut events, |event| matches!(event, Event::TrackStarted { .. })).await;
+    client
+        .request(Request::Play { item: Some(ids[0]) })
+        .await
+        .unwrap();
+    events_until(&mut events, |event| {
+        matches!(event, Event::TrackStarted { .. })
+    })
+    .await;
 
     // The engine is writing to a full queue: let the DAC play a period while the switch waits.
     let sink = f.sinks.handles()[0].clone();
     let switching = {
         let client = f.client().await;
-        tokio::spawn(async move { client.request(Request::SetOutput { output: "shared:speaker".into() }).await })
+        tokio::spawn(async move {
+            client
+                .request(Request::SetOutput {
+                    output: "shared:speaker".into(),
+                })
+                .await
+        })
     };
     tokio::time::sleep(Duration::from_millis(100)).await;
     sink.advance(1024);
     assert_eq!(switching.await.unwrap().unwrap(), Payload::Ack);
 
-    let seen = events_until(&mut events, |event| matches!(event, Event::OutputChanged { .. })).await;
-    let Some((_, Event::OutputChanged { route })) = seen.last() else { unreachable!() };
-    assert_eq!((route.id.as_str(), route.mode), ("shared:speaker", OutputMode::Shared));
-    assert_eq!(route.description, "Fake speaker", "named from the list of outputs");
+    let seen = events_until(&mut events, |event| {
+        matches!(event, Event::OutputChanged { .. })
+    })
+    .await;
+    let Some((_, Event::OutputChanged { route })) = seen.last() else {
+        unreachable!()
+    };
+    assert_eq!(
+        (route.id.as_str(), route.mode),
+        ("shared:speaker", OutputMode::Shared)
+    );
+    assert_eq!(
+        route.description, "Fake speaker",
+        "named from the list of outputs"
+    );
 
     let status = client.status().await.unwrap();
     assert_eq!(status.route.unwrap().id, "shared:speaker");
@@ -576,10 +935,16 @@ async fn a_bad_output_id_is_a_bad_request_and_changes_nothing() {
     let f = fixture("badoutput", false).await;
     let client = f.client().await;
     for bad in ["", "hw:1,0", "cloud:x"] {
-        let error = client.request(Request::SetOutput { output: bad.into() }).await.unwrap_err();
+        let error = client
+            .request(Request::SetOutput { output: bad.into() })
+            .await
+            .unwrap_err();
         assert_eq!(protocol_code(error), ErrorCode::BadRequest, "{bad:?}");
     }
-    assert_eq!(client.status().await.unwrap().route.unwrap().id, "exclusive:hw:fake,0");
+    assert_eq!(
+        client.status().await.unwrap().route.unwrap().id,
+        "exclusive:hw:fake,0"
+    );
     assert!(f.switched.lock().unwrap().is_empty());
     f.finish().await;
 }
@@ -599,8 +964,22 @@ async fn subscribers_hear_when_the_outputs_change() {
 
 /// Switches the daemon to `id` (idle: nothing is playing) and returns the factory built for it.
 async fn switch_to(f: &Fixture, client: &Client, id: &str) -> Arc<FakeSinkFactory> {
-    assert_eq!(client.request(Request::SetOutput { output: id.into() }).await.unwrap(), Payload::Ack);
-    f.switched.lock().unwrap().iter().rev().find(|(built, _)| built == id).unwrap().1.clone()
+    assert_eq!(
+        client
+            .request(Request::SetOutput { output: id.into() })
+            .await
+            .unwrap(),
+        Payload::Ack
+    );
+    f.switched
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(built, _)| built == id)
+        .unwrap()
+        .1
+        .clone()
 }
 
 async fn volume_of(client: &Client) -> Option<Volume> {
@@ -611,9 +990,18 @@ async fn volume_of(client: &Client) -> Option<Volume> {
 async fn an_exclusive_output_has_no_volume_and_says_why() {
     let f = fixture("volume-exclusive", false).await;
     let client = f.client().await;
-    assert!(client.server().capabilities.iter().any(|capability| capability == CAP_VOLUME));
+    assert!(
+        client
+            .server()
+            .capabilities
+            .iter()
+            .any(|capability| capability == CAP_VOLUME)
+    );
     assert_eq!(volume_of(&client).await, None);
-    for request in [Request::SetVolume { percent: 50 }, Request::SetMute { mute: true }] {
+    for request in [
+        Request::SetVolume { percent: 50 },
+        Request::SetMute { mute: true },
+    ] {
         let error = client.request(request).await.unwrap_err();
         assert_eq!(protocol_code(error), ErrorCode::Unsupported);
     }
@@ -626,21 +1014,68 @@ async fn the_volume_of_a_shared_output_is_set_reported_and_announced() {
     let client = f.client().await;
     let shared = switch_to(&f, &client, "shared:speaker").await;
     let control = shared.fake_volume().unwrap();
-    assert_eq!(volume_of(&client).await, Some(Volume { percent: 100, muted: false }));
+    assert_eq!(
+        volume_of(&client).await,
+        Some(Volume {
+            percent: 100,
+            muted: false
+        })
+    );
 
     let (_, mut events) = client.subscribe().await.unwrap();
-    assert_eq!(client.request(Request::SetVolume { percent: 40 }).await.unwrap(), Payload::Ack);
+    assert_eq!(
+        client
+            .request(Request::SetVolume { percent: 40 })
+            .await
+            .unwrap(),
+        Payload::Ack
+    );
     let (_, event) = next_event(&mut events).await;
-    assert_eq!(event, Event::VolumeChanged { percent: 40, muted: false });
-    assert_eq!(control.get(), phonia_core::output::Volume { percent: 40, muted: false });
-    assert_eq!(volume_of(&client).await, Some(Volume { percent: 40, muted: false }));
+    assert_eq!(
+        event,
+        Event::VolumeChanged {
+            percent: 40,
+            muted: false
+        }
+    );
+    assert_eq!(
+        control.get(),
+        phonia_core::output::Volume {
+            percent: 40,
+            muted: false
+        }
+    );
+    assert_eq!(
+        volume_of(&client).await,
+        Some(Volume {
+            percent: 40,
+            muted: false
+        })
+    );
 
-    client.request(Request::SetMute { mute: true }).await.unwrap();
+    client
+        .request(Request::SetMute { mute: true })
+        .await
+        .unwrap();
     let (_, event) = next_event(&mut events).await;
-    assert_eq!(event, Event::VolumeChanged { percent: 40, muted: true }, "muting keeps the level");
+    assert_eq!(
+        event,
+        Event::VolumeChanged {
+            percent: 40,
+            muted: true
+        },
+        "muting keeps the level"
+    );
 
-    client.request(Request::SetVolume { percent: 250 }).await.unwrap();
-    assert_eq!(volume_of(&client).await.unwrap().percent, 100, "never above unity gain");
+    client
+        .request(Request::SetVolume { percent: 250 })
+        .await
+        .unwrap();
+    assert_eq!(
+        volume_of(&client).await.unwrap().percent,
+        100,
+        "never above unity gain"
+    );
     f.finish().await;
 }
 
@@ -649,14 +1084,41 @@ async fn the_volume_carries_over_to_the_next_output_and_is_told_to_clients() {
     let f = fixture("volume-carry", false).await;
     let client = f.client().await;
     switch_to(&f, &client, "shared:speaker").await;
-    client.request(Request::SetVolume { percent: 35 }).await.unwrap();
-    client.request(Request::SetMute { mute: true }).await.unwrap();
+    client
+        .request(Request::SetVolume { percent: 35 })
+        .await
+        .unwrap();
+    client
+        .request(Request::SetMute { mute: true })
+        .await
+        .unwrap();
 
     let (_, mut events) = client.subscribe().await.unwrap();
     let other = switch_to(&f, &client, "shared:headphones").await;
-    assert_eq!(other.fake_volume().unwrap().get(), phonia_core::output::Volume { percent: 35, muted: true });
-    let seen = events_until(&mut events, |event| matches!(event, Event::VolumeChanged { .. })).await;
-    assert!(matches!(seen.last(), Some((_, Event::VolumeChanged { percent: 35, muted: true }))), "{seen:?}");
+    assert_eq!(
+        other.fake_volume().unwrap().get(),
+        phonia_core::output::Volume {
+            percent: 35,
+            muted: true
+        }
+    );
+    let seen = events_until(&mut events, |event| {
+        matches!(event, Event::VolumeChanged { .. })
+    })
+    .await;
+    assert!(
+        matches!(
+            seen.last(),
+            Some((
+                _,
+                Event::VolumeChanged {
+                    percent: 35,
+                    muted: true
+                }
+            ))
+        ),
+        "{seen:?}"
+    );
     f.finish().await;
 }
 
@@ -667,10 +1129,28 @@ async fn a_change_from_the_desktops_mixer_is_announced_and_remembered() {
     let shared = switch_to(&f, &client, "shared:speaker").await;
     let (_, mut events) = client.subscribe().await.unwrap();
 
-    shared.fake_volume().unwrap().change_from_outside(phonia_core::output::Volume { percent: 60, muted: false });
+    shared
+        .fake_volume()
+        .unwrap()
+        .change_from_outside(phonia_core::output::Volume {
+            percent: 60,
+            muted: false,
+        });
     let (_, event) = next_event(&mut events).await;
-    assert_eq!(event, Event::VolumeChanged { percent: 60, muted: false });
-    assert_eq!(volume_of(&client).await, Some(Volume { percent: 60, muted: false }));
+    assert_eq!(
+        event,
+        Event::VolumeChanged {
+            percent: 60,
+            muted: false
+        }
+    );
+    assert_eq!(
+        volume_of(&client).await,
+        Some(Volume {
+            percent: 60,
+            muted: false
+        })
+    );
     f.finish().await;
 }
 
@@ -680,9 +1160,18 @@ async fn a_sound_server_that_does_not_answer_is_an_internal_error_and_nothing_ch
     let client = f.client().await;
     let shared = switch_to(&f, &client, "shared:speaker").await;
     shared.fake_volume().unwrap().fail_sets();
-    let error = client.request(Request::SetVolume { percent: 10 }).await.unwrap_err();
+    let error = client
+        .request(Request::SetVolume { percent: 10 })
+        .await
+        .unwrap_err();
     assert_eq!(protocol_code(error), ErrorCode::Internal);
-    assert_eq!(volume_of(&client).await, Some(Volume { percent: 100, muted: false }));
+    assert_eq!(
+        volume_of(&client).await,
+        Some(Volume {
+            percent: 100,
+            muted: false
+        })
+    );
     f.finish().await;
 }
 
@@ -696,19 +1185,40 @@ async fn releasing_hands_the_device_back_and_resuming_takes_it_again() {
     let (ids, _, _) = added(client.request(add(&[&a], AddAt::End)).await.unwrap());
     let (_, mut events) = client.subscribe().await.unwrap();
 
-    client.request(Request::Play { item: Some(ids[0]) }).await.unwrap();
-    events_until(&mut events, |event| matches!(event, Event::TrackStarted { .. })).await;
+    client
+        .request(Request::Play { item: Some(ids[0]) })
+        .await
+        .unwrap();
+    events_until(&mut events, |event| {
+        matches!(event, Event::TrackStarted { .. })
+    })
+    .await;
     assert_eq!(client.status().await.unwrap().output, Output::Open);
 
-    assert_eq!(client.request(Request::Release).await.unwrap(), Payload::Ack);
+    assert_eq!(
+        client.request(Request::Release).await.unwrap(),
+        Payload::Ack
+    );
     f.sinks.handles()[0].advance(1024); // lets the blocked write return so the engine sees it
-    let seen = events_until(&mut events, |event| matches!(event, Event::OutputReleased { .. })).await;
+    let seen = events_until(&mut events, |event| {
+        matches!(event, Event::OutputReleased { .. })
+    })
+    .await;
     assert!(matches!(
         seen.last(),
-        Some((_, Event::OutputReleased { by: None, reason: ReleaseReason::Command }))
+        Some((
+            _,
+            Event::OutputReleased {
+                by: None,
+                reason: ReleaseReason::Command
+            }
+        ))
     ));
     let status = client.status().await.unwrap();
-    assert_eq!((status.state, status.output), (State::Paused, Output::Released { by: None }));
+    assert_eq!(
+        (status.state, status.output),
+        (State::Paused, Output::Released { by: None })
+    );
     assert_eq!(f.sinks.release_count(), 1);
 
     client.request(Request::Resume).await.unwrap();
@@ -724,8 +1234,17 @@ async fn a_seek_with_nothing_playing_is_answered_and_then_reported_as_rejected()
     let client = f.client().await;
     let (_, mut events) = client.subscribe().await.unwrap();
 
-    let ack = client.request(Request::Seek { target: SeekTarget::Absolute { ms: 5_000 } }).await.unwrap();
-    assert_eq!(ack, Payload::Ack, "the request was accepted; what the engine makes of it comes as an event");
+    let ack = client
+        .request(Request::Seek {
+            target: SeekTarget::Absolute { ms: 5_000 },
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        ack,
+        Payload::Ack,
+        "the request was accepted; what the engine makes of it comes as an event"
+    );
     let (_, event) = next_event(&mut events).await;
     assert!(matches!(event, Event::SeekRejected { .. }), "{event:?}");
     f.finish().await;
@@ -739,16 +1258,36 @@ async fn removing_the_playing_entry_skips_to_the_next_one() {
     let (ids, _, _) = added(client.request(add(&[&a, &b], AddAt::End)).await.unwrap());
     let (_, mut events) = client.subscribe().await.unwrap();
 
-    client.request(Request::Play { item: Some(ids[0]) }).await.unwrap();
-    events_until(&mut events, |event| matches!(event, Event::TrackStarted { .. })).await;
-    assert_eq!(client.status().await.unwrap().track.unwrap().item_id, Some(ids[0]));
+    client
+        .request(Request::Play { item: Some(ids[0]) })
+        .await
+        .unwrap();
+    events_until(&mut events, |event| {
+        matches!(event, Event::TrackStarted { .. })
+    })
+    .await;
+    assert_eq!(
+        client.status().await.unwrap().track.unwrap().item_id,
+        Some(ids[0])
+    );
 
-    assert_eq!(client.request(Request::QueueRemove { ids: vec![ids[0]] }).await.unwrap(), Payload::Removed { count: 1 });
+    assert_eq!(
+        client
+            .request(Request::QueueRemove { ids: vec![ids[0]] })
+            .await
+            .unwrap(),
+        Payload::Removed { count: 1 }
+    );
     f.sinks.handles()[0].advance(1024); // lets the blocked write return so the engine sees the skip
-    let seen = events_until(&mut events, |event| matches!(event, Event::TrackStarted { .. })).await;
+    let seen = events_until(&mut events, |event| {
+        matches!(event, Event::TrackStarted { .. })
+    })
+    .await;
     let events: Vec<&Event> = seen.iter().map(|(_, event)| event).collect();
     assert!(events.iter().any(|e| matches!(e, Event::TrackEnded { item_id, reason: EndReason::Interrupted } if *item_id == Some(ids[0]))));
-    assert!(matches!(events.last(), Some(Event::TrackStarted { item_id, .. }) if *item_id == Some(ids[1])));
+    assert!(
+        matches!(events.last(), Some(Event::TrackStarted { item_id, .. }) if *item_id == Some(ids[1]))
+    );
     f.sinks.handles()[0].set_blocking(false);
     f.finish().await;
 }
@@ -762,14 +1301,26 @@ async fn a_shutdown_request_stops_the_daemon_and_tells_subscribers() {
     let (_, mut events) = watcher.subscribe().await.unwrap();
     let mut stopping = f.daemon.shutdown_signal();
 
-    assert_eq!(asker.request(Request::Shutdown).await.unwrap(), Payload::Ack);
+    assert_eq!(
+        asker.request(Request::Shutdown).await.unwrap(),
+        Payload::Ack
+    );
     let seen = events_until(&mut events, |event| matches!(event, Event::ShuttingDown)).await;
     assert!(matches!(seen.last(), Some((_, Event::ShuttingDown))));
-    tokio::time::timeout(TIMEOUT, phoniad::daemon::wait_for_shutdown(&mut stopping)).await.expect("the daemon must signal that it is stopping");
+    tokio::time::timeout(TIMEOUT, phoniad::daemon::wait_for_shutdown(&mut stopping))
+        .await
+        .expect("the daemon must signal that it is stopping");
 
-    tokio::time::timeout(TIMEOUT, asker.closed()).await.expect("connections are closed on shutdown");
-    tokio::time::timeout(TIMEOUT, watcher.closed()).await.unwrap();
-    assert!(matches!(asker.request(Request::Status).await, Err(ClientError::Closed | ClientError::Io(_))));
+    tokio::time::timeout(TIMEOUT, asker.closed())
+        .await
+        .expect("connections are closed on shutdown");
+    tokio::time::timeout(TIMEOUT, watcher.closed())
+        .await
+        .unwrap();
+    assert!(matches!(
+        asker.request(Request::Status).await,
+        Err(ClientError::Closed | ClientError::Io(_))
+    ));
     f.finish().await;
 }
 
@@ -778,8 +1329,16 @@ async fn a_request_after_the_connection_drops_fails_instead_of_hanging() {
     let f = fixture("drop", false).await;
     let client = f.client().await;
     f.daemon.request_shutdown();
-    tokio::time::timeout(TIMEOUT, client.closed()).await.unwrap();
-    let error = tokio::time::timeout(TIMEOUT, client.request(Request::Status)).await.expect("must not hang").unwrap_err();
-    assert!(matches!(error, ClientError::Closed | ClientError::Io(_)), "{error}");
+    tokio::time::timeout(TIMEOUT, client.closed())
+        .await
+        .unwrap();
+    let error = tokio::time::timeout(TIMEOUT, client.request(Request::Status))
+        .await
+        .expect("must not hang")
+        .unwrap_err();
+    assert!(
+        matches!(error, ClientError::Closed | ClientError::Io(_)),
+        "{error}"
+    );
     f.finish().await;
 }

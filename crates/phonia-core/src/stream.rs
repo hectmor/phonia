@@ -69,8 +69,17 @@ pub struct SegmentStream {
 }
 
 impl SegmentStream {
-    fn new(receiver: mpsc::Receiver<ChunkResult>, tee: Option<Box<dyn Write + Send + Sync>>) -> Self {
-        SegmentStream { receiver, current: Bytes::new(), position: 0, finished: false, tee }
+    fn new(
+        receiver: mpsc::Receiver<ChunkResult>,
+        tee: Option<Box<dyn Write + Send + Sync>>,
+    ) -> Self {
+        SegmentStream {
+            receiver,
+            current: Bytes::new(),
+            position: 0,
+            finished: false,
+            tee,
+        }
     }
 
     /// Blocks (via `Receiver::blocking_recv`) until either more bytes are available, the stream
@@ -172,7 +181,9 @@ async fn download_segment(http: &reqwest::Client, url: &str) -> Result<Option<By
         match http.get(url).send().await {
             Ok(response) => {
                 let status = response.status();
-                if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::FORBIDDEN {
+                if status == reqwest::StatusCode::NOT_FOUND
+                    || status == reqwest::StatusCode::FORBIDDEN
+                {
                     // Treated by the caller as "no more segments", not a retryable failure.
                     return Ok(None);
                 }
@@ -182,10 +193,17 @@ async fn download_segment(http: &reqwest::Client, url: &str) -> Result<Option<By
                 }
                 match response.bytes().await {
                     Ok(bytes) => return Ok(Some(bytes)),
-                    Err(e) => last_err = Some(anyhow::Error::new(e).context("reading segment bytes")),
+                    Err(e) => {
+                        last_err = Some(anyhow::Error::new(e).context("reading segment bytes"))
+                    }
                 }
             }
-            Err(e) => last_err = Some(anyhow::Error::new(e).context(format!("attempt {attempt}/{MAX_SEGMENT_RETRIES}"))),
+            Err(e) => {
+                last_err = Some(
+                    anyhow::Error::new(e)
+                        .context(format!("attempt {attempt}/{MAX_SEGMENT_RETRIES}")),
+                )
+            }
         }
     }
 
@@ -208,7 +226,9 @@ async fn run_dash_download(
     // complete line up front and never touches stdout again; only the ALSA sink owns a `\r`
     // progress line for the rest of playback.
     match dash.segment_count {
-        Some(total) => crate::note!("Buffering {PREFETCH_DEPTH} segments ahead (track has {total} segments)..."),
+        Some(total) => crate::note!(
+            "Buffering {PREFETCH_DEPTH} segments ahead (track has {total} segments)..."
+        ),
         None => crate::note!("Buffering {PREFETCH_DEPTH} segments ahead..."),
     }
 
@@ -285,7 +305,11 @@ async fn run_dash_download(
 /// first, then media segments in order, honouring `segment_count` when known and otherwise
 /// stopping at the first 404/403. Only spawns the download task; fetches nothing itself, so this
 /// function returns immediately.
-pub fn open_dash(http: &reqwest::Client, dash: &DashSegments, tee: Option<std::fs::File>) -> SegmentStream {
+pub fn open_dash(
+    http: &reqwest::Client,
+    dash: &DashSegments,
+    tee: Option<std::fs::File>,
+) -> SegmentStream {
     open_dash_from(http, dash, dash.start_number, tee)
 }
 
@@ -321,14 +345,18 @@ pub fn open_url(http: &reqwest::Client, url: &str, tee: Option<std::fs::File>) -
             Ok(r) => r,
             Err(e) => {
                 let _ = tx
-                    .send(Err(anyhow::Error::new(e).context("requesting the audio (JSON manifest)")))
+                    .send(Err(
+                        anyhow::Error::new(e).context("requesting the audio (JSON manifest)")
+                    ))
                     .await;
                 return;
             }
         };
         let status = response.status();
         if !status.is_success() {
-            let _ = tx.send(Err(anyhow!("HTTP {status} downloading {url}"))).await;
+            let _ = tx
+                .send(Err(anyhow!("HTTP {status} downloading {url}")))
+                .await;
             return;
         }
 
@@ -341,7 +369,11 @@ pub fn open_url(http: &reqwest::Client, url: &str, tee: Option<std::fs::File>) -
                     }
                 }
                 Err(e) => {
-                    let _ = tx.send(Err(anyhow::Error::new(e).context("reading the audio stream"))).await;
+                    let _ = tx
+                        .send(Err(
+                            anyhow::Error::new(e).context("reading the audio stream")
+                        ))
+                        .await;
                     return;
                 }
             }
@@ -372,7 +404,11 @@ mod tests {
 
     /// Builds a `SegmentStream` fed by a channel this test controls directly (no network), along
     /// with the sender half and the recording tee's shared buffer.
-    fn test_stream() -> (SegmentStream, mpsc::Sender<ChunkResult>, Arc<Mutex<Vec<u8>>>) {
+    fn test_stream() -> (
+        SegmentStream,
+        mpsc::Sender<ChunkResult>,
+        Arc<Mutex<Vec<u8>>>,
+    ) {
         let (tx, rx) = mpsc::channel(PREFETCH_DEPTH);
         let sink = RecordingSink::default();
         let recorded = sink.0.clone();
@@ -448,14 +484,18 @@ mod tests {
     fn producer_error_surfaces_as_io_error_with_context() {
         let (mut stream, tx, _recorded) = test_stream();
         tx.try_send(Ok(Bytes::from_static(b"ok"))).unwrap();
-        tx.try_send(Err(anyhow!("segment 3 does not exist (HTTP 404)"))).unwrap();
+        tx.try_send(Err(anyhow!("segment 3 does not exist (HTTP 404)")))
+            .unwrap();
         drop(tx);
 
         let mut buf = [0u8; 2];
         assert_eq!(stream.read(&mut buf).unwrap(), 2);
 
         let err = stream.read(&mut buf).unwrap_err();
-        assert!(err.to_string().contains("segment 3 does not exist (HTTP 404)"));
+        assert!(
+            err.to_string()
+                .contains("segment 3 does not exist (HTTP 404)")
+        );
 
         // Once surfaced, the stream is done: further reads are a clean EOF, not a repeated error
         // or a panic.
@@ -507,13 +547,22 @@ mod tests {
         assert_eq!(stream.position, 5);
 
         let err = stream.seek(SeekFrom::Start(1)).unwrap_err();
-        assert!(err.to_string().contains("does not support seeking backwards"));
+        assert!(
+            err.to_string()
+                .contains("does not support seeking backwards")
+        );
 
         let err = stream.seek(SeekFrom::Current(-1)).unwrap_err();
-        assert!(err.to_string().contains("does not support seeking backwards"));
+        assert!(
+            err.to_string()
+                .contains("does not support seeking backwards")
+        );
 
         let err = stream.seek(SeekFrom::End(0)).unwrap_err();
-        assert!(err.to_string().contains("does not support seeking backwards"));
+        assert!(
+            err.to_string()
+                .contains("does not support seeking backwards")
+        );
 
         // Position is unchanged by the rejected seeks.
         assert_eq!(stream.position, 5);
@@ -550,7 +599,10 @@ mod tests {
         drop(stream);
 
         let result = tx.send(Ok(Bytes::from_static(b"too late"))).await;
-        assert!(result.is_err(), "send should fail once the receiver has been dropped");
+        assert!(
+            result.is_err(),
+            "send should fail once the receiver has been dropped"
+        );
     }
 
     #[test]
@@ -569,13 +621,18 @@ mod tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move {
             loop {
-                let Ok((mut socket, _)) = listener.accept().await else { return };
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
                 tokio::spawn(async move {
                     let mut request = [0u8; 2048];
                     let n = socket.read(&mut request).await.unwrap_or(0);
                     let request = String::from_utf8_lossy(&request[..n]);
                     let path = request.split_whitespace().nth(1).unwrap_or("");
-                    let (status, body) = match path.strip_prefix("/seg/").and_then(|n| n.parse::<u32>().ok()) {
+                    let (status, body) = match path
+                        .strip_prefix("/seg/")
+                        .and_then(|n| n.parse::<u32>().ok())
+                    {
                         _ if path == "/init" => ("200 OK", "INIT".to_string()),
                         Some(n) if (1..=last_segment).contains(&n) => ("200 OK", format!("SEG{n}")),
                         _ => ("404 Not Found", String::new()),
@@ -633,8 +690,13 @@ mod tests {
     async fn open_dash_from_the_last_segment_and_past_the_end() {
         let base = serve_segments(5).await;
         let http = reqwest::Client::new();
-        assert_eq!(read_all(open_dash_from(&http, &dash_at(&base, 5), 5, None)).await, b"INITSEG5");
-        assert_eq!(read_all(open_dash_from(&http, &dash_at(&base, 5), 6, None)).await, b"INIT");
+        assert_eq!(
+            read_all(open_dash_from(&http, &dash_at(&base, 5), 5, None)).await,
+            b"INITSEG5"
+        );
+        assert_eq!(
+            read_all(open_dash_from(&http, &dash_at(&base, 5), 6, None)).await,
+            b"INIT"
+        );
     }
 }
-

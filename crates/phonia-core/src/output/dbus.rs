@@ -45,7 +45,12 @@ pub struct DbusReserver {
 impl DbusReserver {
     /// `rt` runs the connection; `priority` is what phonia claims when asking for a card.
     pub fn new(rt: Handle, priority: i32) -> Self {
-        Self { rt, priority, handler: Arc::new(Mutex::new(None)), bus_address: None }
+        Self {
+            rt,
+            priority,
+            handler: Arc::new(Mutex::new(None)),
+            bus_address: None,
+        }
     }
 
     /// Reserve on the bus at `address` instead of the session bus.
@@ -77,18 +82,26 @@ impl DbusReserver {
             .map_err(|error| ReserveError::NoBus(error.to_string()))
     }
 
-    async fn acquire_async(&self, card: u32, device_name: &str) -> Result<Box<dyn Reservation>, ReserveError> {
+    async fn acquire_async(
+        &self,
+        card: u32,
+        device_name: &str,
+    ) -> Result<Box<dyn Reservation>, ReserveError> {
         let connection = self.connect(card, device_name).await?;
         let name = format!("{NAME_PREFIX}{card}");
 
         let took_over = match request(&connection, &name, false).await? {
             Taken::Yes => false,
             Taken::No => {
-                self.take_from_holder(&connection, card, &name, device_name).await?;
+                self.take_from_holder(&connection, card, &name, device_name)
+                    .await?;
                 true
             }
         };
-        Ok(Box::new(DbusReservation { _connection: connection, took_over }))
+        Ok(Box::new(DbusReservation {
+            _connection: connection,
+            took_over,
+        }))
     }
 
     /// Someone else has the card: ask them to let go, then take the name.
@@ -125,7 +138,10 @@ impl DbusReserver {
                 });
             }
             Ok(Err(_)) | Err(_) => {
-                return Err(ReserveError::Unresponsive { device: device_name.to_string(), holder: holder_name });
+                return Err(ReserveError::Unresponsive {
+                    device: device_name.to_string(),
+                    holder: holder_name,
+                });
             }
         }
 
@@ -150,7 +166,11 @@ enum Taken {
 
 /// Asks the bus for `name`. Never queues, and never allows anyone to replace us; `replace` takes
 /// it from a holder that allows that.
-async fn request(connection: &Connection, name: &str, replace: bool) -> Result<Taken, ReserveError> {
+async fn request(
+    connection: &Connection,
+    name: &str,
+    replace: bool,
+) -> Result<Taken, ReserveError> {
     let flags = if replace {
         RequestNameFlags::DoNotQueue | RequestNameFlags::ReplaceExisting
     } else {
@@ -158,7 +178,9 @@ async fn request(connection: &Connection, name: &str, replace: bool) -> Result<T
     };
     match connection.request_name_with_flags(name, flags).await {
         Ok(RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner) => Ok(Taken::Yes),
-        Ok(RequestNameReply::InQueue | RequestNameReply::Exists) | Err(zbus::Error::NameTaken) => Ok(Taken::No),
+        Ok(RequestNameReply::InQueue | RequestNameReply::Exists) | Err(zbus::Error::NameTaken) => {
+            Ok(Taken::No)
+        }
         Err(error) => Err(ReserveError::Failed(error.to_string())),
     }
 }
@@ -218,7 +240,9 @@ impl Reserve {
         if granted {
             // Normally the engine has dropped the reservation already; this makes sure the name
             // is free before the requester hears the answer.
-            let _ = connection.release_name(format!("{NAME_PREFIX}{}", self.card)).await;
+            let _ = connection
+                .release_name(format!("{NAME_PREFIX}{}", self.card))
+                .await;
         }
         granted
     }
@@ -240,7 +264,10 @@ impl Reserve {
 }
 
 /// The name of the program behind a bus connection, for the messages.
-pub(crate) async fn process_name(connection: &Connection, peer: BusName<'static>) -> Option<String> {
+pub(crate) async fn process_name(
+    connection: &Connection,
+    peer: BusName<'static>,
+) -> Option<String> {
     let bus = DBusProxy::new(connection).await.ok()?;
     let pid = bus.get_connection_unix_process_id(peer).await.ok()?;
     let name = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
@@ -266,7 +293,11 @@ mod tests {
 
     #[interface(name = "org.freedesktop.ReserveDevice1")]
     impl Holder {
-        async fn request_release(&self, _priority: i32, #[zbus(connection)] connection: &Connection) -> bool {
+        async fn request_release(
+            &self,
+            _priority: i32,
+            #[zbus(connection)] connection: &Connection,
+        ) -> bool {
             if self.agree {
                 connection.release_name(self.name.clone()).await.unwrap();
             }
@@ -290,26 +321,44 @@ mod tests {
     }
 
     async fn client(bus: &Bus) -> Connection {
-        connection::Builder::address(bus.address.as_str()).unwrap().build().await.unwrap()
+        connection::Builder::address(bus.address.as_str())
+            .unwrap()
+            .build()
+            .await
+            .unwrap()
     }
 
     async fn holder(bus: &Bus, card: u32, agree: bool) -> Connection {
         let name = format!("{NAME_PREFIX}{card}");
         let connection = connection::Builder::address(bus.address.as_str())
             .unwrap()
-            .serve_at(format!("{PATH_PREFIX}{card}"), Holder { name: name.clone(), agree })
+            .serve_at(
+                format!("{PATH_PREFIX}{card}"),
+                Holder {
+                    name: name.clone(),
+                    agree,
+                },
+            )
             .unwrap()
             .build()
             .await
             .unwrap();
         let flags = RequestNameFlags::AllowReplacement | RequestNameFlags::DoNotQueue;
-        connection.request_name_with_flags(name, flags).await.unwrap();
+        connection
+            .request_name_with_flags(name, flags)
+            .await
+            .unwrap();
         connection
     }
 
     async fn has_owner(connection: &Connection, card: u32) -> bool {
         let name = format!("{NAME_PREFIX}{card}");
-        DBusProxy::new(connection).await.unwrap().name_has_owner(name.as_str().try_into().unwrap()).await.unwrap()
+        DBusProxy::new(connection)
+            .await
+            .unwrap()
+            .name_has_owner(name.as_str().try_into().unwrap())
+            .await
+            .unwrap()
     }
 
     /// Waits up to a second for the name to be free: the bus notices a closed connection a moment
@@ -339,7 +388,10 @@ mod tests {
         assert!(rt.block_on(has_owner(&observer, 3)));
 
         drop(reservation);
-        assert!(rt.block_on(becomes_free(&observer, 3)), "dropping the reservation frees the name");
+        assert!(
+            rt.block_on(becomes_free(&observer, 3)),
+            "dropping the reservation frees the name"
+        );
     }
 
     #[test]
@@ -350,7 +402,10 @@ mod tests {
 
         let reservation = reserver(&rt, &bus).acquire(3, "hw:DS2,0").unwrap();
         assert!(reservation.took_over());
-        assert!(rt.block_on(has_owner(&wireplumber, 3)), "and phonia owns the name now");
+        assert!(
+            rt.block_on(has_owner(&wireplumber, 3)),
+            "and phonia owns the name now"
+        );
 
         drop(reservation);
         assert!(rt.block_on(becomes_free(&wireplumber, 3)));
@@ -362,11 +417,28 @@ mod tests {
         let (rt, bus) = (tokio::runtime::Runtime::new().unwrap(), Bus::start());
         let wireplumber = rt.block_on(holder(&bus, 3, false));
 
-        let Err(error) = reserver(&rt, &bus).acquire(3, "hw:DS2,0") else { panic!("the card was not free") };
+        let Err(error) = reserver(&rt, &bus).acquire(3, "hw:DS2,0") else {
+            panic!("the card was not free")
+        };
         let text = error.to_string();
-        assert!(matches!(error, ReserveError::Refused { priority: Some(-20), .. }), "{text}");
-        assert!(text.contains("WirePlumber") && text.contains("hw:DS2,0"), "{text}");
-        assert!(rt.block_on(has_owner(&wireplumber, 3)), "the holder keeps the card");
+        assert!(
+            matches!(
+                error,
+                ReserveError::Refused {
+                    priority: Some(-20),
+                    ..
+                }
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("WirePlumber") && text.contains("hw:DS2,0"),
+            "{text}"
+        );
+        assert!(
+            rt.block_on(has_owner(&wireplumber, 3)),
+            "the holder keeps the card"
+        );
     }
 
     #[test]
@@ -388,19 +460,36 @@ mod tests {
         *held.lock().unwrap() = Some(dbus.acquire(3, "hw:DS2,0").unwrap());
 
         let granted = rt.block_on(async {
-            let phonia = Proxy::new(&requester, format!("{NAME_PREFIX}3"), format!("{PATH_PREFIX}3"), INTERFACE)
+            let phonia = Proxy::new(
+                &requester,
+                format!("{NAME_PREFIX}3"),
+                format!("{PATH_PREFIX}3"),
+                INTERFACE,
+            )
+            .await
+            .unwrap();
+            let name = phonia
+                .get_property::<String>("ApplicationName")
                 .await
                 .unwrap();
-            let name = phonia.get_property::<String>("ApplicationName").await.unwrap();
             assert_eq!(name, "phonia");
-            let granted = phonia.call::<_, _, bool>("RequestRelease", &(100i32,)).await.unwrap();
-            assert!(!has_owner(&requester, 3).await, "the name is free by the time the answer is heard");
+            let granted = phonia
+                .call::<_, _, bool>("RequestRelease", &(100i32,))
+                .await
+                .unwrap();
+            assert!(
+                !has_owner(&requester, 3).await,
+                "the name is free by the time the answer is heard"
+            );
             granted
         });
         assert!(granted);
         let request = asked.lock().unwrap().take().unwrap();
         assert_eq!(request.priority, 100);
-        assert!(request.by.is_some(), "the requester is named from its process");
+        assert!(
+            request.by.is_some(),
+            "the requester is named from its process"
+        );
     }
 
     #[test]
@@ -411,10 +500,18 @@ mod tests {
         let reservation = reserver(&rt, &bus).acquire(3, "hw:DS2,0").unwrap();
 
         let granted = rt.block_on(async {
-            let phonia = Proxy::new(&requester, format!("{NAME_PREFIX}3"), format!("{PATH_PREFIX}3"), INTERFACE)
+            let phonia = Proxy::new(
+                &requester,
+                format!("{NAME_PREFIX}3"),
+                format!("{PATH_PREFIX}3"),
+                INTERFACE,
+            )
+            .await
+            .unwrap();
+            phonia
+                .call::<_, _, bool>("RequestRelease", &(100i32,))
                 .await
-                .unwrap();
-            phonia.call::<_, _, bool>("RequestRelease", &(100i32,)).await.unwrap()
+                .unwrap()
         });
         assert!(!granted);
         drop(reservation);
@@ -426,14 +523,22 @@ mod tests {
         // What `phonia probe-device` does: reserve from `spawn_blocking`.
         let (rt, bus) = (tokio::runtime::Runtime::new().unwrap(), Bus::start());
         let reserver = reserver(&rt, &bus);
-        let reservation = rt.block_on(async { tokio::task::spawn_blocking(move || reserver.acquire(3, "hw:DS2,0")).await.unwrap() });
+        let reservation = rt.block_on(async {
+            tokio::task::spawn_blocking(move || reserver.acquire(3, "hw:DS2,0"))
+                .await
+                .unwrap()
+        });
         assert!(reservation.is_ok());
     }
 
     #[test]
     fn no_session_bus_is_reported_as_such() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let reserver = DbusReserver::new(rt.handle().clone(), PRIORITY).on_bus("unix:path=/nonexistent/phonia-bus");
-        assert!(matches!(reserver.acquire(3, "hw:DS2,0"), Err(ReserveError::NoBus(_))));
+        let reserver = DbusReserver::new(rt.handle().clone(), PRIORITY)
+            .on_bus("unix:path=/nonexistent/phonia-bus");
+        assert!(matches!(
+            reserver.acquire(3, "hw:DS2,0"),
+            Err(ReserveError::NoBus(_))
+        ));
     }
 }

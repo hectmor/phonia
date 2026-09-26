@@ -447,6 +447,32 @@ more importantly, *why* it was chosen.
   messages at every fallible step, from "no saved session, run `phonia login`" to "the device
   doesn't support any lossless integer format for a 24-bit source."
 
+## Development
+
+CI (`.github/workflows/ci.yml`) runs on every push and pull request to `develop` and `main`:
+formatting, clippy with warnings as errors, build and tests, and the D-Bus tests against a private
+bus. The same checks locally:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+Building needs the ALSA development files (`libasound2-dev` on Debian and Ubuntu, `alsa-lib` on
+Arch, `alsa-lib-devel` on Fedora) and `pkg-config`. Everything else is Rust.
+
+Tests that need something the CI machine does not have are marked `#[ignore]` and never run by
+plain `cargo test`:
+
+- `cargo test -p phonia-core -- --ignored output::dbus:: auth::secret_service::` -- the device
+  reservation and the keyring store, against a private `dbus-daemon` the tests start themselves
+  (needs only that binary; also run by CI).
+- `cargo test -p phonia-core -- --ignored shared::pulse` -- shared mode against the real sound
+  server, using a null sink they create and remove (needs PipeWire or PulseAudio, `pactl`, `parec`).
+- The tests that open a sound card (`output::alsa`) are ignored too, and are run by hand with the
+  DAC connected. **Do not run `cargo test --workspace -- --include-ignored`**: it runs those.
+
 ## License
 
 MIT. See the [LICENSE](LICENSE) file.

@@ -1,6 +1,9 @@
 //! The messages: what a client may ask, and what the daemon answers and announces.
 
-use crate::dto::{EndReason, ItemId, OutputInfo, Queue, ReleaseReason, Repeat, Route, SinkReport, Spec, State, Status};
+use crate::dto::{
+    EndReason, ItemId, OutputInfo, Queue, ReleaseReason, Repeat, Route, SinkReport, Spec, State,
+    Status,
+};
 use serde::{Deserialize, Serialize};
 
 /// Capability: the daemon understands `release` and reports `output` (protocol 1.1).
@@ -94,7 +97,10 @@ pub enum AddAt {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
     /// Must come first. Announces the protocol version the client speaks.
-    Hello { protocol: Version, client: ClientInfo },
+    Hello {
+        protocol: Version,
+        client: ClientInfo,
+    },
     Status,
     Queue,
     /// Start receiving events. The answer is a [`Payload::Snapshot`] to render immediately;
@@ -102,14 +108,18 @@ pub enum Request {
     Subscribe,
     Unsubscribe,
     /// Play an entry now, or (without one) start from the queue.
-    Play { item: Option<ItemId> },
+    Play {
+        item: Option<ItemId>,
+    },
     Stop,
     Pause,
     Resume,
     TogglePause,
     Next,
     Previous,
-    Seek { target: SeekTarget },
+    Seek {
+        target: SeekTarget,
+    },
     /// Pauses and hands the audio device back so another program can use it (since 1.1).
     /// `resume` takes it again.
     Release,
@@ -117,23 +127,38 @@ pub enum Request {
     Outputs,
     /// Plays through another output from now on, keeping the track and the position (since 1.2).
     /// `output` is an id from `outputs`.
-    SetOutput { output: String },
+    SetOutput {
+        output: String,
+    },
     /// Sets the volume, 0 to 100 (since 1.3). Refused for an output with no volume of its own to
     /// set, which is an exclusive card.
-    SetVolume { percent: u8 },
+    SetVolume {
+        percent: u8,
+    },
     /// Mutes or unmutes (since 1.3). Refused like `set_volume`.
-    SetMute { mute: bool },
+    SetMute {
+        mute: bool,
+    },
     /// Adds tracks, resolving their titles and lengths first.
     QueueAdd {
         tracks: Vec<NewTrack>,
         #[serde(default)]
         at: AddAt,
     },
-    QueueRemove { ids: Vec<ItemId> },
-    QueueMove { id: ItemId, to: usize },
+    QueueRemove {
+        ids: Vec<ItemId>,
+    },
+    QueueMove {
+        id: ItemId,
+        to: usize,
+    },
     QueueClear,
-    SetShuffle { shuffle: bool },
-    SetRepeat { repeat: Repeat },
+    SetShuffle {
+        shuffle: bool,
+    },
+    SetRepeat {
+        repeat: Repeat,
+    },
     /// Stops the daemon.
     Shutdown,
     /// A request this version does not know; answered with [`ErrorCode::UnknownRequest`].
@@ -191,12 +216,25 @@ pub enum Payload {
     Queue(Queue),
     /// The outcome of [`Request::QueueAdd`]: tracks that are wrong are refused, the rest are added
     /// (those whose metadata could not be fetched right now are listed in `unresolved`).
-    Added { ids: Vec<ItemId>, rejected: Vec<Rejected>, unresolved: Vec<Unresolved> },
-    Removed { count: usize },
+    Added {
+        ids: Vec<ItemId>,
+        rejected: Vec<Rejected>,
+        unresolved: Vec<Unresolved>,
+    },
+    Removed {
+        count: usize,
+    },
     /// The outputs the daemon can play on, and the id of the current one.
-    Outputs { outputs: Vec<OutputInfo>, current: Option<String> },
+    Outputs {
+        outputs: Vec<OutputInfo>,
+        current: Option<String>,
+    },
     /// The state right now, and the sequence number of the last event it includes.
-    Snapshot { seq: u64, status: Status, queue: Queue },
+    Snapshot {
+        seq: u64,
+        status: Status,
+        queue: Queue,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -214,30 +252,65 @@ pub enum Reply {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
-    StateChanged { state: State },
-    TrackStarted { item_id: Option<ItemId>, source: Option<String>, title: Option<String>, duration_ms: Option<u64>, spec: Spec },
-    TrackEnded { item_id: Option<ItemId>, reason: EndReason },
-    Position { position_ms: u64, duration_ms: Option<u64> },
-    Seeked { position_ms: u64 },
-    SeekRejected { reason: String },
-    QueueChanged { queue: Queue },
+    StateChanged {
+        state: State,
+    },
+    TrackStarted {
+        item_id: Option<ItemId>,
+        source: Option<String>,
+        title: Option<String>,
+        duration_ms: Option<u64>,
+        spec: Spec,
+    },
+    TrackEnded {
+        item_id: Option<ItemId>,
+        reason: EndReason,
+    },
+    Position {
+        position_ms: u64,
+        duration_ms: Option<u64>,
+    },
+    Seeked {
+        position_ms: u64,
+    },
+    SeekRejected {
+        reason: String,
+    },
+    QueueChanged {
+        queue: Queue,
+    },
     QueueExhausted,
     /// The daemon paused and gave the audio device back; the track and position are kept.
-    OutputReleased { by: Option<String>, reason: ReleaseReason },
+    OutputReleased {
+        by: Option<String>,
+        reason: ReleaseReason,
+    },
     /// It took the device again.
     OutputAcquired,
     /// The daemon now plays through another output (since 1.2).
-    OutputChanged { route: Route },
+    OutputChanged {
+        route: Route,
+    },
     /// Outputs appeared or disappeared: ask `outputs` again (since 1.2).
     OutputsChanged,
     /// The volume or the mute changed, from a request or from the desktop's mixer (since 1.3).
-    VolumeChanged { percent: u8, muted: bool },
+    VolumeChanged {
+        percent: u8,
+        muted: bool,
+    },
     SinkReport(SinkReport),
-    Error { message: String },
+    Error {
+        message: String,
+    },
     /// The daemon is stopping.
     ShuttingDown,
     /// This client fell behind and missed `skipped` events; here is the state now.
-    Resync { skipped: u64, seq: u64, status: Status, queue: Queue },
+    Resync {
+        skipped: u64,
+        seq: u64,
+        status: Status,
+        queue: Queue,
+    },
     #[serde(other)]
     Unknown,
 }

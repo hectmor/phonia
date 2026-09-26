@@ -51,7 +51,10 @@ impl Ring {
     pub fn new(capacity_frames: usize, period_frames: usize, channels: usize) -> Self {
         let frame_bytes = channels * 4;
         Self {
-            inner: Arc::new(Inner { state: Mutex::default(), space: Condvar::new() }),
+            inner: Arc::new(Inner {
+                state: Mutex::default(),
+                space: Condvar::new(),
+            }),
             frame_bytes,
             channels,
             capacity_bytes: capacity_frames * frame_bytes,
@@ -84,12 +87,18 @@ impl Ring {
             if state.pulled != last_progress.0 {
                 last_progress = (state.pulled, Instant::now());
             } else if last_progress.1.elapsed() > STALL {
-                return Err(anyhow!(OutputGone("the sound server stopped taking audio".to_string())));
+                return Err(anyhow!(OutputGone(
+                    "the sound server stopped taking audio".to_string()
+                )));
             }
             state = self.inner.space.wait_timeout(state, WAKE_EVERY).unwrap().0;
         }
 
-        state.bytes.extend(samples[..frames * self.channels].iter().flat_map(|sample| sample.to_le_bytes()));
+        state.bytes.extend(
+            samples[..frames * self.channels]
+                .iter()
+                .flat_map(|sample| sample.to_le_bytes()),
+        );
         if let Some(waker) = state.waker.take() {
             waker.wake();
         }
@@ -100,7 +109,9 @@ impl Ring {
     /// what it loses instead.
     pub fn push_silence(&self, frames: usize) {
         let mut state = self.inner.state.lock().unwrap();
-        state.bytes.extend(std::iter::repeat_n(0u8, frames * self.frame_bytes));
+        state
+            .bytes
+            .extend(std::iter::repeat_n(0u8, frames * self.frame_bytes));
         if let Some(waker) = state.waker.take() {
             waker.wake();
         }
@@ -157,7 +168,11 @@ pub struct RingSource {
 }
 
 impl PlaybackSource for RingSource {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut [u8]) -> Poll<usize> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<usize> {
         let ring = &self.ring;
         let mut state = ring.inner.state.lock().unwrap();
         let take = buf.len().min(state.bytes.len()) / ring.frame_bytes * ring.frame_bytes;
@@ -212,7 +227,12 @@ mod tests {
         assert_eq!(ring.write(&samples(0, 8)).unwrap(), 4);
         let (result, bytes, _) = poll(&ring, 1000);
         assert_eq!(result, Poll::Ready(32));
-        let read: Vec<i32> = bytes.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes(*c)).collect();
+        let read: Vec<i32> = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| i32::from_le_bytes(*c))
+            .collect();
         assert_eq!(read, samples(0, 8));
         assert_eq!(ring.pulled_bytes(), 32);
     }
@@ -232,7 +252,11 @@ mod tests {
         assert_eq!(counter.0.load(Ordering::SeqCst), 0);
 
         ring.write(&samples(0, 4)).unwrap();
-        assert_eq!(counter.0.load(Ordering::SeqCst), 1, "writing wakes the server's side");
+        assert_eq!(
+            counter.0.load(Ordering::SeqCst),
+            1,
+            "writing wakes the server's side"
+        );
     }
 
     #[test]

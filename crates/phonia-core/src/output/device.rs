@@ -42,7 +42,9 @@ impl Device {
     /// The device for people: `hw:1,0 (DS2)`.
     pub fn describe(&self) -> String {
         match self {
-            Device::Hw { card_id: Some(id), .. } => format!("{} ({id})", self.alsa_name()),
+            Device::Hw {
+                card_id: Some(id), ..
+            } => format!("{} ({id})", self.alsa_name()),
             other => other.alsa_name(),
         }
     }
@@ -64,15 +66,21 @@ pub struct CardInfo {
 pub fn cards(asound: &Path) -> Result<Vec<CardInfo>> {
     let names = std::fs::read_to_string(asound.join("cards")).unwrap_or_default();
     let mut found = Vec::new();
-    let entries = std::fs::read_dir(asound).map_err(|error| anyhow!("reading {}: {error}", asound.display()))?;
+    let entries = std::fs::read_dir(asound)
+        .map_err(|error| anyhow!("reading {}: {error}", asound.display()))?;
     for entry in entries.flatten() {
         let file_name = entry.file_name();
-        let Some(index) = file_name.to_str().and_then(|name| name.strip_prefix("card")).and_then(|n| n.parse::<u32>().ok())
+        let Some(index) = file_name
+            .to_str()
+            .and_then(|name| name.strip_prefix("card"))
+            .and_then(|n| n.parse::<u32>().ok())
         else {
             continue;
         };
         let card = entry.path();
-        let Ok(id) = std::fs::read_to_string(card.join("id")) else { continue };
+        let Ok(id) = std::fs::read_to_string(card.join("id")) else {
+            continue;
+        };
         let id = id.trim().to_string();
 
         let mut playback: Vec<u32> = std::fs::read_dir(&card)
@@ -81,13 +89,23 @@ pub fn cards(asound: &Path) -> Result<Vec<CardInfo>> {
             .flatten()
             .filter_map(|pcm| {
                 let name = pcm.file_name();
-                name.to_str()?.strip_prefix("pcm")?.strip_suffix('p')?.parse().ok()
+                name.to_str()?
+                    .strip_prefix("pcm")?
+                    .strip_suffix('p')?
+                    .parse()
+                    .ok()
             })
             .collect();
         playback.sort_unstable();
 
         let name = card_name(&names, index).unwrap_or_else(|| id.clone());
-        found.push(CardInfo { index, id, name, usb: card.join("usbid").exists(), playback });
+        found.push(CardInfo {
+            index,
+            id,
+            name,
+            usb: card.join("usbid").exists(),
+            playback,
+        });
     }
     found.sort_by_key(|card| card.index);
     Ok(found)
@@ -98,7 +116,10 @@ pub fn cards(asound: &Path) -> Result<Vec<CardInfo>> {
 fn card_name(cards_file: &str, index: u32) -> Option<String> {
     cards_file.lines().find_map(|line| {
         let (number, rest) = line.trim_start().split_once(' ')?;
-        (number.parse::<u32>().ok()? == index).then(|| rest.split_once(" - ").map(|(_, name)| name.trim().to_string()))?
+        (number.parse::<u32>().ok()? == index).then(|| {
+            rest.split_once(" - ")
+                .map(|(_, name)| name.trim().to_string())
+        })?
     })
 }
 
@@ -109,11 +130,18 @@ pub fn resolve(spec: &str, asound: &Path) -> Result<Device> {
     if spec == "auto" {
         return first_usb_card(asound);
     }
-    let Some(rest) = spec.strip_prefix("hw:") else { return Ok(Device::Other(spec.to_string())) };
+    let Some(rest) = spec.strip_prefix("hw:") else {
+        return Ok(Device::Other(spec.to_string()));
+    };
 
-    let (card, device) = split_hw(rest).ok_or_else(|| anyhow!("{spec:?} is not a device name: expected hw:<card>,<device>"))?;
+    let (card, device) = split_hw(rest)
+        .ok_or_else(|| anyhow!("{spec:?} is not a device name: expected hw:<card>,<device>"))?;
     match card.parse::<u32>() {
-        Ok(card) => Ok(Device::Hw { card, device, card_id: card_id(asound, card) }),
+        Ok(card) => Ok(Device::Hw {
+            card,
+            device,
+            card_id: card_id(asound, card),
+        }),
         Err(_) => by_id(spec, card, device, asound),
     }
 }
@@ -138,22 +166,33 @@ fn split_hw(rest: &str) -> Option<(&str, u32)> {
             }
         }
     }
-    card.filter(|card| !card.is_empty()).map(|card| (card, device.unwrap_or(0)))
+    card.filter(|card| !card.is_empty())
+        .map(|card| (card, device.unwrap_or(0)))
 }
 
 fn card_id(asound: &Path, card: u32) -> Option<String> {
-    std::fs::read_to_string(asound.join(format!("card{card}")).join("id")).ok().map(|id| id.trim().to_string())
+    std::fs::read_to_string(asound.join(format!("card{card}")).join("id"))
+        .ok()
+        .map(|id| id.trim().to_string())
 }
 
 fn by_id(spec: &str, id: &str, device: u32, asound: &Path) -> Result<Device> {
     let cards = cards(asound)?;
     match cards.iter().find(|card| card.id == id) {
-        Some(card) => Ok(Device::Hw { card: card.index, device, card_id: Some(card.id.clone()) }),
+        Some(card) => Ok(Device::Hw {
+            card: card.index,
+            device,
+            card_id: Some(card.id.clone()),
+        }),
         None => {
             let known: Vec<&str> = cards.iter().map(|card| card.id.as_str()).collect();
             bail!(
                 "no sound card with id {id:?} (from {spec:?}); cards now: {}. Is the DAC plugged in? Run `phonia devices`",
-                if known.is_empty() { "none".to_string() } else { known.join(", ") }
+                if known.is_empty() {
+                    "none".to_string()
+                } else {
+                    known.join(", ")
+                }
             )
         }
     }
@@ -161,22 +200,38 @@ fn by_id(spec: &str, id: &str, device: u32, asound: &Path) -> Result<Device> {
 
 fn first_usb_card(asound: &Path) -> Result<Device> {
     let cards = cards(asound)?;
-    match cards.iter().find(|card| card.usb && !card.playback.is_empty()) {
-        Some(card) => Ok(Device::Hw { card: card.index, device: card.playback[0], card_id: Some(card.id.clone()) }),
-        None => bail!("device = \"auto\" found no USB sound card with playback. Is the DAC plugged in? Run `phonia devices`"),
+    match cards
+        .iter()
+        .find(|card| card.usb && !card.playback.is_empty())
+    {
+        Some(card) => Ok(Device::Hw {
+            card: card.index,
+            device: card.playback[0],
+            card_id: Some(card.id.clone()),
+        }),
+        None => bail!(
+            "device = \"auto\" found no USB sound card with playback. Is the DAC plugged in? Run `phonia devices`"
+        ),
     }
 }
 
 /// The text of `phonia devices`: the cards that can play, with the string to put in the config.
 pub fn list(asound: &Path) -> Result<String> {
     let cards = cards(asound)?;
-    let playing: Vec<&CardInfo> = cards.iter().filter(|card| !card.playback.is_empty()).collect();
+    let playing: Vec<&CardInfo> = cards
+        .iter()
+        .filter(|card| !card.playback.is_empty())
+        .collect();
     if playing.is_empty() {
         return Ok("No sound cards with playback were found.".to_string());
     }
     let mut lines = vec!["Sound cards, exclusive and bit-perfect (put the device in ~/.config/phonia/config.toml under [output]):".to_string()];
     for card in playing {
-        let devices: Vec<String> = card.playback.iter().map(|device| format!("hw:{},{device}", card.id)).collect();
+        let devices: Vec<String> = card
+            .playback
+            .iter()
+            .map(|device| format!("hw:{},{device}", card.id))
+            .collect();
         lines.push(format!(
             "  {:<16} {}  (card {}{})",
             devices.join(" "),
@@ -197,7 +252,8 @@ mod tests {
     /// A made-up `/proc/asound` with an NVidia HDMI card (0), a USB DAC (1) and the laptop's own
     /// sound (2, with two playback devices).
     fn asound(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("phonia-device-test-{}-{name}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("phonia-device-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let card = |index: u32, id: &str, usb: bool, pcms: &[u32]| {
             let dir = root.join(format!("card{index}"));
@@ -223,15 +279,27 @@ mod tests {
     }
 
     fn hw(card: u32, device: u32, id: Option<&str>) -> Device {
-        Device::Hw { card, device, card_id: id.map(str::to_string) }
+        Device::Hw {
+            card,
+            device,
+            card_id: id.map(str::to_string),
+        }
     }
 
     #[test]
     fn a_numbered_device_stays_as_it_is() {
         let root = asound("numbered");
         assert_eq!(resolve("hw:1,0", &root).unwrap(), hw(1, 0, Some("DS2")));
-        assert_eq!(resolve("hw:2", &root).unwrap(), hw(2, 0, Some("sofhdadsp")), "a device number is optional");
-        assert_eq!(resolve("hw:9,1", &root).unwrap(), hw(9, 1, None), "ALSA, not this, says a card is missing");
+        assert_eq!(
+            resolve("hw:2", &root).unwrap(),
+            hw(2, 0, Some("sofhdadsp")),
+            "a device number is optional"
+        );
+        assert_eq!(
+            resolve("hw:9,1", &root).unwrap(),
+            hw(9, 1, None),
+            "ALSA, not this, says a card is missing"
+        );
     }
 
     #[test]
@@ -239,10 +307,23 @@ mod tests {
         let root = asound("by-id");
         assert_eq!(resolve("hw:DS2,0", &root).unwrap(), hw(1, 0, Some("DS2")));
         assert_eq!(resolve("hw:DS2", &root).unwrap(), hw(1, 0, Some("DS2")));
-        assert_eq!(resolve("hw:NVidia,7", &root).unwrap(), hw(0, 7, Some("NVidia")));
-        assert_eq!(resolve("hw:CARD=DS2,DEV=0", &root).unwrap(), hw(1, 0, Some("DS2")));
-        assert_eq!(resolve("hw:CARD=sofhdadsp", &root).unwrap(), hw(2, 0, Some("sofhdadsp")));
-        assert_eq!(resolve("hw:DEV=1,CARD=NVidia", &root).unwrap(), hw(0, 1, Some("NVidia")), "the order of the parts does not matter");
+        assert_eq!(
+            resolve("hw:NVidia,7", &root).unwrap(),
+            hw(0, 7, Some("NVidia"))
+        );
+        assert_eq!(
+            resolve("hw:CARD=DS2,DEV=0", &root).unwrap(),
+            hw(1, 0, Some("DS2"))
+        );
+        assert_eq!(
+            resolve("hw:CARD=sofhdadsp", &root).unwrap(),
+            hw(2, 0, Some("sofhdadsp"))
+        );
+        assert_eq!(
+            resolve("hw:DEV=1,CARD=NVidia", &root).unwrap(),
+            hw(0, 1, Some("NVidia")),
+            "the order of the parts does not matter"
+        );
     }
 
     #[test]
@@ -260,7 +341,10 @@ mod tests {
         let root = asound("missing");
         let error = resolve("hw:Nope,0", &root).unwrap_err().to_string();
         assert!(error.contains("no sound card with id \"Nope\""), "{error}");
-        assert!(error.contains("DS2") && error.contains("NVidia") && error.contains("phonia devices"), "{error}");
+        assert!(
+            error.contains("DS2") && error.contains("NVidia") && error.contains("phonia devices"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -277,7 +361,10 @@ mod tests {
     fn devices_that_are_not_raw_hardware_pass_through() {
         let root = asound("other");
         for name in ["default", "plughw:1,0", "null", "pipewire", "dmix:CARD=DS2"] {
-            assert_eq!(resolve(name, &root).unwrap(), Device::Other(name.to_string()));
+            assert_eq!(
+                resolve(name, &root).unwrap(),
+                Device::Other(name.to_string())
+            );
         }
         assert_eq!(Device::Other("default".into()).alsa_name(), "default");
     }
@@ -285,7 +372,14 @@ mod tests {
     #[test]
     fn a_malformed_hardware_name_is_refused() {
         let root = asound("malformed");
-        for bad in ["hw:", "hw:,0", "hw:1,x", "hw:1,0,2", "hw:FOO=1", "hw:CARD=,DEV=0"] {
+        for bad in [
+            "hw:",
+            "hw:,0",
+            "hw:1,x",
+            "hw:1,0,2",
+            "hw:FOO=1",
+            "hw:CARD=,DEV=0",
+        ] {
             assert!(resolve(bad, &root).is_err(), "{bad:?}");
         }
     }
@@ -304,9 +398,19 @@ mod tests {
         assert_eq!(cards.iter().map(|c| c.index).collect::<Vec<_>>(), [0, 1, 2]);
         assert_eq!(
             cards[1],
-            CardInfo { index: 1, id: "DS2".into(), name: "Fosi Audio DS2".into(), usb: true, playback: vec![0] }
+            CardInfo {
+                index: 1,
+                id: "DS2".into(),
+                name: "Fosi Audio DS2".into(),
+                usb: true,
+                playback: vec![0]
+            }
         );
-        assert_eq!(cards[0].playback, [3, 7], "capture devices are not playback");
+        assert_eq!(
+            cards[0].playback,
+            [3, 7],
+            "capture devices are not playback"
+        );
         assert_eq!(cards[2].playback, [0, 31]);
         assert!(!cards[0].usb);
     }
@@ -326,8 +430,12 @@ mod tests {
 
     #[test]
     fn a_machine_without_cards_says_so() {
-        let root = std::env::temp_dir().join(format!("phonia-device-test-{}-empty", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("phonia-device-test-{}-empty", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
-        assert_eq!(list(&root).unwrap(), "No sound cards with playback were found.");
+        assert_eq!(
+            list(&root).unwrap(),
+            "No sound cards with playback were found."
+        );
     }
 }

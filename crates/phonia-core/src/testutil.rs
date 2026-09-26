@@ -40,7 +40,9 @@ pub fn wav_slice(from_frame: usize, frames: usize) -> Vec<u8> {
 /// What the decoder must produce for `sample_at(from_sample..to_sample)`: left-justified in an
 /// `i32`.
 pub fn expected(from_sample: usize, to_sample: usize) -> Vec<i32> {
-    (from_sample..to_sample).map(|i| i32::from(sample_at(i)) << 16).collect()
+    (from_sample..to_sample)
+        .map(|i| i32::from(sample_at(i)) << 16)
+        .collect()
 }
 
 /// A source that can be read but never repositioned, like a network stream.
@@ -85,7 +87,8 @@ impl Bus {
         // user's real services (a keyring, say) on demand, and tests must never reach those.
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let config = std::env::temp_dir().join(format!("phonia-test-bus-{}-{n}.conf", std::process::id()));
+        let config =
+            std::env::temp_dir().join(format!("phonia-test-bus-{}-{n}.conf", std::process::id()));
         std::fs::write(
             &config,
             "<busconfig><type>session</type><listen>unix:tmpdir=/tmp</listen>\
@@ -100,8 +103,14 @@ impl Bus {
             .spawn()
             .expect("dbus-daemon is needed for these tests");
         let mut address = String::new();
-        BufReader::new(child.stdout.take().unwrap()).read_line(&mut address).unwrap();
-        Bus { child, config, address: address.trim().to_string() }
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut address)
+            .unwrap();
+        Bus {
+            child,
+            config,
+            address: address.trim().to_string(),
+        }
     }
 }
 

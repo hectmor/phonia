@@ -97,7 +97,12 @@ impl Queue {
     pub fn with_seed(opener: Arc<dyn TrackOpener>, seed: u64) -> Arc<Self> {
         let inner = Inner::new(seed);
         let (snapshots, _) = watch::channel(Arc::new(inner.snapshot()));
-        Arc::new_cyclic(|me| Queue { inner: Mutex::new(inner), opener, snapshots, me: me.clone() })
+        Arc::new_cyclic(|me| Queue {
+            inner: Mutex::new(inner),
+            opener,
+            snapshots,
+            me: me.clone(),
+        })
     }
 
     /// Runs `change` on the state and publishes the result. Publishing while the lock is held
@@ -168,7 +173,8 @@ impl Queue {
 
 impl TrackSupplier for Queue {
     fn advance(&self, how: Advance) -> Option<TrackRef> {
-        self.mutate(|inner| inner.advance(how)).map(ItemId::track_ref)
+        self.mutate(|inner| inner.advance(how))
+            .map(ItemId::track_ref)
     }
 
     fn open(&self, track: TrackRef, at: Duration) -> BoxFuture<'static, Result<LoadedTrack>> {
@@ -177,8 +183,13 @@ impl TrackSupplier for Queue {
         };
         // The entry becomes the current one as it is opened, not when it was offered: an offer
         // can be abandoned before anything is opened.
-        let Some(item) = self.mutate(|inner| inner.commit(id).then(|| inner.item(id).cloned())).flatten() else {
-            return Box::pin(async move { Err(anyhow!("the queue entry {} no longer exists", id.0)) });
+        let Some(item) = self
+            .mutate(|inner| inner.commit(id).then(|| inner.item(id).cloned()))
+            .flatten()
+        else {
+            return Box::pin(
+                async move { Err(anyhow!("the queue entry {} no longer exists", id.0)) },
+            );
         };
 
         let opening = self.opener.open(item.track.source.clone(), at);

@@ -2,14 +2,18 @@
 
 use super::*;
 use crate::decode::{SourceSpec, duration_to_frames};
-use crate::engine::{Command, Engine, EndReason, Event, SeekTarget, State, TrackMedia};
+use crate::engine::{Command, EndReason, Engine, Event, SeekTarget, State, TrackMedia};
 use crate::output::fake::{FakeSinkFactory, FakeSinkHandle};
 use crate::testutil::{NonSeekable, RATE, expected, wav_slice};
 use std::collections::HashMap;
 use std::time::Instant;
 use tokio::sync::broadcast::{self, error::TryRecvError};
 
-const SPEC: SourceSpec = SourceSpec { sample_rate: 48_000, channels: 2, bits_per_sample: 24 };
+const SPEC: SourceSpec = SourceSpec {
+    sample_rate: 48_000,
+    channels: 2,
+    bits_per_sample: 24,
+};
 const TIMEOUT: Duration = Duration::from_secs(5);
 const PERIOD: usize = 1024;
 const CAPACITY: usize = 4096;
@@ -22,7 +26,10 @@ fn ramp(frames: usize) -> Vec<i32> {
 enum Media {
     Pcm(usize),
     /// A 44.1 kHz WAV that can only be opened in whole segments, like a DASH stream.
-    Segmented { frames: usize, segment_frames: usize },
+    Segmented {
+        frames: usize,
+        segment_frames: usize,
+    },
 }
 
 /// Opens the tracks named in `media` and nothing else. A track whose name starts with `x` comes
@@ -34,7 +41,12 @@ struct TestOpener {
 
 impl TestOpener {
     fn new(media: &[(&str, Media)]) -> Arc<Self> {
-        Arc::new(Self { media: media.iter().map(|(name, media)| (name.to_string(), media.clone())).collect() })
+        Arc::new(Self {
+            media: media
+                .iter()
+                .map(|(name, media)| (name.to_string(), media.clone()))
+                .collect(),
+        })
     }
 }
 
@@ -43,16 +55,36 @@ impl TrackOpener for TestOpener {
         let media = self.media.get(&track.0).cloned();
         Box::pin(async move {
             let media = media.ok_or_else(|| anyhow!("the opener has no track {:?}", track.0))?;
-            let title = track.0.starts_with('x').then(|| format!("opened {}", track.0));
-            let meta = TrackMeta { track: track.clone(), title, duration: None };
+            let title = track
+                .0
+                .starts_with('x')
+                .then(|| format!("opened {}", track.0));
+            let meta = TrackMeta {
+                track: track.clone(),
+                title,
+                duration: None,
+            };
             Ok(match media {
-                Media::Pcm(frames) => LoadedTrack::new(meta, TrackMedia::RawPcm { samples: ramp(frames), spec: SPEC }),
-                Media::Segmented { frames, segment_frames } => {
-                    let boundary = duration_to_frames(at, RATE) as usize / segment_frames * segment_frames;
+                Media::Pcm(frames) => LoadedTrack::new(
+                    meta,
+                    TrackMedia::RawPcm {
+                        samples: ramp(frames),
+                        spec: SPEC,
+                    },
+                ),
+                Media::Segmented {
+                    frames,
+                    segment_frames,
+                } => {
+                    let boundary =
+                        duration_to_frames(at, RATE) as usize / segment_frames * segment_frames;
                     LoadedTrack::new(
                         meta,
                         TrackMedia::Encoded {
-                            source: Box::new(NonSeekable(std::io::Cursor::new(wav_slice(boundary, frames - boundary)))),
+                            source: Box::new(NonSeekable(std::io::Cursor::new(wav_slice(
+                                boundary,
+                                frames - boundary,
+                            )))),
                             extension: Some("wav".into()),
                         },
                     )
@@ -65,7 +97,11 @@ impl TrackOpener for TestOpener {
 }
 
 fn entry(name: &str) -> QueueTrack {
-    QueueTrack { source: TrackRef(name.to_string()), title: Some(name.to_string()), duration: None }
+    QueueTrack {
+        source: TrackRef(name.to_string()),
+        title: Some(name.to_string()),
+        duration: None,
+    }
 }
 
 struct Harness {
@@ -83,11 +119,21 @@ impl Harness {
     }
 
     fn with_seed(media: &[(&str, Media)], sinks: Arc<FakeSinkFactory>, seed: u64) -> Self {
-        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
         let queue = Queue::with_seed(TestOpener::new(media), seed);
         let engine = Engine::spawn(rt.handle().clone(), sinks.clone(), queue.clone()).unwrap();
         let events = engine.subscribe();
-        Self { engine, queue, sinks, events, _rt: rt }
+        Self {
+            engine,
+            queue,
+            sinks,
+            events,
+            _rt: rt,
+        }
     }
 
     fn send(&self, command: Command) {
@@ -103,7 +149,9 @@ impl Harness {
                 Ok(event) => return event,
                 Err(TryRecvError::Lagged(_)) => continue,
                 Err(TryRecvError::Closed) => panic!("the event channel closed"),
-                Err(TryRecvError::Empty) if Instant::now() > deadline => panic!("timed out waiting for an event"),
+                Err(TryRecvError::Empty) if Instant::now() > deadline => {
+                    panic!("timed out waiting for an event")
+                }
                 Err(TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(2)),
             }
         }
@@ -123,7 +171,10 @@ impl Harness {
 
     /// The titles of the tracks that start, until the engine stops.
     fn titles_until_stopped(&mut self) -> Vec<String> {
-        self.events_until(is_stopped).into_iter().filter_map(started_title).collect()
+        self.events_until(is_stopped)
+            .into_iter()
+            .filter_map(started_title)
+            .collect()
     }
 
     /// The first `count` titles that start.
@@ -174,27 +225,51 @@ fn wait_until_the_writer_is_blocked(sink: &FakeSinkHandle) {
 }
 
 fn three_tracks() -> [(&'static str, Media); 3] {
-    [("a", Media::Pcm(1_000)), ("b", Media::Pcm(1_000)), ("c", Media::Pcm(1_000))]
+    [
+        ("a", Media::Pcm(1_000)),
+        ("b", Media::Pcm(1_000)),
+        ("c", Media::Pcm(1_000)),
+    ]
 }
 
 // ---- the queue as a supplier ---------------------------------------------------------------
 
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
-    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(future)
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(future)
 }
 
 #[test]
 fn opening_an_entry_rewrites_the_reference_and_fills_in_what_the_queue_did_not_know() {
     let queue = Queue::with_seed(TestOpener::new(&[("x", Media::Pcm(10))]), 1);
-    let ids = queue.add([QueueTrack { source: TrackRef("x".into()), title: None, duration: None }]);
+    let ids = queue.add([QueueTrack {
+        source: TrackRef("x".into()),
+        title: None,
+        duration: None,
+    }]);
 
     let loaded = block_on(queue.open(ids[0].track_ref(), Duration::ZERO)).unwrap();
-    assert_eq!(loaded.meta.track, ids[0].track_ref(), "the engine must see the queue's reference, not the opener's");
+    assert_eq!(
+        loaded.meta.track,
+        ids[0].track_ref(),
+        "the engine must see the queue's reference, not the opener's"
+    );
     assert_eq!(loaded.meta.title.as_deref(), Some("opened x"));
 
     let snapshot = queue.snapshot();
-    assert_eq!(snapshot.current, Some(ids[0]), "opening it made it the current entry");
-    assert_eq!(snapshot.items[0].track.title.as_deref(), Some("opened x"), "and the queue learned its title");
+    assert_eq!(
+        snapshot.current,
+        Some(ids[0]),
+        "opening it made it the current entry"
+    );
+    assert_eq!(
+        snapshot.items[0].track.title.as_deref(),
+        Some("opened x"),
+        "and the queue learned its title"
+    );
 }
 
 #[test]
@@ -202,19 +277,31 @@ fn the_queues_own_title_wins_over_the_openers() {
     let queue = Queue::with_seed(TestOpener::new(&[("x", Media::Pcm(10))]), 1);
     let ids = queue.add([entry("x")]);
     let loaded = block_on(queue.open(ids[0].track_ref(), Duration::ZERO)).unwrap();
-    assert_eq!(loaded.meta.title.as_deref(), Some("opened x"), "the opener's own title is kept when it has one");
-    assert_eq!(queue.snapshot().items[0].track.title.as_deref(), Some("x"), "and the queue's is not overwritten");
+    assert_eq!(
+        loaded.meta.title.as_deref(),
+        Some("opened x"),
+        "the opener's own title is kept when it has one"
+    );
+    assert_eq!(
+        queue.snapshot().items[0].track.title.as_deref(),
+        Some("x"),
+        "and the queue's is not overwritten"
+    );
 }
 
 #[test]
 fn opening_something_that_is_not_an_entry_or_no_longer_is_an_error() {
     let queue = Queue::with_seed(TestOpener::new(&[("x", Media::Pcm(10))]), 1);
-    let error = block_on(queue.open(TrackRef("x".into()), Duration::ZERO)).err().unwrap();
+    let error = block_on(queue.open(TrackRef("x".into()), Duration::ZERO))
+        .err()
+        .unwrap();
     assert!(error.to_string().contains("not a queue entry"), "{error}");
 
     let ids = queue.add([entry("x")]);
     queue.remove(&ids);
-    let error = block_on(queue.open(ids[0].track_ref(), Duration::ZERO)).err().unwrap();
+    let error = block_on(queue.open(ids[0].track_ref(), Duration::ZERO))
+        .err()
+        .unwrap();
     assert!(error.to_string().contains("no longer exists"), "{error}");
 }
 
@@ -222,7 +309,9 @@ fn opening_something_that_is_not_an_entry_or_no_longer_is_an_error() {
 fn an_opener_failure_reaches_the_engine_as_an_error() {
     let queue = Queue::with_seed(TestOpener::new(&[]), 1);
     let ids = queue.add([entry("missing")]);
-    let error = block_on(queue.open(ids[0].track_ref(), Duration::ZERO)).err().unwrap();
+    let error = block_on(queue.open(ids[0].track_ref(), Duration::ZERO))
+        .err()
+        .unwrap();
     assert!(error.to_string().contains("has no track"), "{error}");
 }
 
@@ -265,7 +354,11 @@ fn entries_play_in_order_and_then_the_queue_is_exhausted() {
     all.extend(ramp(1_000));
     all.extend(ramp(1_000));
     assert_eq!(h.sink(0).played(), all);
-    assert_eq!(h.queue.snapshot().current.map(|id| id.0), Some(3), "the cursor ended on the last entry");
+    assert_eq!(
+        h.queue.snapshot().current.map(|id| id.0),
+        Some(3),
+        "the cursor ended on the last entry"
+    );
 }
 
 #[test]
@@ -304,7 +397,10 @@ fn repeat_one_repeats_the_track_until_the_user_skips() {
 #[test]
 fn a_seeded_shuffle_plays_the_planned_order_and_every_entry_once() {
     let media: Vec<(String, Media)> = (0..6).map(|i| (format!("t{i}"), Media::Pcm(200))).collect();
-    let media_refs: Vec<(&str, Media)> = media.iter().map(|(name, m)| (name.as_str(), m.clone())).collect();
+    let media_refs: Vec<(&str, Media)> = media
+        .iter()
+        .map(|(name, m)| (name.as_str(), m.clone()))
+        .collect();
 
     let order_for = |seed| {
         let mut h = Harness::with_seed(&media_refs, FakeSinkFactory::autoplay(), seed);
@@ -314,7 +410,17 @@ fn a_seeded_shuffle_plays_the_planned_order_and_every_entry_once() {
         let planned: Vec<String> = snapshot
             .order
             .iter()
-            .map(|id| snapshot.items.iter().find(|item| item.id == *id).unwrap().track.title.clone().unwrap())
+            .map(|id| {
+                snapshot
+                    .items
+                    .iter()
+                    .find(|item| item.id == *id)
+                    .unwrap()
+                    .track
+                    .title
+                    .clone()
+                    .unwrap()
+            })
             .collect();
         h.send(Command::Play(None));
         (planned, h.titles_until_stopped())
@@ -324,9 +430,17 @@ fn a_seeded_shuffle_plays_the_planned_order_and_every_entry_once() {
     assert_eq!(played, planned, "the queue plays the order it announced");
     let mut sorted = played.clone();
     sorted.sort();
-    assert_eq!(sorted, ["t0", "t1", "t2", "t3", "t4", "t5"], "each entry exactly once");
+    assert_eq!(
+        sorted,
+        ["t0", "t1", "t2", "t3", "t4", "t5"],
+        "each entry exactly once"
+    );
 
-    assert_eq!(order_for(11).1, played, "the same seed shuffles the same way");
+    assert_eq!(
+        order_for(11).1,
+        played,
+        "the same seed shuffles the same way"
+    );
     assert_ne!(order_for(12).1, played);
 }
 
@@ -342,7 +456,11 @@ fn the_same_track_queued_twice_plays_twice() {
 #[test]
 fn playing_a_specific_entry_jumps_to_it_and_previous_goes_back_by_order() {
     // Long enough that the engine ends up blocked on the device mid-track.
-    let long = [("a", Media::Pcm(200_000)), ("b", Media::Pcm(200_000)), ("c", Media::Pcm(200_000))];
+    let long = [
+        ("a", Media::Pcm(200_000)),
+        ("b", Media::Pcm(200_000)),
+        ("c", Media::Pcm(200_000)),
+    ];
     let mut h = Harness::new(&long, FakeSinkFactory::blocking());
     let ids = h.queue.add([entry("a"), entry("b"), entry("c")]);
 
@@ -352,13 +470,24 @@ fn playing_a_specific_entry_jumps_to_it_and_previous_goes_back_by_order() {
 
     h.send(Command::Previous);
     h.sink(0).advance(PERIOD);
-    assert_eq!(h.first_titles(1), ["b"], "nothing was played before c, so back means the entry above it");
+    assert_eq!(
+        h.first_titles(1),
+        ["b"],
+        "nothing was played before c, so back means the entry above it"
+    );
     h.sink(0).set_blocking(false);
 }
 
 #[test]
 fn removing_the_playing_entry_then_skipping_lands_on_the_one_that_took_its_place() {
-    let mut h = Harness::new(&[("a", Media::Pcm(200_000)), ("b", Media::Pcm(300)), ("c", Media::Pcm(300))], FakeSinkFactory::blocking());
+    let mut h = Harness::new(
+        &[
+            ("a", Media::Pcm(200_000)),
+            ("b", Media::Pcm(300)),
+            ("c", Media::Pcm(300)),
+        ],
+        FakeSinkFactory::blocking(),
+    );
     let ids = h.queue.add([entry("a"), entry("b"), entry("c")]);
     h.send(Command::Play(None));
     assert_eq!(h.first_titles(1), ["a"]);
@@ -385,23 +514,47 @@ fn a_seek_that_reopens_the_stream_still_finds_its_entry() {
     // If the queue's reference were not what the engine holds, reopening for the seek would ask
     // the queue for a track it has never heard of and the engine would stop with an error.
     let frames = 100_000;
-    let mut h = Harness::new(&[("s", Media::Segmented { frames, segment_frames: 22_050 })], FakeSinkFactory::blocking());
+    let mut h = Harness::new(
+        &[(
+            "s",
+            Media::Segmented {
+                frames,
+                segment_frames: 22_050,
+            },
+        )],
+        FakeSinkFactory::blocking(),
+    );
     h.queue.add([entry("s")]);
     h.send(Command::Play(None));
     assert_eq!(h.first_titles(1), ["s"]);
     let sink = h.sink(0);
     wait_until_the_writer_is_blocked(&sink);
 
-    h.send(Command::Seek(SeekTarget::Absolute(Duration::from_millis(1_200))));
+    h.send(Command::Seek(SeekTarget::Absolute(Duration::from_millis(
+        1_200,
+    ))));
     sink.advance(PERIOD);
     let events = h.events_until(|e| matches!(e, Event::Seeked { .. }));
-    assert!(events.iter().all(|e| !matches!(e, Event::Error { .. })), "{events:?}");
-    assert_eq!(h.next_event(), Event::StateChanged(State::Playing), "audio resumed");
+    assert!(
+        events.iter().all(|e| !matches!(e, Event::Error { .. })),
+        "{events:?}"
+    );
+    assert_eq!(
+        h.next_event(),
+        Event::StateChanged(State::Playing),
+        "audio resumed"
+    );
 
     sink.set_blocking(false);
     let rest = h.events_until(is_stopped);
-    assert!(rest.iter().all(|e| !matches!(e, Event::Error { .. })), "{rest:?}");
+    assert!(
+        rest.iter().all(|e| !matches!(e, Event::Error { .. })),
+        "{rest:?}"
+    );
     let played = sink.played();
     let tail = expected(52_920 * 2, frames * 2);
-    assert!(played.len() >= tail.len() && played[played.len() - tail.len()..] == tail[..], "landed exactly at 1.2 s");
+    assert!(
+        played.len() >= tail.len() && played[played.len() - tail.len()..] == tail[..],
+        "landed exactly at 1.2 s"
+    );
 }
