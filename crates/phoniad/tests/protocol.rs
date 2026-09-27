@@ -34,6 +34,15 @@ struct Fixture {
 /// A daemon with a fake device. A blocking device holds the engine mid-track, which is what lets
 /// a test act on a track that is "playing".
 async fn fixture(name: &str, blocking: bool) -> Fixture {
+    fixture_with(name, blocking, Default::default()).await
+}
+
+/// Like [`fixture`], with engine options of the test's choosing.
+async fn fixture_with(
+    name: &str,
+    blocking: bool,
+    options: phonia_core::engine::Options,
+) -> Fixture {
     let sinks = if blocking {
         FakeSinkFactory::blocking()
     } else {
@@ -80,7 +89,7 @@ async fn fixture(name: &str, blocking: bool) -> Fixture {
         outputs,
         opener: Arc::new(DispatchOpener::new(None)),
         reports: report_rx,
-        engine: Default::default(),
+        engine: options,
     })
     .unwrap();
     let dir = std::env::temp_dir().join(format!(
@@ -957,6 +966,62 @@ async fn subscribers_hear_when_the_outputs_change() {
     f.daemon.outputs_changed();
     let (_, event) = next_event(&mut events).await;
     assert_eq!(event, Event::OutputsChanged);
+    f.finish().await;
+}
+
+// ---- gapless -------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tracks_joined_with_no_gap_say_so_and_change_no_state() {
+    let options = phonia_core::engine::Options {
+        position_interval: Duration::ZERO,
+        ..Default::default()
+    };
+    let f = fixture_with("gapless", true, options).await;
+    let client = f.client().await;
+    assert!(
+        client
+            .server()
+            .capabilities
+            .iter()
+            .any(|capability| capability == CAP_GAPLESS)
+    );
+    let (a, b) = (f.wav("a.wav", 200_000), f.wav("b.wav", 20_000));
+    let (ids, _, _) = added(client.request(add(&[&a, &b], AddAt::End)).await.unwrap());
+    let (_, mut events) = client.subscribe().await.unwrap();
+
+    client
+        .request(Request::Play { item: Some(ids[0]) })
+        .await
+        .unwrap();
+    let first = events_until(&mut events, |e| matches!(e, Event::TrackStarted { .. })).await;
+    assert!(matches!(
+        first.last(),
+        Some((_, Event::TrackStarted { gapless: false, .. }))
+    ));
+
+    // b is opened ahead while a plays; then the DAC runs freely.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    f.sinks.handles()[0].set_blocking(false);
+    let joined = events_until(&mut events, |e| matches!(e, Event::TrackStarted { .. })).await;
+    assert!(
+        matches!(joined.last(), Some((_, Event::TrackStarted { item_id, gapless: true, .. })) if *item_id == Some(ids[1])),
+        "{joined:?}"
+    );
+    // From the end of a to the start of b (the state event before it is a's own start).
+    let boundary: Vec<&Event> = joined
+        .iter()
+        .map(|(_, event)| event)
+        .skip_while(|event| !matches!(event, Event::TrackEnded { .. }))
+        .filter(|event| !matches!(event, Event::Position { .. } | Event::QueueChanged { .. }))
+        .collect();
+    assert!(
+        matches!(
+            boundary.as_slice(),
+            [Event::TrackEnded { .. }, Event::TrackStarted { .. }]
+        ),
+        "playback never stopped between the tracks: {boundary:?}"
+    );
     f.finish().await;
 }
 

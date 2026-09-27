@@ -196,7 +196,7 @@ One connection carries requests, their responses and, once subscribed, events, a
 JSON, so `socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/phonia/phoniad.sock` is a working client:
 
 ```
-< {"type":"hello","protocol":{"major":1,"minor":3},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume"]}
+< {"type":"hello","protocol":{"major":1,"minor":4},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless"]}
 > {"id":1,"request":{"type":"hello","protocol":{"major":1,"minor":0},"client":{"name":"me","version":"0"}}}
 < {"type":"response","id":1,"ok":{"type":"ack"}}
 > {"id":2,"request":{"type":"subscribe"}}
@@ -290,6 +290,10 @@ samples changes, so it is as bit-perfect as before.
   audio plays out, the engine waits for that answer instead of asking twice; a track that fails to
   open ahead is tried again the ordinary way. A shuffled queue that starts a new round reshuffles,
   and that one boundary is a normal one.
+- **Skipping** (`next`, or a seek past the end) while the next track is already open starts that one
+  as it is instead of asking TIDAL for it again, so it begins at once. `phonia ctl watch` and
+  `phonia play` mark a track that was joined to the one before it (`[gapless]` / `(gapless)`), and
+  over the socket `track_started` carries `"gapless": true` with no `state_changed` around it.
 - Repeat-one loops a track without a gap. Removing or moving the next track while it is being
   opened just opens the right one instead.
 - Gapless is exact for FLAC (local files and TIDAL's DASH streams, which decode to exactly the

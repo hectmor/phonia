@@ -191,7 +191,7 @@ pub fn event(event: &engine::Event, queue: &QueueSnapshot) -> ipc::Event {
         engine::Event::TrackStarted {
             meta,
             spec: format,
-            gapless: _,
+            gapless,
         } => {
             let (item_id, source) = entry_of(&meta.track, queue);
             ipc::Event::TrackStarted {
@@ -200,6 +200,7 @@ pub fn event(event: &engine::Event, queue: &QueueSnapshot) -> ipc::Event {
                 title: meta.title.clone(),
                 duration_ms: meta.duration.map(ms),
                 spec: spec(*format),
+                gapless: *gapless,
             }
         }
         engine::Event::TrackEnded { meta, reason } => ipc::Event::TrackEnded {
@@ -307,6 +308,32 @@ mod tests {
                 by: Some("jackd".into())
             }
         );
+    }
+
+    #[test]
+    fn a_track_that_started_with_no_gap_says_so() {
+        let meta = TrackMeta {
+            track: ItemId(7).track_ref(),
+            title: None,
+            duration: None,
+        };
+        let spec = SourceSpec {
+            sample_rate: 96_000,
+            channels: 2,
+            bits_per_sample: 24,
+        };
+        for gapless in [false, true] {
+            let started = engine::Event::TrackStarted {
+                meta: meta.clone(),
+                spec,
+                gapless,
+            };
+            let ipc::Event::TrackStarted { gapless: told, .. } = event(&started, &snapshot())
+            else {
+                panic!("not a track_started")
+            };
+            assert_eq!(told, gapless);
+        }
     }
 
     #[test]

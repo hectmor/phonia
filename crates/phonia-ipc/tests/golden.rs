@@ -273,9 +273,10 @@ fn the_server_banner() {
                 CAP_OUTPUT_RELEASE.into(),
                 CAP_OUTPUT_SELECT.into(),
                 CAP_VOLUME.into(),
+                CAP_GAPLESS.into(),
             ],
         }),
-        r#"{"type":"hello","protocol":{"major":1,"minor":3},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume"]}"#,
+        r#"{"type":"hello","protocol":{"major":1,"minor":4},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless"]}"#,
     );
 }
 
@@ -381,8 +382,21 @@ fn events() {
             title: Some("t".into()),
             duration_ms: Some(1000),
             spec: spec(),
+            gapless: false,
         },
-        r#"{"type":"event","seq":2,"event":{"type":"track_started","item_id":7,"source":"tidal:1","title":"t","duration_ms":1000,"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24}}}"#,
+        r#"{"type":"event","seq":2,"event":{"type":"track_started","item_id":7,"source":"tidal:1","title":"t","duration_ms":1000,"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"gapless":false}}"#,
+    );
+    event(
+        21,
+        Event::TrackStarted {
+            item_id: Some(ItemId(8)),
+            source: None,
+            title: None,
+            duration_ms: None,
+            spec: spec(),
+            gapless: true,
+        },
+        r#"{"type":"event","seq":21,"event":{"type":"track_started","item_id":8,"source":null,"title":null,"duration_ms":null,"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"gapless":true}}"#,
     );
     event(
         3,
@@ -600,6 +614,19 @@ fn volume_requests_events_and_status() {
 }
 
 #[test]
+fn a_track_started_from_a_1_3_daemon_is_not_gapless() {
+    let old = r#"{"type":"event","seq":2,"event":{"type":"track_started","item_id":7,"source":"tidal:1","title":"t","duration_ms":1000,"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24}}}"#;
+    let ServerMessage::Event {
+        event: Event::TrackStarted { gapless, .. },
+        ..
+    } = serde_json::from_str(old).unwrap()
+    else {
+        panic!("not a track_started")
+    };
+    assert!(!gapless);
+}
+
+#[test]
 fn a_1_2_status_has_no_volume() {
     let old = r#"{"state":"paused","track":null,"spec":null,"position_ms":0,"duration_ms":null,"output":{"state":"open"},"route":null}"#;
     assert_eq!(serde_json::from_str::<Status>(old).unwrap().volume, None);
@@ -800,7 +827,7 @@ fn versions_are_compatible_across_minors_but_not_majors() {
     assert!(v(1, 0).compatible_with(v(1, 7)));
     assert!(v(1, 7).compatible_with(v(1, 0)));
     assert!(!v(1, 0).compatible_with(v(2, 0)));
-    assert_eq!(PROTOCOL, v(1, 3));
+    assert_eq!(PROTOCOL, v(1, 4));
 }
 
 #[test]

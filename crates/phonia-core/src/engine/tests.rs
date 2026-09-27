@@ -2730,3 +2730,129 @@ fn seeking_while_the_next_track_is_joined_moves_the_track_that_is_heard() {
         "a from 1000 on, then b, unbroken"
     );
 }
+
+// ---- reusing what was opened ahead ---------------------------------------------------------
+
+#[test]
+fn skipping_starts_the_track_that_was_opened_ahead_instead_of_opening_it_again() {
+    let (mut h, sink) = play_and_prefetch(
+        vec![TestTrack::pcm("a", 30_000), TestTrack::pcm("b", 10_000)],
+        "b",
+        gapless_options(),
+    );
+    h.events_until(|e| matches!(e, Event::StateChanged(State::Playing)));
+    h.send(Command::Next);
+    sink.advance(PERIOD);
+    let events = h.events_until(is_started);
+    let labels: Vec<String> = events.iter().map(label).collect();
+    assert_eq!(
+        labels,
+        ["ended:a:Interrupted", "started:b"],
+        "no Loading in between: b was ready"
+    );
+    assert_eq!(
+        h.supplier.opened("b"),
+        1,
+        "the one that was opened ahead, not a second opening"
+    );
+
+    sink.set_blocking(false);
+    let _ = h.events_until(is_stopped);
+    assert!(
+        ends_with(&sink.played(), &ramp(10_000)),
+        "b plays in full, from its first frame"
+    );
+}
+
+#[test]
+fn skipping_before_the_next_track_is_ready_loads_it_the_ordinary_way() {
+    let mut h = Harness::with_options(
+        vec![
+            TestTrack::pcm("a", 30_000),
+            TestTrack::pcm("b", 3_000).slow(Duration::from_millis(300)),
+        ],
+        FakeSinkFactory::blocking(),
+        gapless_options(),
+    );
+    let sink = play_until_queue_is_full(&mut h, "a");
+    wait_until("b is being opened ahead", || h.supplier.opened("b") == 1);
+    h.events_until(|e| matches!(e, Event::StateChanged(State::Playing)));
+
+    h.send(Command::Next);
+    sink.advance(PERIOD);
+    let labels = h.labels_until(is_started);
+    assert_eq!(
+        labels,
+        ["ended:a:Interrupted", "state:Loading", "started:b"],
+        "not ready: the ordinary load"
+    );
+    assert_eq!(
+        h.supplier.opened("b"),
+        2,
+        "opened ahead, then asked for again"
+    );
+    sink.set_blocking(false);
+}
+
+#[test]
+fn a_seek_past_the_end_starts_the_track_that_was_opened_ahead() {
+    let (mut h, sink) = play_and_prefetch(
+        vec![
+            TestTrack::pcm("a", 30_000).seekable(SeekMode::InPlace),
+            TestTrack::pcm("b", 10_000),
+        ],
+        "b",
+        gapless_options(),
+    );
+    h.events_until(|e| matches!(e, Event::StateChanged(State::Playing)));
+    send_and_unblock(&h, &sink, Command::Seek(SeekTarget::Absolute(secs(60))));
+    let labels = h.labels_until(is_started);
+    assert_eq!(labels, ["ended:a:Completed", "started:b"]);
+    assert_eq!(h.supplier.opened("b"), 1);
+    sink.set_blocking(false);
+}
+
+#[test]
+fn skipping_to_a_track_of_another_format_reuses_it_too() {
+    let (mut h, sink) = play_and_prefetch(
+        vec![
+            TestTrack::pcm_with("a", 30_000, SPEC_48K),
+            TestTrack::pcm_with("b", 10_000, SPEC_96K),
+        ],
+        "b",
+        gapless_options(),
+    );
+    h.events_until(|e| matches!(e, Event::StateChanged(State::Playing)));
+    h.send(Command::Next);
+    sink.advance(PERIOD);
+    let labels = h.labels_until(is_started);
+    assert_eq!(labels, ["ended:a:Interrupted", "started:b"]);
+    assert_eq!(h.supplier.opened("b"), 1);
+    wait_until("the second sink is open", || h.sinks.handles().len() == 2);
+    h.sink(1).set_blocking(false);
+    let _ = h.events_until(is_stopped);
+    assert_eq!(h.sink(1).played(), ramp(10_000));
+}
+
+#[test]
+fn without_gapless_skipping_loads_as_before() {
+    let mut h = Harness::with_options(
+        vec![TestTrack::pcm("a", 30_000), TestTrack::pcm("b", 3_000)],
+        FakeSinkFactory::blocking(),
+        Options {
+            gapless: false,
+            ..gapless_options()
+        },
+    );
+    let sink = play_until_queue_is_full(&mut h, "a");
+    h.events_until(|e| matches!(e, Event::StateChanged(State::Playing)));
+    h.send(Command::Next);
+    sink.advance(PERIOD);
+    let labels = h.labels_until(is_started);
+    assert_eq!(
+        labels,
+        ["ended:a:Interrupted", "state:Loading", "started:b"]
+    );
+    assert_eq!(h.supplier.opened("b"), 1);
+    sink.set_blocking(false);
+}

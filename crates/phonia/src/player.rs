@@ -309,10 +309,11 @@ fn handle_event(
 ) -> bool {
     match event {
         Event::Position { position, duration } => console.progress(position, duration),
-        Event::TrackStarted { meta, .. } => {
+        Event::TrackStarted { meta, gapless, .. } => {
             console.line(format!(
-                "Playing: {}",
-                meta.title.as_deref().unwrap_or(&meta.track.0)
+                "Playing: {}{}",
+                meta.title.as_deref().unwrap_or(&meta.track.0),
+                if gapless { " (gapless)" } else { "" }
             ));
         }
         Event::TrackEnded {
