@@ -1910,7 +1910,9 @@ dependencies = [
  "anyhow",
  "crossterm",
  "futures-util",
+ "phonia-ipc",
  "ratatui",
+ "serde_json",
  "tokio",
 ]
 

@@ -3,6 +3,11 @@
 use crate::cursor::Cursor;
 use crate::keymap::{self, Action, Key, Resolution};
 use crossterm::event::KeyEvent;
+use phonia_ipc::{Event, Queue, ServerInfo, Status, Version};
+use std::time::Duration;
+
+/// How often the interface wakes up on its own (see [`Msg::Tick`]).
+pub const TICK: Duration = Duration::from_millis(250);
 
 /// The panels the user can be in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -32,6 +37,33 @@ impl Section {
     }
 }
 
+/// How the interface stands with the daemon.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Connection {
+    /// Before the first answer, and after asking to try again.
+    #[default]
+    Connecting,
+    Connected,
+    /// The daemon is not there, or went away; it will be tried again in `retry_in`.
+    Disconnected {
+        reason: String,
+        retry_in: Duration,
+    },
+    /// What answered is not a phonia daemon this interface can talk to. Not tried again by itself.
+    Refused {
+        reason: String,
+    },
+}
+
+/// What the daemon said about itself when the connection opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Server {
+    pub info: ServerInfo,
+    pub protocol: Version,
+    /// The optional features it has (see `phonia_ipc::CAP_*`). Older daemons have fewer.
+    pub capabilities: Vec<String>,
+}
+
 /// Everything the interface remembers.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct State {
@@ -45,11 +77,28 @@ pub struct State {
     pub pending: Vec<Key>,
     /// The size of the terminal, columns and rows.
     pub size: (u16, u16),
+    pub connection: Connection,
+    /// The daemon, once connected; kept after it goes away, so the screen still says what it was.
+    pub server: Option<Server>,
+    /// What the daemon last said: kept while it is away, and stale until it is back.
+    pub status: Option<Status>,
+    pub queue: Option<Queue>,
 }
 
 impl State {
     pub fn section(&self) -> Section {
         Section::ALL[self.sidebar.selected().min(Section::ALL.len() - 1)]
+    }
+
+    /// Whether the daemon has an optional feature. A daemon that is not connected has none, and an
+    /// older one lacks the newer features: the keys and panels that need one are only offered
+    /// when this says yes.
+    pub fn has(&self, capability: &str) -> bool {
+        self.connection == Connection::Connected
+            && self
+                .server
+                .as_ref()
+                .is_some_and(|server| server.capabilities.iter().any(|c| c == capability))
     }
 
     /// How many rows half a page is: half the terminal's height, and at least one.
@@ -59,19 +108,40 @@ impl State {
 }
 
 /// Something that happened.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Msg {
     Key(KeyEvent),
     /// The terminal has this size now (columns, rows). Also sent once when the interface starts.
     Resize(u16, u16),
-    /// The interface woke up by itself.
+    /// The interface woke up by itself, [`TICK`] after the last time.
     Tick,
+    /// Connected to the daemon, with the state it is in.
+    Connected {
+        server: ServerInfo,
+        protocol: Version,
+        capabilities: Vec<String>,
+        status: Status,
+        queue: Queue,
+    },
+    /// The daemon is not there or went away; the next attempt is in `retry_in`.
+    Disconnected {
+        reason: String,
+        retry_in: Duration,
+    },
+    /// The peer is not a phonia daemon this interface can talk to.
+    Refused {
+        reason: String,
+    },
+    /// The daemon announced something.
+    Daemon(Event),
 }
 
 /// Something the interface asks the outside to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cmd {
     Quit,
+    /// Try to connect now, without waiting for the next attempt.
+    RetryNow,
 }
 
 /// What [`update`] decided.
@@ -106,7 +176,70 @@ pub fn update(state: &mut State, msg: Msg) -> Effects {
             state.size = (columns, rows);
             Effects::redraw()
         }
-        Msg::Tick => Effects::default(),
+        Msg::Tick => tick(state),
+        Msg::Connected {
+            server,
+            protocol,
+            capabilities,
+            status,
+            queue,
+        } => {
+            state.connection = Connection::Connected;
+            state.server = Some(Server {
+                info: server,
+                protocol,
+                capabilities,
+            });
+            state.status = Some(status);
+            state.queue = Some(queue);
+            Effects::redraw()
+        }
+        Msg::Disconnected { reason, retry_in } => {
+            state.connection = Connection::Disconnected { reason, retry_in };
+            Effects::redraw()
+        }
+        Msg::Refused { reason } => {
+            state.connection = Connection::Refused { reason };
+            Effects::redraw()
+        }
+        Msg::Daemon(event) => on_daemon_event(state, event),
+    }
+}
+
+/// Counts down to the next attempt to connect, repainting when the seconds shown change.
+fn tick(state: &mut State) -> Effects {
+    let Connection::Disconnected { retry_in, .. } = &mut state.connection else {
+        return Effects::default();
+    };
+    let shown = seconds_left(*retry_in);
+    *retry_in = retry_in.saturating_sub(TICK);
+    if seconds_left(*retry_in) == shown {
+        Effects::default()
+    } else {
+        Effects::redraw()
+    }
+}
+
+/// The wait as shown to a person: whole seconds, rounded up, so "0" is never shown while waiting.
+pub fn seconds_left(retry_in: Duration) -> u64 {
+    retry_in.as_millis().div_ceil(1000) as u64
+}
+
+fn on_daemon_event(state: &mut State, event: Event) -> Effects {
+    match event {
+        // A client that fell behind is given the whole state again: it replaces what is held.
+        Event::Resync { status, queue, .. } => {
+            state.status = Some(status);
+            state.queue = Some(queue);
+            Effects::redraw()
+        }
+        Event::QueueChanged { queue } => {
+            state.queue = Some(queue);
+            Effects::redraw()
+        }
+        // The connection closes right after; that is what is shown. Events this version does not
+        // know are ignored.
+        _ => Effects::default(),
     }
 }
 
@@ -147,6 +280,7 @@ fn apply(state: &mut State, action: Action) -> Effects {
     let before = (state.focus, state.help, state.sidebar);
     match action {
         Action::Quit => return Effects::command(Cmd::Quit),
+        Action::Reconnect => return reconnect(state),
         Action::ToggleHelp => state.help = !state.help,
         // Only means something while the help is open, which is handled apart.
         Action::CloseHelp => {}
@@ -173,6 +307,20 @@ fn apply(state: &mut State, action: Action) -> Effects {
     }
 }
 
+/// Asks to connect now, if the daemon is not connected.
+fn reconnect(state: &mut State) -> Effects {
+    match state.connection {
+        Connection::Disconnected { .. } | Connection::Refused { .. } => {
+            state.connection = Connection::Connecting;
+            Effects {
+                redraw: true,
+                commands: vec![Cmd::RetryNow],
+            }
+        }
+        Connection::Connecting | Connection::Connected => Effects::default(),
+    }
+}
+
 /// Moves the cursor of the panel that has the focus. The main panel lists nothing yet.
 fn move_cursor(state: &mut State, action: Action) {
     if state.focus != Focus::Sidebar {
@@ -191,10 +339,67 @@ fn move_cursor(state: &mut State, action: Action) {
     }
 }
 
+/// Values for tests, here and in the views.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use phonia_ipc::{Output, Queue, Repeat, State, Status};
+
+    pub fn status() -> Status {
+        Status {
+            state: State::Stopped,
+            track: None,
+            spec: None,
+            position_ms: 0,
+            duration_ms: None,
+            output: Output::Closed,
+            route: None,
+            volume: None,
+            quality_range: None,
+        }
+    }
+
+    pub fn queue() -> Queue {
+        Queue {
+            version: 1,
+            items: Vec::new(),
+            order: Vec::new(),
+            current: None,
+            shuffle: false,
+            repeat: Repeat::Off,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyModifiers};
+    use std::time::Duration;
+    use tests_support::{queue, status};
+
+    fn connected_msg(capabilities: &[&str]) -> Msg {
+        Msg::Connected {
+            server: ServerInfo {
+                name: "phoniad".into(),
+                version: "0.1.0".into(),
+                pid: 7,
+            },
+            protocol: Version { major: 1, minor: 5 },
+            capabilities: capabilities.iter().map(|c| c.to_string()).collect(),
+            status: status(),
+            queue: queue(),
+        }
+    }
+
+    fn disconnected(state: &mut State, retry_in: Duration) {
+        update(
+            state,
+            Msg::Disconnected {
+                reason: "connection refused".into(),
+                retry_in,
+            },
+        );
+    }
 
     fn press(state: &mut State, code: KeyCode) -> Effects {
         update(state, Msg::Key(KeyEvent::new(code, KeyModifiers::NONE)))
@@ -369,5 +574,155 @@ mod tests {
             assert_eq!(effects, Effects::default());
         }
         assert_eq!(state, State::default());
+    }
+
+    #[test]
+    fn connecting_stores_the_daemon_and_what_it_said() {
+        let mut state = State::default();
+        assert_eq!(state.connection, Connection::Connecting);
+        assert!(update(&mut state, connected_msg(&["volume"])).redraw);
+        assert_eq!(state.connection, Connection::Connected);
+        let server = state.server.as_ref().unwrap();
+        assert_eq!(server.info.version, "0.1.0");
+        assert_eq!(server.protocol, Version { major: 1, minor: 5 });
+        assert_eq!(state.status, Some(status()));
+        assert_eq!(state.queue, Some(queue()));
+    }
+
+    #[test]
+    fn features_are_offered_only_by_a_connected_daemon_that_has_them() {
+        let mut state = State::default();
+        assert!(!state.has("volume"), "not connected: nothing");
+        update(&mut state, connected_msg(&["volume"]));
+        assert!(state.has("volume"));
+        assert!(
+            !state.has("quality"),
+            "an older daemon lacks newer features"
+        );
+        disconnected(&mut state, Duration::from_secs(1));
+        assert!(!state.has("volume"), "gone: nothing again");
+    }
+
+    #[test]
+    fn losing_the_daemon_keeps_what_was_known_but_says_it_is_gone() {
+        let mut state = State::default();
+        update(&mut state, connected_msg(&[]));
+        assert!(
+            update(
+                &mut state,
+                Msg::Disconnected {
+                    reason: "the connection to the daemon was closed".into(),
+                    retry_in: Duration::from_millis(250),
+                }
+            )
+            .redraw
+        );
+        assert!(matches!(state.connection, Connection::Disconnected { .. }));
+        assert_eq!(state.status, Some(status()), "the last state stays, stale");
+        assert!(state.server.is_some());
+    }
+
+    #[test]
+    fn the_countdown_repaints_only_when_the_seconds_shown_change() {
+        let mut state = State::default();
+        disconnected(&mut state, Duration::from_millis(2100));
+        // 2100 ms shows "3"; 1850 shows "2": repaint. Then 1600, 1350 and 1100 still show "2".
+        let repaints: Vec<bool> = (0..5)
+            .map(|_| update(&mut state, Msg::Tick).redraw)
+            .collect();
+        assert_eq!(repaints, [true, false, false, false, true]);
+        for _ in 0..20 {
+            update(&mut state, Msg::Tick);
+        }
+        assert!(matches!(
+            state.connection,
+            Connection::Disconnected { retry_in, .. } if retry_in == Duration::ZERO
+        ));
+        assert!(
+            !update(&mut state, Msg::Tick).redraw,
+            "at zero it stays there"
+        );
+    }
+
+    #[test]
+    fn a_wait_is_shown_in_whole_seconds_rounded_up() {
+        assert_eq!(seconds_left(Duration::from_millis(250)), 1);
+        assert_eq!(seconds_left(Duration::from_millis(1000)), 1);
+        assert_eq!(seconds_left(Duration::from_millis(1001)), 2);
+        assert_eq!(seconds_left(Duration::ZERO), 0);
+    }
+
+    #[test]
+    fn r_asks_to_connect_now_only_when_there_is_no_connection() {
+        let mut state = State::default();
+        assert_eq!(
+            ch(&mut state, 'R'),
+            Effects::default(),
+            "already connecting"
+        );
+
+        disconnected(&mut state, Duration::from_secs(4));
+        let effects = ch(&mut state, 'R');
+        assert_eq!(effects.commands, vec![Cmd::RetryNow]);
+        assert!(effects.redraw);
+        assert_eq!(state.connection, Connection::Connecting);
+
+        update(
+            &mut state,
+            Msg::Refused {
+                reason: "no".into(),
+            },
+        );
+        assert_eq!(ch(&mut state, 'R').commands, vec![Cmd::RetryNow]);
+
+        update(&mut state, connected_msg(&[]));
+        assert_eq!(
+            ch(&mut state, 'R'),
+            Effects::default(),
+            "connected: nothing to do"
+        );
+    }
+
+    #[test]
+    fn a_resync_replaces_what_was_held() {
+        let mut state = State::default();
+        update(&mut state, connected_msg(&[]));
+        let mut newer = status();
+        newer.position_ms = 42_000;
+        let effects = update(
+            &mut state,
+            Msg::Daemon(Event::Resync {
+                skipped: 300,
+                seq: 99,
+                status: newer.clone(),
+                queue: queue(),
+            }),
+        );
+        assert!(effects.redraw);
+        assert_eq!(state.status, Some(newer));
+    }
+
+    #[test]
+    fn a_queue_change_replaces_the_queue_and_unknown_events_change_nothing() {
+        let mut state = State::default();
+        update(&mut state, connected_msg(&[]));
+        let mut changed = queue();
+        changed.version = 2;
+        assert!(
+            update(
+                &mut state,
+                Msg::Daemon(Event::QueueChanged {
+                    queue: changed.clone()
+                })
+            )
+            .redraw
+        );
+        assert_eq!(state.queue, Some(changed));
+
+        let before = state.clone();
+        for event in [Event::Unknown, Event::ShuttingDown, Event::OutputsChanged] {
+            assert_eq!(update(&mut state, Msg::Daemon(event)), Effects::default());
+        }
+        assert_eq!(state, before);
     }
 }

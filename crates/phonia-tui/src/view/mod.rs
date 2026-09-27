@@ -2,7 +2,7 @@
 
 mod help;
 
-use crate::app::{Focus, Section, State};
+use crate::app::{Connection, Focus, Section, State, seconds_left};
 use crate::theme::Theme;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -34,7 +34,7 @@ pub fn draw(state: &State, theme: &Theme, frame: &mut Frame) {
     let areas = areas(frame.area());
     draw_sidebar(state, theme, frame, areas.sidebar);
     draw_main(state, theme, frame, areas.main);
-    draw_bar(theme, frame, areas.bar);
+    draw_bar(state, theme, frame, areas.bar);
     if state.help {
         help::draw(theme, frame);
     }
@@ -84,11 +84,41 @@ fn draw_main(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
     );
 }
 
-fn draw_bar(theme: &Theme, frame: &mut Frame, area: Rect) {
-    let lines = vec![
-        Line::styled("Not connected to phoniad", theme.dim),
-        Line::styled("? help   q quit", theme.dim),
-    ];
+fn draw_bar(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
+    let (first, second) = match &state.connection {
+        Connection::Connecting => (
+            Line::styled("Connecting to phoniad...", theme.dim),
+            "? help   q quit".to_string(),
+        ),
+        Connection::Connected => {
+            let text = match &state.server {
+                Some(server) => format!(
+                    "Connected to {} {} (protocol {}.{})",
+                    server.info.name,
+                    server.info.version,
+                    server.protocol.major,
+                    server.protocol.minor
+                ),
+                None => "Connected".to_string(),
+            };
+            (
+                Line::styled(text, theme.text),
+                "? help   q quit".to_string(),
+            )
+        }
+        Connection::Disconnected { reason, retry_in } => (
+            Line::styled(format!("phoniad is not reachable: {reason}"), theme.error),
+            format!(
+                "Trying again in {} s (R: now). Start the daemon with `phoniad`.   ? help   q quit",
+                seconds_left(*retry_in)
+            ),
+        ),
+        Connection::Refused { reason } => (
+            Line::styled(format!("Cannot use this daemon: {reason}"), theme.error),
+            "R: try again   ? help   q quit".to_string(),
+        ),
+    };
+    let lines = vec![first, Line::styled(second, theme.dim)];
     frame.render_widget(
         Paragraph::new(lines).block(Block::new().borders(Borders::TOP).border_style(theme.dim)),
         area,
@@ -135,7 +165,7 @@ mod tests {
             "2 Search",
             "3 Library",
             "Nothing to show yet",
-            "Not connected",
+            "Connecting",
             "? help",
         ] {
             assert!(
@@ -151,6 +181,63 @@ mod tests {
         press(&mut state, '2');
         let screen = screen(&state, 60, 12);
         assert!(screen.contains(" Search "), "{screen}");
+    }
+
+    fn connected() -> State {
+        let mut state = State::default();
+        update(
+            &mut state,
+            Msg::Connected {
+                server: phonia_ipc::ServerInfo {
+                    name: "phoniad".into(),
+                    version: "0.1.0".into(),
+                    pid: 1,
+                },
+                protocol: phonia_ipc::Version { major: 1, minor: 5 },
+                capabilities: vec![],
+                status: crate::app::tests_support::status(),
+                queue: crate::app::tests_support::queue(),
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn the_bar_says_how_the_connection_stands() {
+        let text = screen(&connected(), 90, 12);
+        assert!(
+            text.contains("Connected to phoniad 0.1.0 (protocol 1.5)"),
+            "{text}"
+        );
+
+        let mut state = connected();
+        update(
+            &mut state,
+            Msg::Disconnected {
+                reason: "connection refused".into(),
+                retry_in: std::time::Duration::from_millis(2500),
+            },
+        );
+        let text = screen(&state, 120, 12);
+        assert!(
+            text.contains("phoniad is not reachable: connection refused"),
+            "{text}"
+        );
+        assert!(text.contains("Trying again in 3 s (R: now)"), "{text}");
+        assert!(text.contains("`phoniad`"), "{text}");
+
+        update(
+            &mut state,
+            Msg::Refused {
+                reason: "the daemon speaks protocol 2.0".into(),
+            },
+        );
+        let text = screen(&state, 120, 12);
+        assert!(
+            text.contains("Cannot use this daemon: the daemon speaks protocol 2.0"),
+            "{text}"
+        );
+        assert!(text.contains("R: try again"), "{text}");
     }
 
     #[test]

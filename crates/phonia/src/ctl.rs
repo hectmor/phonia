@@ -149,21 +149,26 @@ pub enum RepeatMode {
     All,
 }
 
+/// The daemon's socket: the flag, else the config file, else the default path.
+pub fn socket_path(config_flag: Option<&Path>, flag: Option<PathBuf>) -> Result<PathBuf> {
+    let loaded =
+        phonia_core::config::load(phonia_core::config::discover_from_env(config_flag).as_ref())?;
+    let settings = phonia_core::config::resolve(
+        phonia_core::config::Overrides {
+            socket: flag,
+            ..Default::default()
+        },
+        &loaded.file,
+    );
+    Ok(settings.socket_path(phonia_ipc::socket::default_socket_path))
+}
+
 pub async fn run(args: CtlArgs, config_flag: Option<&Path>) -> Result<()> {
     let info = ClientInfo {
         name: "phonia-ctl".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     };
-    let loaded =
-        phonia_core::config::load(phonia_core::config::discover_from_env(config_flag).as_ref())?;
-    let settings = phonia_core::config::resolve(
-        phonia_core::config::Overrides {
-            socket: args.socket.clone(),
-            ..Default::default()
-        },
-        &loaded.file,
-    );
-    let socket = settings.socket_path(phonia_ipc::socket::default_socket_path);
+    let socket = socket_path(config_flag, args.socket.clone())?;
     let client = Client::connect(Some(&socket), info)
         .await
         .map_err(explain_connection_error)?;
