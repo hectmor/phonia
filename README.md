@@ -92,7 +92,10 @@ gapless = true          # join a track to the next one of the same format with n
   TIDAL for `max_quality`; when a track doesn't exist at that tier TIDAL answers with a lower one
   by itself, and phonia plays it and says so (a warning) as long as it is not below
   `min_quality`. Below that the track fails with a message saying so, so playback never turns
-  lossy without you agreeing to it. A track that is seeked keeps the tier it started in. phonia
+  lossy without you agreeing to it. When TIDAL answers a tier with an HTTP 4xx (other than 401,
+  408 and 429) or with a manifest that can't be read, phonia asks again one tier lower, down to
+  `min_quality`; network errors, timeouts and 5xx are not retried, so an outage never shows up as
+  a lower quality. A track that is seeked keeps the tier it started in. phonia
   can't decode AAC yet, so `high` and `low` only make sense once that is added.
 - **Precedence** is command line, then the file, then the built-in default. There is no default
   device: with none configured (and no `--device`) phonia refuses to start and says how to set

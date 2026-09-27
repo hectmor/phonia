@@ -330,7 +330,7 @@ impl TrackOpener for TidalOpener {
         Box::pin(async move {
             let info = {
                 let client = session.fresh().await?;
-                tidal::fetch_playback_info(&http, &client, &track.0, ask_for).await?
+                tidal::fetch_playback_info(&http, &client, &track.0, ask_for, min_quality).await?
             };
             let quality = check_delivered(&track, quality, min_quality, &info.audio_quality)?;
             if at.is_zero() {

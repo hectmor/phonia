@@ -12,7 +12,7 @@
 
 use crate::config::Quality;
 use crate::dash::{self, DashSegments};
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::Deserialize;
@@ -115,15 +115,75 @@ struct RawJsonManifest {
     urls: Vec<String>,
 }
 
-/// Fetches and decodes the `playbackinfopostpaywall` response for `track_id` at `quality`.
+/// TIDAL answered the playbackinfo request with an HTTP error.
+#[derive(Debug)]
+struct StatusError {
+    status: reqwest::StatusCode,
+    body: String,
+}
+
+impl std::fmt::Display for StatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "TIDAL responded {} to playbackinfopostpaywall:\n{}",
+            self.status, self.body
+        )
+    }
+}
+
+impl std::error::Error for StatusError {}
+
+/// The manifest TIDAL sent could not be read.
+#[derive(Debug)]
+struct BadManifest(String);
+
+impl std::fmt::Display for BadManifest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the manifest could not be read: {}", self.0)
+    }
+}
+
+impl std::error::Error for BadManifest {}
+
+/// Whether asking again for a lower tier might work.
 ///
-/// `http` should be a client built with [`build_http_client`] and reused across this call and
-/// the subsequent segment downloads.
+/// Yes for an HTTP 4xx (the track isn't there at that tier, or isn't ready) and for a manifest
+/// that can't be read. No for 401, 408 and 429 (the token, a timeout, a rate limit: a lower tier
+/// would meet the same), for 5xx and for a network failure: those aren't about the tier, and
+/// retrying would just spend requests, or hide an outage behind a lower quality.
+fn worth_a_lower_tier(error: &anyhow::Error) -> bool {
+    use reqwest::StatusCode;
+    if error.downcast_ref::<BadManifest>().is_some() {
+        return true;
+    }
+    match error.downcast_ref::<StatusError>() {
+        Some(StatusError { status, .. }) => {
+            status.is_client_error()
+                && !matches!(
+                    *status,
+                    StatusCode::UNAUTHORIZED
+                        | StatusCode::REQUEST_TIMEOUT
+                        | StatusCode::TOO_MANY_REQUESTS
+                )
+        }
+        None => false,
+    }
+}
+
+/// Fetches and decodes the `playbackinfopostpaywall` response for `track_id`, asking for `best`
+/// and, if TIDAL refuses that tier, for each lower one down to `min`.
+///
+/// TIDAL often answers a tier it doesn't have with a lower one by itself (which the caller
+/// judges by [`PlaybackInfo::audio_quality`]); this retries for when it answers with an error
+/// instead. `http` should be a client built with [`build_http_client`] and reused across this
+/// call and the subsequent segment downloads.
 pub async fn fetch_playback_info(
     http: &reqwest::Client,
     client: &TidalClient,
     track_id: &str,
-    quality: Quality,
+    best: Quality,
+    min: Quality,
 ) -> Result<PlaybackInfo> {
     let access_token = client
         .session
@@ -136,18 +196,65 @@ pub async fn fetch_playback_info(
         .as_ref()
         .map(|u| u.country_code.clone())
         .ok_or_else(|| anyhow!("no user info loaded; run `phonia login` first"))?;
+    let account = Account {
+        base: tidlers::urls::API_V1_LOCATION,
+        access_token: &access_token,
+        country_code: &country_code,
+    };
+    fetch_with_fallback(http, &account, track_id, best, min).await
+}
 
+/// What a playbackinfo request needs to know about who is asking and where.
+struct Account<'a> {
+    base: &'a str,
+    access_token: &'a str,
+    country_code: &'a str,
+}
+
+async fn fetch_with_fallback(
+    http: &reqwest::Client,
+    account: &Account<'_>,
+    track_id: &str,
+    best: Quality,
+    min: Quality,
+) -> Result<PlaybackInfo> {
+    let mut tier = best;
+    loop {
+        let error = match fetch_at(http, account, track_id, tier).await {
+            Ok(info) => return Ok(info),
+            Err(error) => error,
+        };
+        let lower = tier.lower().filter(|lower| *lower >= min);
+        match lower {
+            Some(lower) if worth_a_lower_tier(&error) => {
+                crate::warn!(
+                    "Warning: TIDAL would not give track {track_id} as {tier} ({error:#}); \
+                     trying {lower}."
+                );
+                tier = lower;
+            }
+            _ => return Err(error),
+        }
+    }
+}
+
+/// One playbackinfo request, for one tier.
+async fn fetch_at(
+    http: &reqwest::Client,
+    account: &Account<'_>,
+    track_id: &str,
+    quality: Quality,
+) -> Result<PlaybackInfo> {
     let url = format!(
         "{}/tracks/{}/playbackinfopostpaywall",
-        tidlers::urls::API_V1_LOCATION,
-        track_id
+        account.base, track_id
     );
 
     let response = http
         .get(&url)
-        .bearer_auth(access_token)
+        .bearer_auth(account.access_token)
         .query(&[
-            ("countryCode", country_code.as_str()),
+            ("countryCode", account.country_code),
             ("audioquality", api_quality(quality)),
             ("playbackmode", "STREAM"),
             ("assetpresentation", "FULL"),
@@ -162,7 +269,7 @@ pub async fn fetch_playback_info(
         .await
         .context("reading the playbackinfopostpaywall response")?;
     if !status.is_success() {
-        bail!("TIDAL responded {status} to playbackinfopostpaywall:\n{body}");
+        return Err(StatusError { status, body }.into());
     }
 
     let raw: RawPlaybackInfo = serde_json::from_str(&body)
@@ -176,28 +283,8 @@ pub async fn fetch_playback_info(
         );
     }
 
-    let manifest_bytes = BASE64
-        .decode(&raw.manifest)
-        .context("decoding the manifest field (base64)")?;
-    let manifest_text =
-        String::from_utf8(manifest_bytes).context("the decoded manifest is not valid UTF-8")?;
-
-    let manifest = if let Ok(json_manifest) =
-        serde_json::from_str::<RawJsonManifest>(&manifest_text)
-    {
-        let url = json_manifest
-            .urls
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow!("the JSON manifest contains no URL"))?;
-        ManifestKind::Json {
-            url,
-            codecs: json_manifest.codecs,
-        }
-    } else {
-        let dash = dash::parse_mpd(&manifest_text).context("parsing the DASH (MPD) manifest")?;
-        ManifestKind::Dash(dash)
-    };
+    let manifest =
+        decode_manifest(&raw.manifest).map_err(|error| BadManifest(format!("{error:#}")))?;
 
     Ok(PlaybackInfo {
         track_id: raw.track_id,
@@ -208,6 +295,30 @@ pub async fn fetch_playback_info(
         sample_rate: raw.sample_rate,
         manifest,
     })
+}
+
+/// Reads the base64 `manifest` field: a JSON with one URL, or a DASH (MPD) document.
+fn decode_manifest(encoded: &str) -> Result<ManifestKind> {
+    let manifest_bytes = BASE64
+        .decode(encoded)
+        .context("decoding the manifest field (base64)")?;
+    let manifest_text =
+        String::from_utf8(manifest_bytes).context("the decoded manifest is not valid UTF-8")?;
+
+    if let Ok(json_manifest) = serde_json::from_str::<RawJsonManifest>(&manifest_text) {
+        let url = json_manifest
+            .urls
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("the JSON manifest contains no URL"))?;
+        Ok(ManifestKind::Json {
+            url,
+            codecs: json_manifest.codecs,
+        })
+    } else {
+        let dash = dash::parse_mpd(&manifest_text).context("parsing the DASH (MPD) manifest")?;
+        Ok(ManifestKind::Dash(dash))
+    }
 }
 
 pub fn print_playback_info(info: &PlaybackInfo) {
@@ -259,5 +370,175 @@ mod tests {
         }
         assert_eq!(quality_from_api("HI_RES"), Some(Quality::Lossless));
         assert_eq!(quality_from_api("SURROUND"), None);
+    }
+
+    /// A playbackinfo server on a local port: `answer` gets the `audioquality` asked for and
+    /// returns the HTTP status and body; the tiers asked for come back in order.
+    async fn serve_playbackinfo(
+        answer: impl Fn(&str) -> (u16, String) + Send + Sync + 'static,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = asked.clone();
+        let answer = std::sync::Arc::new(answer);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let (log, answer) = (log.clone(), answer.clone());
+                tokio::spawn(async move {
+                    let mut request = [0u8; 4096];
+                    let n = socket.read(&mut request).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&request[..n]);
+                    let line = request.lines().next().unwrap_or("");
+                    let tier = line
+                        .split("audioquality=")
+                        .nth(1)
+                        .and_then(|rest| rest.split(['&', ' ']).next())
+                        .unwrap_or("")
+                        .to_string();
+                    log.lock().unwrap().push(tier.clone());
+                    let (status, body) = answer(&tier);
+                    let response = format!(
+                        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        (base, asked)
+    }
+
+    /// A playbackinfo answer that says `audio_quality` and carries a one-URL JSON manifest.
+    fn playbackinfo(audio_quality: &str) -> (u16, String) {
+        playbackinfo_with_manifest(
+            audio_quality,
+            r#"{"mimeType":"audio/flac","codecs":"flac","urls":["http://cdn/a.flac"]}"#,
+        )
+    }
+
+    fn playbackinfo_with_manifest(audio_quality: &str, manifest: &str) -> (u16, String) {
+        let body = format!(
+            r#"{{"trackId":1,"audioMode":"STEREO","audioQuality":"{audio_quality}","manifestMimeType":"application/vnd.tidal.bts","manifest":"{}"}}"#,
+            BASE64.encode(manifest)
+        );
+        (200, body)
+    }
+
+    async fn fetch(base: &str, best: Quality, min: Quality) -> Result<PlaybackInfo> {
+        let http = reqwest::Client::new();
+        let account = Account {
+            base,
+            access_token: "token",
+            country_code: "US",
+        };
+        fetch_with_fallback(&http, &account, "1", best, min).await
+    }
+
+    #[tokio::test]
+    async fn a_track_tidal_has_at_the_tier_asked_for_takes_one_request() {
+        let (base, asked) = serve_playbackinfo(|_| playbackinfo("HI_RES_LOSSLESS")).await;
+        let info = fetch(&base, Quality::Hires, Quality::Lossless)
+            .await
+            .unwrap();
+        assert_eq!(info.audio_quality, "HI_RES_LOSSLESS");
+        assert_eq!(*asked.lock().unwrap(), ["HI_RES_LOSSLESS"]);
+    }
+
+    #[tokio::test]
+    async fn a_lower_tier_that_tidal_answers_with_by_itself_is_taken_as_it_comes() {
+        let (base, asked) = serve_playbackinfo(|_| playbackinfo("LOSSLESS")).await;
+        let info = fetch(&base, Quality::Hires, Quality::Lossless)
+            .await
+            .unwrap();
+        assert_eq!(info.audio_quality, "LOSSLESS");
+        assert_eq!(
+            asked.lock().unwrap().len(),
+            1,
+            "no retry: it is the caller's call"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_http_4xx_at_a_tier_asks_for_the_next_one_down() {
+        let (base, asked) = serve_playbackinfo(|tier| match tier {
+            "HI_RES_LOSSLESS" => (404, "not there".to_string()),
+            other => playbackinfo(other),
+        })
+        .await;
+        let info = fetch(&base, Quality::Hires, Quality::Lossless)
+            .await
+            .unwrap();
+        assert_eq!(info.audio_quality, "LOSSLESS");
+        assert_eq!(*asked.lock().unwrap(), ["HI_RES_LOSSLESS", "LOSSLESS"]);
+    }
+
+    #[tokio::test]
+    async fn the_retries_stop_at_the_floor_and_the_error_is_the_last_one() {
+        let (base, asked) = serve_playbackinfo(|_| (403, "no entitlement".to_string())).await;
+        let error = fetch(&base, Quality::Hires, Quality::Lossless)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("403"), "{error:#}");
+        // Never HIGH: it is below the floor.
+        assert_eq!(*asked.lock().unwrap(), ["HI_RES_LOSSLESS", "LOSSLESS"]);
+    }
+
+    #[tokio::test]
+    async fn a_lower_floor_lets_the_retries_go_further_down() {
+        let (base, asked) = serve_playbackinfo(|tier| match tier {
+            "HIGH" => playbackinfo("HIGH"),
+            _ => (404, String::new()),
+        })
+        .await;
+        let info = fetch(&base, Quality::Hires, Quality::High).await.unwrap();
+        assert_eq!(info.audio_quality, "HIGH");
+        assert_eq!(
+            *asked.lock().unwrap(),
+            ["HI_RES_LOSSLESS", "LOSSLESS", "HIGH"]
+        );
+    }
+
+    #[tokio::test]
+    async fn errors_that_are_not_about_the_tier_are_not_retried() {
+        for status in [401, 429, 500, 503] {
+            let (base, asked) = serve_playbackinfo(move |_| (status, String::new())).await;
+            let error = fetch(&base, Quality::Hires, Quality::Low)
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains(&status.to_string()),
+                "{error:#}"
+            );
+            assert_eq!(asked.lock().unwrap().len(), 1, "status {status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_manifest_that_cannot_be_read_asks_for_the_next_tier_down() {
+        let (base, asked) = serve_playbackinfo(|tier| match tier {
+            "HI_RES_LOSSLESS" => playbackinfo_with_manifest(tier, "not a manifest"),
+            other => playbackinfo(other),
+        })
+        .await;
+        let info = fetch(&base, Quality::Hires, Quality::Lossless)
+            .await
+            .unwrap();
+        assert_eq!(info.audio_quality, "LOSSLESS");
+        assert_eq!(asked.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_network_failure_is_not_retried() {
+        // Nothing listens here.
+        let error = fetch("http://127.0.0.1:1", Quality::Hires, Quality::Low)
+            .await
+            .unwrap_err();
+        assert!(!worth_a_lower_tier(&error), "{error:#}");
     }
 }
