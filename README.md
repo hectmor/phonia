@@ -30,15 +30,17 @@ chain works with real hardware (a Fosi Audio DS2 during development).
   engine and ALSA output, without touching TIDAL. Useful for testing the DAC in isolation.
 
 - **`phonia tui [--socket <path>]`** -- the terminal interface, a client of a running `phoniad`. It
-  has a sidebar (Queue, Search, Library), a main panel and a bar at the bottom that says how the
-  connection stands. It connects by itself, and if the daemon is not there yet, or goes away, it
-  keeps trying (after 0.25 s, then twice as long each time up to 5 s) and shows a countdown; `R`
-  tries at once. It stops trying only when what answers is not a compatible phonia daemon, and says
-  why. The sections are still empty: the queue and the playback keys come next. Keys are vim-like:
-  `j`/`k` (or the arrows) move, `gg` and `G` go to the ends, `Ctrl-d`/`Ctrl-u` move half a page,
-  `h`/`l`/`Tab` change panel, `1`-`3` jump to a section, `?` shows the keys and `q` (or `Ctrl-c`)
-  quits. The help is drawn from the same table the keys are read from, so it cannot go out of
-  date. It needs a terminal, and says so when it is run from a pipe.
+  has a sidebar (Queue, Search, Library), a main panel and a bar at the bottom. The queue is listed
+  live, in play order, with the one playing marked; the bar shows the state, the track and the
+  position, or how the connection stands when there is none. It connects by itself, and if the
+  daemon is not there yet, or goes away, it keeps trying (after 0.25 s, then twice as long each
+  time up to 5 s) and shows a countdown; `R` tries at once. It stops trying only when what answers
+  is not a compatible phonia daemon, and says why. `Space` pauses or resumes, `n`/`p` skip to the
+  next or previous track; Search and Library are still empty. Other keys are vim-like: `j`/`k` (or
+  the arrows) move, `gg` and `G` go to the ends, `Ctrl-d`/`Ctrl-u` move half a page, `h`/`l`/`Tab`
+  change panel, `1`-`3` jump to a section, `?` shows the keys and `q` (or `Ctrl-c`) quits. The help
+  is drawn from the same table the keys are read from, so it cannot go out of date. It needs a
+  terminal, and says so when it is run from a pipe.
 
 - **`--shuffle` / `--repeat`** (on `play` and `play-file`): the tracks form a queue. `--shuffle`
   plays them in a random order, each once per cycle; `--repeat one` repeats the track that ends

@@ -78,10 +78,72 @@ fn draw_sidebar(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
 fn draw_main(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
     let focused = state.focus == Focus::Main;
     let block = panel(state.section().title(), focused, theme);
-    frame.render_widget(
-        Paragraph::new(Line::styled("Nothing to show yet.", theme.dim)).block(block),
-        area,
-    );
+    let lines = match (state.section(), &state.queue) {
+        (Section::Queue, Some(queue)) => queue_lines(queue, theme),
+        (Section::Queue, None) => vec![Line::styled("Not connected yet.", theme.dim)],
+        _ => vec![Line::styled("Nothing to show yet.", theme.dim)],
+    };
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn queue_lines<'a>(queue: &phonia_ipc::Queue, theme: &Theme) -> Vec<Line<'a>> {
+    if queue.items.is_empty() {
+        return vec![Line::styled("The queue is empty.", theme.dim)];
+    }
+    queue
+        .order
+        .iter()
+        .filter_map(|id| queue.items.iter().find(|item| item.id == *id))
+        .enumerate()
+        .map(|(index, item)| {
+            let current = queue.current == Some(item.id);
+            let marker = if current { ">" } else { " " };
+            let name = item.title.clone().unwrap_or_else(|| item.source.clone());
+            let length = item
+                .duration_ms
+                .map(|ms| format!("  [{}]", phonia_ipc::fmt::ms(ms)))
+                .unwrap_or_default();
+            let style = if current { theme.accent } else { theme.text };
+            Line::styled(format!("{marker} {:>2}. {name}{length}", index + 1), style)
+        })
+        .collect()
+}
+
+fn connected_line<'a>(state: &State, theme: &Theme) -> Line<'a> {
+    if let Some(reason) = &state.last_error {
+        return Line::styled(format!("Could not do that: {reason}"), theme.error);
+    }
+    let Some(status) = &state.status else {
+        return Line::styled("Connected", theme.text);
+    };
+    let name = status
+        .track
+        .as_ref()
+        .and_then(|track| track.title.clone().or_else(|| track.source.clone()))
+        .unwrap_or_else(|| "Nothing playing".to_string());
+    let position = if status.track.is_some() {
+        let total = status
+            .duration_ms
+            .map(|ms| format!(" / {}", phonia_ipc::fmt::ms(ms)))
+            .unwrap_or_default();
+        format!("  {}{total}", phonia_ipc::fmt::ms(status.position_ms))
+    } else {
+        String::new()
+    };
+    Line::styled(
+        format!("{}  {name}{position}", state_word(status.state)),
+        theme.text,
+    )
+}
+
+fn state_word(state: phonia_ipc::State) -> &'static str {
+    match state {
+        phonia_ipc::State::Stopped => "Stopped",
+        phonia_ipc::State::Loading => "Loading",
+        phonia_ipc::State::Playing => "Playing",
+        phonia_ipc::State::Paused => "Paused",
+        phonia_ipc::State::Seeking => "Seeking",
+    }
 }
 
 fn draw_bar(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
@@ -90,22 +152,10 @@ fn draw_bar(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
             Line::styled("Connecting to phoniad...", theme.dim),
             "? help   q quit".to_string(),
         ),
-        Connection::Connected => {
-            let text = match &state.server {
-                Some(server) => format!(
-                    "Connected to {} {} (protocol {}.{})",
-                    server.info.name,
-                    server.info.version,
-                    server.protocol.major,
-                    server.protocol.minor
-                ),
-                None => "Connected".to_string(),
-            };
-            (
-                Line::styled(text, theme.text),
-                "? help   q quit".to_string(),
-            )
-        }
+        Connection::Connected => (
+            connected_line(state, theme),
+            "Space pause   n next   p prev   ? help   q quit".to_string(),
+        ),
         Connection::Disconnected { reason, retry_in } => (
             Line::styled(format!("phoniad is not reachable: {reason}"), theme.error),
             format!(
@@ -164,7 +214,7 @@ mod tests {
             "1 Queue",
             "2 Search",
             "3 Library",
-            "Nothing to show yet",
+            "Not connected yet",
             "Connecting",
             "? help",
         ] {
@@ -205,10 +255,9 @@ mod tests {
     #[test]
     fn the_bar_says_how_the_connection_stands() {
         let text = screen(&connected(), 90, 12);
-        assert!(
-            text.contains("Connected to phoniad 0.1.0 (protocol 1.5)"),
-            "{text}"
-        );
+        assert!(text.contains("Stopped"), "{text}");
+        assert!(text.contains("Nothing playing"), "{text}");
+        assert!(text.contains("Space pause"), "{text}");
 
         let mut state = connected();
         update(
@@ -238,6 +287,97 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("R: try again"), "{text}");
+    }
+
+    #[test]
+    fn a_playing_track_and_position_show_in_the_bar() {
+        let mut state = connected();
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::TrackStarted {
+                item_id: None,
+                source: Some("tidal:1".into()),
+                title: Some("Aerodynamic".into()),
+                duration_ms: Some(343_000),
+                spec: phonia_ipc::Spec {
+                    sample_rate: 44_100,
+                    channels: 2,
+                    bits_per_sample: 16,
+                },
+                gapless: false,
+                quality: None,
+            }),
+        );
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::StateChanged {
+                state: phonia_ipc::State::Playing,
+            }),
+        );
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::Position {
+                position_ms: 65_000,
+                duration_ms: Some(343_000),
+            }),
+        );
+        let text = screen(&state, 90, 12);
+        assert!(text.contains("Playing"), "{text}");
+        assert!(text.contains("Aerodynamic"), "{text}");
+        assert!(text.contains("1:05 / 5:43"), "{text}");
+    }
+
+    #[test]
+    fn a_request_error_replaces_the_playback_line_until_the_next_key() {
+        let mut state = connected();
+        update(
+            &mut state,
+            Msg::RequestFailed {
+                reason: "the connection to the daemon was closed".into(),
+            },
+        );
+        let text = screen(&state, 90, 12);
+        assert!(text.contains("Could not do that"), "{text}");
+    }
+
+    #[test]
+    fn the_queue_is_listed_in_play_order_with_the_current_one_marked() {
+        use phonia_ipc::{ItemId, Queue, QueueItem, Repeat};
+        let mut state = connected();
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::QueueChanged {
+                queue: Queue {
+                    version: 2,
+                    items: vec![
+                        QueueItem {
+                            id: ItemId(1),
+                            source: "file:/a.flac".into(),
+                            title: Some("A".into()),
+                            duration_ms: Some(65_000),
+                        },
+                        QueueItem {
+                            id: ItemId(2),
+                            source: "tidal:9".into(),
+                            title: None,
+                            duration_ms: None,
+                        },
+                    ],
+                    order: vec![ItemId(2), ItemId(1)],
+                    current: Some(ItemId(2)),
+                    shuffle: false,
+                    repeat: Repeat::Off,
+                },
+            }),
+        );
+        let text = screen(&state, 90, 12);
+        let a = text.find("tidal:9").unwrap();
+        let b = text.find("A  [1:05]").unwrap();
+        assert!(
+            a < b,
+            "tidal:9 (order[0]) should be listed before A: {text}"
+        );
+        assert!(text.contains(">  1. tidal:9"), "{text}");
     }
 
     #[test]

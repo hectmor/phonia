@@ -26,6 +26,9 @@ pub enum Action {
     FocusMain,
     /// Goes to the nth section of the sidebar, counting from 0.
     Section(usize),
+    TogglePause,
+    Next,
+    Previous,
 }
 
 /// A key press, with the modifiers that matter.
@@ -66,6 +69,7 @@ pub enum Group {
     General,
     Movement,
     Panels,
+    Playback,
 }
 
 impl Group {
@@ -74,6 +78,7 @@ impl Group {
             Group::General => "General",
             Group::Movement => "Movement",
             Group::Panels => "Panels",
+            Group::Playback => "Playback",
         }
     }
 }
@@ -222,6 +227,21 @@ pub const BINDINGS: &[Binding] = &[
     bind(&[c('1')], "1", Action::Section(0), "Queue", Group::Panels),
     bind(&[c('2')], "2", Action::Section(1), "Search", Group::Panels),
     bind(&[c('3')], "3", Action::Section(2), "Library", Group::Panels),
+    bind(
+        &[Key::plain(KeyCode::Char(' '))],
+        "Space",
+        Action::TogglePause,
+        "play or pause",
+        Group::Playback,
+    ),
+    bind(&[c('n')], "n", Action::Next, "next track", Group::Playback),
+    bind(
+        &[c('p')],
+        "p",
+        Action::Previous,
+        "previous track",
+        Group::Playback,
+    ),
 ];
 
 /// What a key press turned into.

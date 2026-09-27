@@ -48,7 +48,12 @@ fn lines(theme: &Theme) -> Vec<Line<'static>> {
         .max()
         .unwrap_or(0);
     let mut lines = Vec::new();
-    for group in [Group::General, Group::Movement, Group::Panels] {
+    for group in [
+        Group::General,
+        Group::Movement,
+        Group::Panels,
+        Group::Playback,
+    ] {
         if !lines.is_empty() {
             lines.push(Line::raw(""));
         }

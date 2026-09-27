@@ -11,7 +11,7 @@
 
 use crate::app::Msg;
 use futures_util::future::BoxFuture;
-use phonia_ipc::{Client, ClientError};
+use phonia_ipc::{Client, ClientError, Request};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Notify, mpsc};
@@ -70,14 +70,20 @@ pub fn spawn(
     connector: Connector,
     messages: mpsc::UnboundedSender<Msg>,
     retry: Arc<Notify>,
+    requests: mpsc::UnboundedReceiver<Request>,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(run(connector, messages, retry))
+    tokio::spawn(run(connector, messages, retry, requests))
 }
 
-async fn run(connector: Connector, messages: mpsc::UnboundedSender<Msg>, retry: Arc<Notify>) {
+async fn run(
+    connector: Connector,
+    messages: mpsc::UnboundedSender<Msg>,
+    retry: Arc<Notify>,
+    mut requests: mpsc::UnboundedReceiver<Request>,
+) {
     let mut backoff = Backoff::new();
     loop {
-        match attempt(&connector, &messages).await {
+        match attempt(&connector, &messages, &mut requests).await {
             Attempt::InterfaceGone => return,
             Attempt::Refused(reason) => {
                 if messages.send(Msg::Refused { reason }).is_err() {
@@ -114,7 +120,11 @@ async fn run(connector: Connector, messages: mpsc::UnboundedSender<Msg>, retry: 
     }
 }
 
-async fn attempt(connector: &Connector, messages: &mpsc::UnboundedSender<Msg>) -> Attempt {
+async fn attempt(
+    connector: &Connector,
+    messages: &mpsc::UnboundedSender<Msg>,
+    requests: &mut mpsc::UnboundedReceiver<Request>,
+) -> Attempt {
     let client = match connector().await {
         Ok(client) => client,
         Err(ClientError::Handshake(reason)) => return Attempt::Refused(reason),
@@ -157,6 +167,18 @@ async fn attempt(connector: &Connector, messages: &mpsc::UnboundedSender<Msg>) -
                 }
                 None => break,
             },
+            Some(request) = requests.recv() => {
+                // Sent in its own task: a slow answer must not hold up events or a shutdown.
+                let client = client.clone();
+                let messages = messages.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = client.request(request).await {
+                        let _ = messages.send(Msg::RequestFailed {
+                            reason: error.to_string(),
+                        });
+                    }
+                });
+            }
             _ = client.closed() => break,
         }
     }
@@ -311,6 +333,10 @@ mod tests {
         (connector, calls)
     }
 
+    fn requests() -> mpsc::UnboundedReceiver<Request> {
+        mpsc::unbounded_channel().1
+    }
+
     fn refused() -> ClientError {
         ClientError::Io(std::io::Error::new(
             std::io::ErrorKind::ConnectionRefused,
@@ -340,7 +366,7 @@ mod tests {
         let daemon = fake_daemon(1, vec![Event::QueueExhausted], hang_up);
         let (connector, _) = connector(vec![Ok(daemon)]);
         let (tx, mut rx) = mpsc::unbounded_channel();
-        spawn(connector, tx, Arc::new(Notify::new()));
+        spawn(connector, tx, Arc::new(Notify::new()), requests());
 
         let Msg::Connected {
             server,
@@ -371,7 +397,7 @@ mod tests {
         let second = fake_daemon(1, vec![], second_hang_up);
         let (connector, calls) = connector(vec![Ok(first), Ok(second)]);
         let (tx, mut rx) = mpsc::unbounded_channel();
-        spawn(connector, tx, Arc::new(Notify::new()));
+        spawn(connector, tx, Arc::new(Notify::new()), requests());
 
         assert!(matches!(next(&mut rx).await, Msg::Connected { .. }));
         hang_up_tx.send(()).unwrap();
@@ -391,7 +417,7 @@ mod tests {
     async fn a_daemon_that_is_not_there_is_tried_again_after_longer_and_longer_waits() {
         let (connector, calls) = connector(vec![Err(refused()), Err(refused()), Err(refused())]);
         let (tx, mut rx) = mpsc::unbounded_channel();
-        spawn(connector, tx, Arc::new(Notify::new()));
+        spawn(connector, tx, Arc::new(Notify::new()), requests());
 
         let mut waits = Vec::new();
         for _ in 0..3 {
@@ -417,7 +443,7 @@ mod tests {
         let (_keep, hang_up) = tokio::sync::oneshot::channel();
         let (connector, calls) = connector(vec![Ok(fake_daemon(2, vec![], hang_up))]);
         let (tx, mut rx) = mpsc::unbounded_channel();
-        spawn(connector, tx, Arc::new(Notify::new()));
+        spawn(connector, tx, Arc::new(Notify::new()), requests());
 
         let Msg::Refused { reason } = next(&mut rx).await else {
             panic!("not refused");
@@ -438,7 +464,7 @@ mod tests {
         ]);
         let (tx, mut rx) = mpsc::unbounded_channel();
         let retry = Arc::new(Notify::new());
-        spawn(connector, tx, retry.clone());
+        spawn(connector, tx, retry.clone(), requests());
 
         assert!(matches!(next(&mut rx).await, Msg::Refused { .. }));
         retry.notify_one();
@@ -452,7 +478,7 @@ mod tests {
         let (connector, calls) = connector(Vec::new());
         let (tx, mut rx) = mpsc::unbounded_channel();
         let retry = Arc::new(Notify::new());
-        spawn(connector, tx, retry.clone());
+        spawn(connector, tx, retry.clone(), requests());
 
         for _ in 0..7 {
             assert!(matches!(next(&mut rx).await, Msg::Disconnected { .. }));
@@ -471,10 +497,29 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_request_sent_while_connected_reaches_the_daemon() {
+        let (_keep, hang_up) = tokio::sync::oneshot::channel();
+        let daemon = fake_daemon(1, vec![], hang_up);
+        let (connector, _) = connector(vec![Ok(daemon)]);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (req_tx, req_rx) = mpsc::unbounded_channel();
+        spawn(connector, tx, Arc::new(Notify::new()), req_rx);
+
+        assert!(matches!(next(&mut rx).await, Msg::Connected { .. }));
+        req_tx.send(Request::TogglePause).unwrap();
+        // The fake daemon Acks it; a success sends nothing back to the interface.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "no message for a request that worked"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn the_task_ends_when_the_interface_goes_away() {
         let (connector, _) = connector(Vec::new());
         let (tx, rx) = mpsc::unbounded_channel();
-        let task = spawn(connector, tx, Arc::new(Notify::new()));
+        let task = spawn(connector, tx, Arc::new(Notify::new()), requests());
         drop(rx);
         tokio::time::timeout(Duration::from_secs(60), task)
             .await
