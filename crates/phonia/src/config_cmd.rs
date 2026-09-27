@@ -100,6 +100,11 @@ fn format_settings(
             settings.max_quality.origin,
         ),
         (
+            "tidal.min_quality",
+            settings.min_quality.value.to_string(),
+            settings.min_quality.origin,
+        ),
+        (
             "tidal.session_store",
             settings.session_store.value.to_string(),
             settings.session_store.origin,
@@ -166,6 +171,7 @@ mod tests {
              \x20 output.reserve              true                                (default)\n\
              \x20 output.release_after_pause  10 s                                (default)\n\
              \x20 tidal.max_quality           hires                               (default)\n\
+             \x20 tidal.min_quality           lossless                            (default)\n\
              \x20 tidal.session_store         keyring                             (default)\n\
              \x20 daemon.socket               /run/user/1000/phonia/phoniad.sock  (default)\n\
              \x20 daemon.verbose              false                               (default)\n\
@@ -200,8 +206,8 @@ mod tests {
         assert!(text.contains("lossless"), "{text}");
         assert_eq!(
             text.matches("(default)").count(),
-            8,
-            "mode, sink, reserve, release_after_pause, session_store, socket, verbose and gapless were not written"
+            9,
+            "mode, sink, reserve, release_after_pause, min_quality, session_store, socket, verbose and gapless were not written"
         );
     }
 

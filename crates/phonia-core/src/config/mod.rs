@@ -168,6 +168,7 @@ pub struct Settings {
     pub reserve: Sourced<bool>,
     pub release_after_pause: Sourced<ReleaseAfterPause>,
     pub max_quality: Sourced<Quality>,
+    pub min_quality: Sourced<Quality>,
     pub session_store: Sourced<SessionStoreKind>,
     /// `None` means "the default socket path", which only the binaries know.
     pub socket: Sourced<Option<PathBuf>>,
@@ -209,6 +210,7 @@ pub fn resolve(overrides: Overrides, file: &ConfigFile) -> Settings {
             file.tidal.max_quality,
             Quality::default(),
         ),
+        min_quality: Sourced::pick(None, file.tidal.min_quality, Quality::Lossless),
         session_store: Sourced::pick(None, file.tidal.session_store, SessionStoreKind::default()),
         socket: Sourced::pick(
             overrides.socket.map(Some),
@@ -309,18 +311,22 @@ impl Settings {
         }
     }
 
+    /// Fails, saying which two settings disagree, if the best tier asked for is below the worst
+    /// one accepted: nothing could ever play.
+    pub fn check_quality(&self) -> Result<()> {
+        let (max, min) = (self.max_quality.value, self.min_quality.value);
+        if max < min {
+            bail!(
+                "tidal.max_quality ({max}) is below tidal.min_quality ({min}), so no track could \
+                 play: raise the first or lower the second"
+            );
+        }
+        Ok(())
+    }
+
     /// The socket to use: the configured one, or `default()` (the daemon's usual path).
     pub fn socket_path(&self, default: impl FnOnce() -> PathBuf) -> PathBuf {
         self.socket.value.clone().unwrap_or_else(default)
-    }
-}
-
-impl From<Quality> for tidlers::client::models::playback::AudioQuality {
-    fn from(quality: Quality) -> Self {
-        match quality {
-            Quality::Hires => Self::HiRes,
-            Quality::Lossless => Self::Lossless,
-        }
     }
 }
 
@@ -664,16 +670,22 @@ mod tests {
     }
 
     #[test]
-    fn qualities_map_to_tidals() {
-        use tidlers::client::models::playback::AudioQuality;
-        assert!(matches!(
-            AudioQuality::from(Quality::Hires),
-            AudioQuality::HiRes
-        ));
-        assert!(matches!(
-            AudioQuality::from(Quality::Lossless),
-            AudioQuality::Lossless
-        ));
+    fn a_best_tier_below_the_worst_accepted_is_an_error() {
+        let mut file = ConfigFile::default();
+        assert!(resolve(Overrides::default(), &file).check_quality().is_ok());
+
+        file.tidal.max_quality = Some(Quality::High);
+        let error = resolve(Overrides::default(), &file)
+            .check_quality()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("high") && error.contains("lossless"),
+            "{error}"
+        );
+
+        file.tidal.min_quality = Some(Quality::Low);
+        assert!(resolve(Overrides::default(), &file).check_quality().is_ok());
     }
 
     #[test]

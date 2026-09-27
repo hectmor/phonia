@@ -19,7 +19,7 @@ chain works with real hardware (a Fosi Audio DS2 during development).
 - **`phonia logout`** / **`phonia whoami [--check]`** -- forget the TIDAL login / show where it is kept
   and whether there is one (see "Where the TIDAL session is kept").
 
-- **`phonia play <TRACK_ID>... [--device <device>] [--quality hires|lossless] [--save-mp4 <path>] [--interactive] [--shuffle] [--repeat off|one|all]`**
+- **`phonia play <TRACK_ID>... [--device <device>] [--quality hires|lossless|high|low] [--save-mp4 <path>] [--interactive] [--shuffle] [--repeat off|one|all]`**
   -- Streams and plays tracks by their IDs, one after another. Queries `playbackinfo`, streams
   the DASH manifest (HiRes) or the direct file (Lossless/High/Low), decodes it and outputs it via
   ALSA. `--save-mp4` additionally saves the streamed bytes of the first track to disk (useful for
@@ -70,7 +70,8 @@ reserve = true          # ask WirePlumber/PulseAudio to release the card first, 
 release_after_pause = 10   # seconds a pause lasts before the card is handed back; 0 = on every pause, "never" = keep it
 
 [tidal]
-max_quality = "hires"   # hires | lossless
+max_quality = "hires"   # hires | lossless | high | low: the best tier to ask for
+min_quality = "lossless" # the worst tier phonia will play (default lossless)
 session_store = "keyring"  # where the TIDAL login is kept: keyring | file (see below)
 
 [daemon]
@@ -87,6 +88,12 @@ gapless = true          # join a track to the next one of the same format with n
   device, so a daemon that has been running for days still finds a DAC that was unplugged and
   plugged back in. `phonia devices` lists the cards and the exact text to put in the file; a card
   that isn't there is an error that says which ones are.
+- **Quality tiers** go `hires > lossless > high > low` (`high` and `low` are lossy AAC). phonia asks
+  TIDAL for `max_quality`; when a track doesn't exist at that tier TIDAL answers with a lower one
+  by itself, and phonia plays it and says so (a warning) as long as it is not below
+  `min_quality`. Below that the track fails with a message saying so, so playback never turns
+  lossy without you agreeing to it. A track that is seeked keeps the tier it started in. phonia
+  can't decode AAC yet, so `high` and `low` only make sense once that is added.
 - **Precedence** is command line, then the file, then the built-in default. There is no default
   device: with none configured (and no `--device`) phonia refuses to start and says how to set
   one, rather than guess a card and play on the wrong one.

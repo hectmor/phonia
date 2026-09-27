@@ -10,13 +10,13 @@
 //! ourselves here, using only the public parts of an authenticated `TidalClient` (its access
 //! token, country code, audio quality and playback mode).
 
+use crate::config::Quality;
 use crate::dash::{self, DashSegments};
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::Deserialize;
 use tidlers::TidalClient;
-use tidlers::client::models::playback::AudioQuality;
 
 /// The exact User-Agent `tidlers` itself sends (an Android WebView UA string TIDAL's backend
 /// expects); see `tidlers-0.5.0/src/requests.rs:118` (`RequestClient::new`). We make our own raw
@@ -32,18 +32,30 @@ pub fn build_http_client() -> Result<reqwest::Client> {
         .context("building the HTTP client")
 }
 
-/// Maps our `AudioQuality` to the exact string TIDAL's API expects for the `audioquality` query
-/// parameter.
+/// Maps a tier to the exact string TIDAL's API expects for the `audioquality` query parameter.
 ///
-/// Deliberately does **not** use `AudioQuality`'s `Display` impl: on `tidlers` 0.5.0 that prints
-/// `"HI_RES"` for `AudioQuality::HiRes`, which is TIDAL's legacy MQA tier, not true HiRes FLAC.
-/// The value the API actually wants for lossless HiRes streaming is `"HI_RES_LOSSLESS"`.
-fn api_quality(q: &AudioQuality) -> &'static str {
-    match q {
-        AudioQuality::Low => "LOW",
-        AudioQuality::High => "HIGH",
-        AudioQuality::Lossless => "LOSSLESS",
-        AudioQuality::HiRes => "HI_RES_LOSSLESS",
+/// The value for lossless HiRes streaming is `"HI_RES_LOSSLESS"`; TIDAL's plain `"HI_RES"` is its
+/// legacy MQA tier, which is not what we want.
+fn api_quality(quality: Quality) -> &'static str {
+    match quality {
+        Quality::Low => "LOW",
+        Quality::High => "HIGH",
+        Quality::Lossless => "LOSSLESS",
+        Quality::Hires => "HI_RES_LOSSLESS",
+    }
+}
+
+/// The tier TIDAL says it delivered, from its `audioQuality` field.
+///
+/// The legacy `"HI_RES"` is MQA folded into a FLAC container: lossless, but not the full-rate
+/// HiRes, so it counts as `Lossless`.
+pub fn quality_from_api(text: &str) -> Option<Quality> {
+    match text {
+        "HI_RES_LOSSLESS" => Some(Quality::Hires),
+        "LOSSLESS" | "HI_RES" => Some(Quality::Lossless),
+        "HIGH" => Some(Quality::High),
+        "LOW" => Some(Quality::Low),
+        _ => None,
     }
 }
 
@@ -111,7 +123,7 @@ pub async fn fetch_playback_info(
     http: &reqwest::Client,
     client: &TidalClient,
     track_id: &str,
-    quality: AudioQuality,
+    quality: Quality,
 ) -> Result<PlaybackInfo> {
     let access_token = client
         .session
@@ -136,7 +148,7 @@ pub async fn fetch_playback_info(
         .bearer_auth(access_token)
         .query(&[
             ("countryCode", country_code.as_str()),
-            ("audioquality", api_quality(&quality)),
+            ("audioquality", api_quality(quality)),
             ("playbackmode", "STREAM"),
             ("assetpresentation", "FULL"),
         ])
@@ -156,9 +168,9 @@ pub async fn fetch_playback_info(
     let raw: RawPlaybackInfo = serde_json::from_str(&body)
         .with_context(|| format!("parsing the playbackinfopostpaywall JSON response:\n{body}"))?;
 
-    if matches!(quality, AudioQuality::HiRes) && raw.audio_quality != "HI_RES_LOSSLESS" {
+    if quality_from_api(&raw.audio_quality).is_some_and(|delivered| delivered < quality) {
         crate::warn!(
-            "Warning: TIDAL downgraded the quality to {}: the track doesn't exist in HiRes, or \
+            "Warning: asked TIDAL for {quality}, got {}: the track doesn't exist at that tier, or \
              the token doesn't have that entitlement. If you used an old login, re-run `phonia login`.",
             raw.audio_quality
         );
@@ -223,20 +235,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn api_quality_maps_hires_to_hi_res_lossless_not_display() {
-        // Regression test: `AudioQuality::HiRes`'s `Display` impl on tidlers 0.5.0 prints
-        // "HI_RES" (the legacy MQA tier), which is NOT what the API wants for true HiRes FLAC.
-        assert_eq!(api_quality(&AudioQuality::HiRes), "HI_RES_LOSSLESS");
-        assert_ne!(
-            api_quality(&AudioQuality::HiRes),
-            AudioQuality::HiRes.to_string()
-        );
+    fn hires_is_asked_for_as_hi_res_lossless_not_as_mqa() {
+        assert_eq!(api_quality(Quality::Hires), "HI_RES_LOSSLESS");
+        assert_ne!(api_quality(Quality::Hires), "HI_RES");
     }
 
     #[test]
-    fn api_quality_maps_the_other_tiers_directly() {
-        assert_eq!(api_quality(&AudioQuality::Low), "LOW");
-        assert_eq!(api_quality(&AudioQuality::High), "HIGH");
-        assert_eq!(api_quality(&AudioQuality::Lossless), "LOSSLESS");
+    fn the_other_tiers_are_asked_for_by_name() {
+        assert_eq!(api_quality(Quality::Low), "LOW");
+        assert_eq!(api_quality(Quality::High), "HIGH");
+        assert_eq!(api_quality(Quality::Lossless), "LOSSLESS");
+    }
+
+    #[test]
+    fn what_tidal_says_it_delivered_maps_back_to_a_tier() {
+        for quality in [
+            Quality::Hires,
+            Quality::Lossless,
+            Quality::High,
+            Quality::Low,
+        ] {
+            assert_eq!(quality_from_api(api_quality(quality)), Some(quality));
+        }
+        assert_eq!(quality_from_api("HI_RES"), Some(Quality::Lossless));
+        assert_eq!(quality_from_api("SURROUND"), None);
     }
 }

@@ -40,9 +40,9 @@ struct Args {
     /// `$XDG_RUNTIME_DIR/phonia/phoniad.sock`.
     #[arg(long)]
     socket: Option<PathBuf>,
-    /// The highest quality to ask TIDAL for: hires or lossless. Default: [tidal] max_quality in the
+    /// The highest quality to ask TIDAL for: hires, lossless, high or low. Default: [tidal] max_quality in the
     /// config file, else hires.
-    #[arg(long, value_name = "hires|lossless")]
+    #[arg(long, value_name = "hires|lossless|high|low")]
     quality: Option<Quality>,
     /// Print the library's notes and warnings to the terminal.
     #[arg(long)]
@@ -74,6 +74,7 @@ async fn run(args: Args) -> Result<()> {
         overrides = overrides.with_output_id(id)?;
     }
     let settings = config::resolve(overrides, &loaded.file);
+    settings.check_quality()?;
     let output = settings.output()?;
 
     // A daemon has no terminal to talk to: what the library would print goes nowhere unless asked.
@@ -98,8 +99,9 @@ async fn run(args: Args) -> Result<()> {
     let tidal_opener = TidalOpener::from_store(
         tidal::build_http_client()?,
         store,
-        settings.max_quality.value.into(),
-    );
+        settings.max_quality.value,
+    )
+    .min_quality(settings.min_quality.value);
     let opener = Arc::new(DispatchOpener::new(Some(tidal_opener)));
 
     let (report_tx, reports) = mpsc::unbounded_channel();

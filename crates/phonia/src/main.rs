@@ -66,9 +66,9 @@ enum Command {
         device: Option<String>,
         #[arg(long, value_name = "ID", conflicts_with = "device", help = OUTPUT_HELP)]
         output: Option<String>,
-        /// The highest quality to ask TIDAL for: hires or lossless. Default: [tidal] max_quality
+        /// The highest quality to ask TIDAL for: hires, lossless, high or low. Default: [tidal] max_quality
         /// in the config file, else hires.
-        #[arg(long, value_name = "hires|lossless")]
+        #[arg(long, value_name = "hires|lossless|high|low")]
         quality: Option<Quality>,
         /// If given, saves the downloaded bytes (fMP4/DASH or the JSON manifest) to this path.
         #[arg(long)]
@@ -298,6 +298,7 @@ async fn run_play(
     shuffle: bool,
     repeat: Repeat,
 ) -> Result<()> {
+    settings.check_quality()?;
     let sinks = sinks_for(settings)?;
     let store = auth::open_store(settings.session_store.value, auth::Interaction::Allow)?;
     let mut client = auth::load_client(&*store).await?;
@@ -308,7 +309,9 @@ async fn run_play(
         .context("refreshing the access token")?;
     let http = tidal::build_http_client()?;
 
-    let mut opener = TidalOpener::new(http, client, settings.max_quality.value.into()).print_info();
+    let mut opener = TidalOpener::new(http, client, settings.max_quality.value)
+        .min_quality(settings.min_quality.value)
+        .print_info();
     if let Some(path) = save_mp4 {
         let file = std::fs::File::create(path).with_context(|| format!("creating {path:?}"))?;
         println!("Saving audio to {path:?} as it streams (the first track opened)...");

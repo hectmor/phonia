@@ -63,6 +63,7 @@ impl TrackOpener for TestOpener {
                 track: track.clone(),
                 title,
                 duration: None,
+                quality: None,
             };
             Ok(match media {
                 Media::Pcm(frames) => LoadedTrack::new(
