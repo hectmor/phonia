@@ -740,12 +740,14 @@ fn format_event(event: &Event) -> String {
             title,
             source,
             spec,
+            gapless,
             ..
         } => format!(
-            "started {} ({}-bit / {} Hz)",
+            "started {} ({}-bit / {} Hz){}",
             title.as_deref().or(source.as_deref()).unwrap_or("?"),
             spec.bits_per_sample,
-            spec.sample_rate
+            spec.sample_rate,
+            if *gapless { " [gapless]" } else { "" }
         ),
         Event::TrackEnded { reason, .. } => format!("ended ({reason:?})").to_lowercase(),
         Event::Position {
@@ -1260,6 +1262,30 @@ mod tests {
                 muted: true
             }),
             "volume 40% (muted)"
+        );
+    }
+
+    #[test]
+    fn a_track_that_started_with_no_gap_is_marked() {
+        let started = |gapless| Event::TrackStarted {
+            item_id: None,
+            source: Some("tidal:1".into()),
+            title: Some("Song".into()),
+            duration_ms: None,
+            spec: Spec {
+                sample_rate: 96_000,
+                channels: 2,
+                bits_per_sample: 24,
+            },
+            gapless,
+        };
+        assert_eq!(
+            format_event(&started(false)),
+            "started Song (24-bit / 96000 Hz)"
+        );
+        assert_eq!(
+            format_event(&started(true)),
+            "started Song (24-bit / 96000 Hz) [gapless]"
         );
     }
 }

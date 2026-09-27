@@ -15,8 +15,12 @@ pub const CAP_OUTPUT_SELECT: &str = "output_select";
 /// Capability: the daemon has a volume it can set on outputs that allow it (protocol 1.3).
 pub const CAP_VOLUME: &str = "volume";
 
+/// Capability: the daemon joins tracks of the same format with no gap, and says so in
+/// `track_started` (protocol 1.4).
+pub const CAP_GAPLESS: &str = "gapless";
+
 /// The protocol version this crate speaks.
-pub const PROTOCOL: Version = Version { major: 1, minor: 3 };
+pub const PROTOCOL: Version = Version { major: 1, minor: 4 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Version {
@@ -261,6 +265,10 @@ pub enum Event {
         title: Option<String>,
         duration_ms: Option<u64>,
         spec: Spec,
+        /// The track was joined to the one before it with no gap: playback never stopped, so no
+        /// `state_changed` came between them (since 1.4).
+        #[serde(default)]
+        gapless: bool,
     },
     TrackEnded {
         item_id: Option<ItemId>,

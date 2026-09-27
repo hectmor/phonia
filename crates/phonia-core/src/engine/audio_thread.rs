@@ -456,8 +456,14 @@ impl AudioThread {
                 }
             }
             Msg::Command(Command::Next) => {
+                // What was opened ahead is the next track, if it is the one the queue would give:
+                // start it as it is rather than asking for it again.
+                let ready = self.take_ready_next(Advance::Next);
                 self.interrupt_current();
-                self.request_load(LoadTarget::Advance(Advance::Next));
+                match ready {
+                    Some(prepared) => self.start_opened_ahead(prepared),
+                    None => self.request_load(LoadTarget::Advance(Advance::Next)),
+                }
             }
             Msg::Command(Command::Previous) => {
                 let restart = self.heard_position() >= PREVIOUS_RESTART_AFTER;
@@ -894,6 +900,32 @@ impl AudioThread {
         });
     }
 
+    /// The track opened ahead, if it is ready and is what the queue gives for `how`: taken, to be
+    /// started right away instead of opened a second time. Anything else that was opened ahead
+    /// stays where it is (and is dropped by whatever loads instead).
+    fn take_ready_next(&mut self, how: Advance) -> Option<Prepared> {
+        if !self.ctx.gapless || self.outgoing.is_some() {
+            return None;
+        }
+        let ready = matches!(
+            self.next,
+            Some(Next {
+                phase: NextPhase::Ready(_),
+                ..
+            })
+        );
+        if !ready || self.ctx.supplier.peek(how) != Peek::Next(self.next.as_ref()?.track.clone()) {
+            return None;
+        }
+        match self.next.take() {
+            Some(Next {
+                phase: NextPhase::Ready(prepared),
+                ..
+            }) => Some(*prepared),
+            _ => None,
+        }
+    }
+
     /// Forgets the track that was being opened ahead, and stops opening it.
     fn drop_next(&mut self) {
         if let Some(next) = self.next.take() {
@@ -1072,6 +1104,7 @@ impl AudioThread {
 
     /// Seeking beyond the end ends the track, as in MPRIS, instead of clamping to just before it.
     fn seek_past_the_end(&mut self) {
+        let ready = self.take_ready_next(Advance::Auto);
         self.flush_sink();
         if let Some(playing) = self.current.take() {
             self.emit(Event::TrackEnded {
@@ -1079,7 +1112,10 @@ impl AudioThread {
                 reason: EndReason::Completed,
             });
         }
-        self.request_load(LoadTarget::Advance(Advance::Auto));
+        match ready {
+            Some(prepared) => self.start_opened_ahead(prepared),
+            None => self.request_load(LoadTarget::Advance(Advance::Auto)),
+        }
     }
 
     /// A seek while the next track is already written behind the one still being heard: it is the

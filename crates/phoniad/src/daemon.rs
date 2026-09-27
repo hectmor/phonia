@@ -181,6 +181,7 @@ impl Daemon {
                 ipc::CAP_OUTPUT_RELEASE.to_string(),
                 ipc::CAP_OUTPUT_SELECT.to_string(),
                 ipc::CAP_VOLUME.to_string(),
+                ipc::CAP_GAPLESS.to_string(),
             ],
         }
     }
