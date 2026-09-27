@@ -120,6 +120,7 @@ mod tests {
                     track,
                     title: None,
                     duration: None,
+                    quality: None,
                 };
                 Ok(LoadedTrack::new(
                     meta,

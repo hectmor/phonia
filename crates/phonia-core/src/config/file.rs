@@ -11,13 +11,35 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
-/// The highest quality to ask TIDAL for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+/// A TIDAL quality tier. They are ordered, worst to best: `Low < High < Lossless < Hires`.
+///
+/// `Low` and `High` are lossy (AAC), so phonia only accepts them when `min_quality` is lowered
+/// to match, and can't decode them yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Quality {
+    Low,
+    High,
+    Lossless,
     #[default]
     Hires,
-    Lossless,
+}
+
+impl Quality {
+    /// The tier one step down, if there is one.
+    pub fn lower(self) -> Option<Quality> {
+        match self {
+            Quality::Hires => Some(Quality::Lossless),
+            Quality::Lossless => Some(Quality::High),
+            Quality::High => Some(Quality::Low),
+            Quality::Low => None,
+        }
+    }
+
+    /// Whether the tier is lossless (FLAC), as opposed to lossy (AAC).
+    pub fn is_lossless(self) -> bool {
+        self >= Quality::Lossless
+    }
 }
 
 impl fmt::Display for Quality {
@@ -25,6 +47,8 @@ impl fmt::Display for Quality {
         f.write_str(match self {
             Quality::Hires => "hires",
             Quality::Lossless => "lossless",
+            Quality::High => "high",
+            Quality::Low => "low",
         })
     }
 }
@@ -37,8 +61,10 @@ impl FromStr for Quality {
         match text {
             "hires" => Ok(Quality::Hires),
             "lossless" => Ok(Quality::Lossless),
+            "high" => Ok(Quality::High),
+            "low" => Ok(Quality::Low),
             other => Err(format!(
-                "unknown quality {other:?}: expected hires or lossless"
+                "unknown quality {other:?}: expected hires, lossless, high or low"
             )),
         }
     }
@@ -170,7 +196,11 @@ impl fmt::Display for SessionStoreKind {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Tidal {
+    /// The best tier to ask for.
     pub max_quality: Option<Quality>,
+    /// The worst tier phonia will play: a track TIDAL only has below this fails, instead of
+    /// quietly playing worse. Default `lossless`.
+    pub min_quality: Option<Quality>,
     pub session_store: Option<SessionStoreKind>,
 }
 
@@ -217,6 +247,7 @@ release_after_pause = 30
 
 [tidal]
 max_quality = "lossless"
+min_quality = "high"
 session_store = "file"
 
 [daemon]
@@ -241,6 +272,7 @@ gapless = false
                 },
                 tidal: Tidal {
                     max_quality: Some(Quality::Lossless),
+                    min_quality: Some(Quality::High),
                     session_store: Some(SessionStoreKind::File)
                 },
                 daemon: Daemon {
@@ -385,10 +417,20 @@ gapless = false
 
     #[test]
     fn the_command_line_and_the_file_accept_the_same_words() {
-        for quality in [Quality::Hires, Quality::Lossless] {
+        for quality in [
+            Quality::Hires,
+            Quality::Lossless,
+            Quality::High,
+            Quality::Low,
+        ] {
             assert_eq!(quality.to_string().parse::<Quality>().unwrap(), quality);
         }
         assert!("MQA".parse::<Quality>().is_err());
+        assert!(Quality::Low < Quality::High && Quality::High < Quality::Lossless);
+        assert!(Quality::Lossless < Quality::Hires);
+        assert_eq!(Quality::Hires.lower(), Some(Quality::Lossless));
+        assert_eq!(Quality::Low.lower(), None);
+        assert!(Quality::Lossless.is_lossless() && !Quality::High.is_lossless());
         assert_eq!(OutputMode::Exclusive.to_string(), "exclusive");
     }
 }

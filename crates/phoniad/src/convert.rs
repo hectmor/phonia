@@ -280,6 +280,7 @@ mod tests {
                 track: ItemId(7).track_ref(),
                 title: Some("a.flac".into()),
                 duration: Some(Duration::from_secs(215)),
+                quality: None,
             }),
             spec: Some(SourceSpec {
                 sample_rate: 96_000,
@@ -316,6 +317,7 @@ mod tests {
             track: ItemId(7).track_ref(),
             title: None,
             duration: None,
+            quality: None,
         };
         let spec = SourceSpec {
             sample_rate: 96_000,
@@ -362,6 +364,7 @@ mod tests {
             track: TrackRef("999".into()),
             title: None,
             duration: None,
+            quality: None,
         };
         let event = event(
             &engine::Event::TrackEnded {

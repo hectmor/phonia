@@ -1,5 +1,6 @@
 //! The engine's public vocabulary: what it is told to do, and what it reports back.
 
+use crate::config::Quality;
 use crate::decode::SourceSpec;
 use std::time::Duration;
 
@@ -13,6 +14,22 @@ pub struct TrackMeta {
     pub track: TrackRef,
     pub title: Option<String>,
     pub duration: Option<Duration>,
+    /// What TIDAL delivered for the track; `None` for a track that isn't streamed.
+    pub quality: Option<Delivered>,
+}
+
+/// The quality tier a streamed track was asked for, and the one TIDAL actually gave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Delivered {
+    pub requested: Quality,
+    pub delivered: Quality,
+}
+
+impl Delivered {
+    /// Whether TIDAL gave a lower tier than was asked for.
+    pub fn fell_back(&self) -> bool {
+        self.delivered < self.requested
+    }
 }
 
 /// Where to move within the current track.

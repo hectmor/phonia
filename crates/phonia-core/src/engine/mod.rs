@@ -14,8 +14,8 @@ mod tests;
 
 pub use supplier::{Advance, LoadedTrack, Peek, SeekMode, TrackMedia, TrackOpener, TrackSupplier};
 pub use types::{
-    Command, EndReason, Event, OutputState, ReleaseReason, SeekTarget, State, Status, TrackMeta,
-    TrackRef,
+    Command, Delivered, EndReason, Event, OutputState, ReleaseReason, SeekTarget, State, Status,
+    TrackMeta, TrackRef,
 };
 
 use std::time::Duration;
