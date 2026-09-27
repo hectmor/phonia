@@ -1,0 +1,13 @@
+[package]
+name = "phonia-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The terminal interface of phonia: a client of the daemon"
+
+[dependencies]
+anyhow.workspace = true
+crossterm.workspace = true
+futures-util.workspace = true
+ratatui.workspace = true
+tokio.workspace = true

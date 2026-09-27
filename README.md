@@ -29,6 +29,11 @@ chain works with real hardware (a Fosi Audio DS2 during development).
   -- Decodes and plays local files (FLAC or fMP4), one after another, through the same playback
   engine and ALSA output, without touching TIDAL. Useful for testing the DAC in isolation.
 
+- **`phonia tui`** -- the terminal interface, a client of a running `phoniad`. For now it is an
+  empty frame that takes the terminal over and gives it back (`q` or `Ctrl-C` quits); the panels,
+  the connection to the daemon and the keys come next. It needs a terminal, and says so when it
+  is run from a pipe.
+
 - **`--shuffle` / `--repeat`** (on `play` and `play-file`): the tracks form a queue. `--shuffle`
   plays them in a random order, each once per cycle; `--repeat one` repeats the track that ends
   (skipping with `n` still moves on) and `--repeat all` starts over after the last one.
@@ -424,6 +429,22 @@ more importantly, *why* it was chosen.
   its own (durations in milliseconds, no internal references leaking out) instead of `serde` derives
   on the engine's types, so the format can outlive refactors. The framing is a few lines over
   `tokio` rather than a codec crate.
+
+- **`phonia-tui`** (a crate of this workspace) -- the terminal interface. Like `phonia-ipc` it does
+  not depend on `phonia-core`, so it builds without ALSA; it will talk to the daemon through
+  `phonia-ipc` only. It is an Elm-style loop: a pure `update(state, message)` and a pure
+  `view(state)`, tested with plain values and a test backend, and only `run` touches the terminal.
+  All colours live in one `theme` module and are the terminal's own sixteen, so it follows the
+  user's palette; with `NO_COLOR` set it uses none.
+
+- **[`ratatui`](https://docs.rs/ratatui)** -- draws the terminal interface: layout, widgets and a
+  `TestBackend` that lets the screens be tested without a terminal. Chosen because it is the
+  maintained standard for Rust TUIs and the one `ratatui-image` (covers, later) builds on; it
+  installs the panic hook that gives the terminal back.
+
+- **[`crossterm`](https://docs.rs/crossterm)** -- reads the keyboard and the terminal's size
+  changes. Its `event-stream` feature gives an async stream that goes in the same `select!` as the
+  daemon's events. It is the backend `ratatui` uses, in the same version, so it adds nothing new.
 
 - **[`tokio`](https://docs.rs/tokio)** -- the async runtime. Needed because talking to TIDAL
   (`reqwest`, `tidlers`) is inherently async I/O. The decode+ALSA-write loop, by contrast, is
