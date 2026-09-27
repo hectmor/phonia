@@ -565,20 +565,6 @@ fn entry_id(queue: &Queue, number: usize) -> Result<ItemId> {
         })
 }
 
-fn format_ms(ms: u64) -> String {
-    let seconds = ms / 1000;
-    if seconds >= 3600 {
-        format!(
-            "{}:{:02}:{:02}",
-            seconds / 3600,
-            seconds % 3600 / 60,
-            seconds % 60
-        )
-    } else {
-        format!("{}:{:02}", seconds / 60, seconds % 60)
-    }
-}
-
 /// `60` sets 60%, `+5` and `-5` change it, all within 0 to 100 (a `%` is fine).
 fn parse_volume(text: &str, current: u8) -> Result<u8> {
     let text = text.trim().trim_end_matches('%').trim();
@@ -715,11 +701,11 @@ fn format_status(status: &Status) -> String {
         text.push_str(&format!("\nTrack:    {name}"));
         let total = status
             .duration_ms
-            .map(|ms| format!(" / {}", format_ms(ms)))
+            .map(|ms| format!(" / {}", phonia_ipc::fmt::ms(ms)))
             .unwrap_or_default();
         text.push_str(&format!(
             "\nPosition: {}{total}",
-            format_ms(status.position_ms)
+            phonia_ipc::fmt::ms(status.position_ms)
         ));
         if let Some(quality) = &track.quality {
             text.push_str(&format!("\nQuality:  {}", format_stream_quality(quality)));
@@ -768,7 +754,7 @@ fn format_queue(queue: &Queue) -> String {
         let name = item.title.as_deref().unwrap_or(&item.source);
         let length = item
             .duration_ms
-            .map(|ms| format!("  [{}]", format_ms(ms)))
+            .map(|ms| format!("  [{}]", phonia_ipc::fmt::ms(ms)))
             .unwrap_or_default();
         text.push_str(&format!("\n {marker} {:>3}. {name}{length}", index + 1));
     }
@@ -828,12 +814,12 @@ fn format_event(event: &Event) -> String {
         } => match duration_ms {
             Some(total) => format!(
                 "position {} / {}",
-                format_ms(*position_ms),
-                format_ms(*total)
+                phonia_ipc::fmt::ms(*position_ms),
+                phonia_ipc::fmt::ms(*total)
             ),
-            None => format!("position {}", format_ms(*position_ms)),
+            None => format!("position {}", phonia_ipc::fmt::ms(*position_ms)),
         },
-        Event::Seeked { position_ms } => format!("seeked to {}", format_ms(*position_ms)),
+        Event::Seeked { position_ms } => format!("seeked to {}", phonia_ipc::fmt::ms(*position_ms)),
         Event::SeekRejected { reason } => format!("seek rejected: {reason}"),
         Event::QueueChanged { queue } => format!("queue changed ({} entries)", queue.items.len()),
         Event::QueueExhausted => "end of the queue".to_string(),
@@ -981,14 +967,6 @@ mod tests {
                 "{bad}: {error}"
             );
         }
-    }
-
-    #[test]
-    fn times_read_as_minutes_and_seconds() {
-        assert_eq!(format_ms(0), "0:00");
-        assert_eq!(format_ms(65_000), "1:05");
-        assert_eq!(format_ms(59_999), "0:59");
-        assert_eq!(format_ms(3_725_000), "1:02:05");
     }
 
     #[test]

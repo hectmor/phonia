@@ -3,7 +3,7 @@
 use crate::cursor::Cursor;
 use crate::keymap::{self, Action, Key, Resolution};
 use crossterm::event::KeyEvent;
-use phonia_ipc::{Event, Queue, ServerInfo, Status, Version};
+use phonia_ipc::{Event, Queue, Request, ServerInfo, Status, Track, Version};
 use std::time::Duration;
 
 /// How often the interface wakes up on its own (see [`Msg::Tick`]).
@@ -83,6 +83,8 @@ pub struct State {
     /// What the daemon last said: kept while it is away, and stale until it is back.
     pub status: Option<Status>,
     pub queue: Option<Queue>,
+    /// Why the last request sent (a playback key) did not work, until the next one is tried.
+    pub last_error: Option<String>,
 }
 
 impl State {
@@ -134,6 +136,10 @@ pub enum Msg {
     },
     /// The daemon announced something.
     Daemon(Event),
+    /// A [`Cmd::Send`] did not work.
+    RequestFailed {
+        reason: String,
+    },
 }
 
 /// Something the interface asks the outside to do.
@@ -142,6 +148,8 @@ pub enum Cmd {
     Quit,
     /// Try to connect now, without waiting for the next attempt.
     RetryNow,
+    /// Send this request to the daemon; failure comes back as [`Msg::RequestFailed`].
+    Send(Request),
 }
 
 /// What [`update`] decided.
@@ -203,6 +211,10 @@ pub fn update(state: &mut State, msg: Msg) -> Effects {
             Effects::redraw()
         }
         Msg::Daemon(event) => on_daemon_event(state, event),
+        Msg::RequestFailed { reason } => {
+            state.last_error = Some(reason);
+            Effects::redraw()
+        }
     }
 }
 
@@ -237,9 +249,58 @@ fn on_daemon_event(state: &mut State, event: Event) -> Effects {
             state.queue = Some(queue);
             Effects::redraw()
         }
+        Event::StateChanged { state: new_state } => {
+            set_status(state, |status| status.state = new_state);
+            Effects::redraw()
+        }
+        Event::Position {
+            position_ms,
+            duration_ms,
+        } => {
+            set_status(state, |status| {
+                status.position_ms = position_ms;
+                status.duration_ms = duration_ms;
+            });
+            Effects::redraw()
+        }
+        Event::TrackStarted {
+            item_id,
+            source,
+            title,
+            duration_ms,
+            spec,
+            quality,
+            ..
+        } => {
+            set_status(state, |status| {
+                status.track = Some(Track {
+                    item_id,
+                    source,
+                    title,
+                    duration_ms,
+                    quality,
+                });
+                status.spec = Some(spec);
+            });
+            Effects::redraw()
+        }
+        Event::TrackEnded { .. } => {
+            set_status(state, |status| {
+                status.track = None;
+                status.spec = None;
+            });
+            Effects::redraw()
+        }
         // The connection closes right after; that is what is shown. Events this version does not
         // know are ignored.
         _ => Effects::default(),
+    }
+}
+
+/// Applies a change to the held status, if there is one (there always should be, once connected).
+fn set_status(state: &mut State, change: impl FnOnce(&mut Status)) {
+    if let Some(status) = &mut state.status {
+        change(status);
     }
 }
 
@@ -299,11 +360,34 @@ fn apply(state: &mut State, action: Action) -> Effects {
         | Action::Last
         | Action::HalfPageDown
         | Action::HalfPageUp => move_cursor(state, action),
+        Action::TogglePause | Action::Next | Action::Previous => {
+            return send_playback(state, action);
+        }
     }
     if (state.focus, state.help, state.sidebar) == before {
         Effects::default()
     } else {
         Effects::redraw()
+    }
+}
+
+/// Sends a playback request, if there is a connection to send it to; refused, silently, while
+/// there is none, rather than queued for later.
+fn send_playback(state: &mut State, action: Action) -> Effects {
+    if state.connection != Connection::Connected {
+        return Effects::default();
+    }
+    let had_error = state.last_error.take().is_some();
+    let request = match action {
+        Action::TogglePause => Request::TogglePause,
+        Action::Next => Request::Next,
+        Action::Previous => Request::Previous,
+        _ => unreachable!(),
+    };
+    Effects {
+        // Nothing visible changes from sending it, except clearing a previous error.
+        redraw: had_error,
+        commands: vec![Cmd::Send(request)],
     }
 }
 

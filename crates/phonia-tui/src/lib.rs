@@ -43,9 +43,15 @@ async fn event_loop(terminal: &mut ratatui::DefaultTerminal, socket: PathBuf) ->
     app::update(&mut state, Msg::Resize(size.width, size.height));
     let mut events = EventStream::new();
     let (messages, mut from_daemon) = mpsc::unbounded_channel();
+    let (requests, requests_rx) = mpsc::unbounded_channel();
     let retry = Arc::new(Notify::new());
     // Stops the connection task however the loop ends.
-    let _connection = AbortOnDrop(conn::spawn(connector(socket), messages, retry.clone()));
+    let _connection = AbortOnDrop(conn::spawn(
+        connector(socket),
+        messages,
+        retry.clone(),
+        requests_rx,
+    ));
     let mut tick = tokio::time::interval(TICK);
     terminal.draw(|frame| view::draw(&state, &theme, frame))?;
 
@@ -67,6 +73,11 @@ async fn event_loop(terminal: &mut ratatui::DefaultTerminal, socket: PathBuf) ->
             match command {
                 Cmd::Quit => state.quit = true,
                 Cmd::RetryNow => retry.notify_one(),
+                // The connection task is gone if the daemon is unreachable; nothing to do then,
+                // since the interface itself already refuses to send in that case.
+                Cmd::Send(request) => {
+                    let _ = requests.send(request);
+                }
             }
         }
         // Painting is the expensive part: only when something changed.
