@@ -6,6 +6,8 @@
 //! tested with plain values and ratatui's `TestBackend`; only [`run`] talks to the terminal.
 
 pub mod app;
+pub mod cursor;
+pub mod keymap;
 pub mod theme;
 pub mod view;
 
@@ -37,6 +39,8 @@ pub async fn run() -> Result<()> {
 async fn event_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
     let theme = Theme::detect();
     let mut state = State::default();
+    let size = terminal.size()?;
+    app::update(&mut state, Msg::Resize(size.width, size.height));
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(TICK);
     terminal.draw(|frame| view::draw(&state, &theme, frame))?;
@@ -46,7 +50,7 @@ async fn event_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
             _ = tick.tick() => Msg::Tick,
             event = events.next() => match event {
                 Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => Msg::Key(key),
-                Some(Ok(Event::Resize(..))) => Msg::Resize,
+                Some(Ok(Event::Resize(columns, rows))) => Msg::Resize(columns, rows),
                 Some(Ok(_)) => continue,
                 Some(Err(error)) => return Err(error.into()),
                 // The terminal closed under us.

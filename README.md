@@ -29,10 +29,13 @@ chain works with real hardware (a Fosi Audio DS2 during development).
   -- Decodes and plays local files (FLAC or fMP4), one after another, through the same playback
   engine and ALSA output, without touching TIDAL. Useful for testing the DAC in isolation.
 
-- **`phonia tui`** -- the terminal interface, a client of a running `phoniad`. For now it is an
-  empty frame that takes the terminal over and gives it back (`q` or `Ctrl-C` quits); the panels,
-  the connection to the daemon and the keys come next. It needs a terminal, and says so when it
-  is run from a pipe.
+- **`phonia tui`** -- the terminal interface, a client of a running `phoniad`. It has a sidebar
+  (Queue, Search, Library), a main panel and a bar at the bottom; the sections are still empty and
+  the connection to the daemon comes next. Keys are vim-like: `j`/`k` (or the arrows) move, `gg`
+  and `G` go to the ends, `Ctrl-d`/`Ctrl-u` move half a page, `h`/`l`/`Tab` change panel, `1`-`3`
+  jump to a section, `?` shows the keys and `q` (or `Ctrl-c`) quits. The help is drawn from the
+  same table the keys are read from, so it cannot go out of date. It needs a terminal, and says so
+  when it is run from a pipe.
 
 - **`--shuffle` / `--repeat`** (on `play` and `play-file`): the tracks form a queue. `--shuffle`
   plays them in a random order, each once per cycle; `--repeat one` repeats the track that ends
