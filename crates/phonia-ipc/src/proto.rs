@@ -1,8 +1,8 @@
 //! The messages: what a client may ask, and what the daemon answers and announces.
 
 use crate::dto::{
-    EndReason, ItemId, OutputInfo, Queue, ReleaseReason, Repeat, Route, SinkReport, Spec, State,
-    Status,
+    EndReason, ItemId, OutputInfo, Quality, Queue, ReleaseReason, Repeat, Route, SinkReport, Spec,
+    State, Status, StreamQuality,
 };
 use serde::{Deserialize, Serialize};
 
@@ -19,8 +19,12 @@ pub const CAP_VOLUME: &str = "volume";
 /// `track_started` (protocol 1.4).
 pub const CAP_GAPLESS: &str = "gapless";
 
+/// Capability: the daemon says which quality TIDAL delivered, and the best tier to ask for can be
+/// changed while it runs (protocol 1.5).
+pub const CAP_QUALITY: &str = "quality";
+
 /// The protocol version this crate speaks.
-pub const PROTOCOL: Version = Version { major: 1, minor: 4 };
+pub const PROTOCOL: Version = Version { major: 1, minor: 5 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Version {
@@ -142,6 +146,11 @@ pub enum Request {
     /// Mutes or unmutes (since 1.3). Refused like `set_volume`.
     SetMute {
         mute: bool,
+    },
+    /// Sets the best tier to ask TIDAL for, from the next track opened on (since 1.5). The track
+    /// playing, and one already opened ahead, keep theirs. Refused below the daemon's minimum.
+    SetMaxQuality {
+        quality: Quality,
     },
     /// Adds tracks, resolving their titles and lengths first.
     QueueAdd {
@@ -269,6 +278,9 @@ pub enum Event {
         /// `state_changed` came between them (since 1.4).
         #[serde(default)]
         gapless: bool,
+        /// What TIDAL delivered, for a track streamed from TIDAL (since 1.5).
+        #[serde(default)]
+        quality: Option<StreamQuality>,
     },
     TrackEnded {
         item_id: Option<ItemId>,
@@ -305,6 +317,10 @@ pub enum Event {
     VolumeChanged {
         percent: u8,
         muted: bool,
+    },
+    /// The best tier to ask TIDAL for changed (since 1.5).
+    MaxQualityChanged {
+        quality: Quality,
     },
     SinkReport(SinkReport),
     Error {

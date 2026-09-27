@@ -4,6 +4,8 @@
 //! how Rust serializes durations.
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
 
 /// Identifies one entry of the queue for as long as the daemon runs. Never reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -36,6 +38,73 @@ pub struct Track {
     pub source: Option<String>,
     pub title: Option<String>,
     pub duration_ms: Option<u64>,
+    /// What TIDAL delivered, for a track that is streamed from TIDAL (since 1.5).
+    #[serde(default)]
+    pub quality: Option<StreamQuality>,
+}
+
+/// A TIDAL quality tier, worst to best: `low < high < lossless < hires`. `high` and `low` are
+/// lossy (AAC).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Quality {
+    Low,
+    High,
+    Lossless,
+    Hires,
+    #[serde(other)]
+    Unknown,
+}
+
+impl fmt::Display for Quality {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Quality::Hires => "hires",
+            Quality::Lossless => "lossless",
+            Quality::High => "high",
+            Quality::Low => "low",
+            Quality::Unknown => "unknown",
+        })
+    }
+}
+
+impl FromStr for Quality {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "hires" => Ok(Quality::Hires),
+            "lossless" => Ok(Quality::Lossless),
+            "high" => Ok(Quality::High),
+            "low" => Ok(Quality::Low),
+            other => Err(format!(
+                "unknown quality {other:?}: expected hires, lossless, high or low"
+            )),
+        }
+    }
+}
+
+/// The tier a streamed track was asked for and the one TIDAL gave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamQuality {
+    pub requested: Quality,
+    pub delivered: Quality,
+}
+
+impl StreamQuality {
+    /// Whether TIDAL gave a lower tier than was asked for.
+    pub fn fell_back(&self) -> bool {
+        self.delivered != Quality::Unknown
+            && self.requested != Quality::Unknown
+            && self.delivered < self.requested
+    }
+}
+
+/// The best tier the daemon asks TIDAL for, and the worst it will play.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QualityRange {
+    pub max: Quality,
+    pub min: Quality,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +125,9 @@ pub struct Status {
     /// card does not (since 1.3).
     #[serde(default)]
     pub volume: Option<Volume>,
+    /// The tiers the daemon asks TIDAL for (since 1.5).
+    #[serde(default)]
+    pub quality_range: Option<QualityRange>,
 }
 
 /// How loud, as the desktop's mixers show it: 100 is unity gain, and the scale is cubic in

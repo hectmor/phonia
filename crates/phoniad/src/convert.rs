@@ -2,8 +2,9 @@
 //! `phonia-ipc`): nothing internal is serialized directly, so an internal refactor can't change
 //! what clients see by accident.
 
+use phonia_core::config::Quality;
 use phonia_core::decode::SourceSpec;
-use phonia_core::engine::{self, EndReason, OutputState, ReleaseReason, SeekTarget};
+use phonia_core::engine::{self, Delivered, EndReason, OutputState, ReleaseReason, SeekTarget};
 use phonia_core::output::alsa::{ProcReading, SinkReport};
 use phonia_core::output::catalog::{self, Entry};
 use phonia_core::queue::{self, ItemId, QueueSnapshot};
@@ -100,11 +101,39 @@ fn entry_of(
     (Some(ipc::ItemId(id.0)), source)
 }
 
+pub fn quality(quality: Quality) -> ipc::Quality {
+    match quality {
+        Quality::Hires => ipc::Quality::Hires,
+        Quality::Lossless => ipc::Quality::Lossless,
+        Quality::High => ipc::Quality::High,
+        Quality::Low => ipc::Quality::Low,
+    }
+}
+
+/// The other way round; `None` for a tier this version doesn't know.
+pub fn core_quality(quality: ipc::Quality) -> Option<Quality> {
+    match quality {
+        ipc::Quality::Hires => Some(Quality::Hires),
+        ipc::Quality::Lossless => Some(Quality::Lossless),
+        ipc::Quality::High => Some(Quality::High),
+        ipc::Quality::Low => Some(Quality::Low),
+        ipc::Quality::Unknown => None,
+    }
+}
+
+pub fn stream_quality(delivered: &Delivered) -> ipc::StreamQuality {
+    ipc::StreamQuality {
+        requested: quality(delivered.requested),
+        delivered: quality(delivered.delivered),
+    }
+}
+
 pub fn status_dto(
     status: &engine::Status,
     queue: &QueueSnapshot,
     route: Option<ipc::Route>,
     volume: Option<phonia_core::output::Volume>,
+    quality_range: Option<ipc::QualityRange>,
 ) -> ipc::Status {
     ipc::Status {
         state: state(status.state),
@@ -115,6 +144,7 @@ pub fn status_dto(
                 source,
                 title: meta.title.clone(),
                 duration_ms: meta.duration.map(ms),
+                quality: meta.quality.as_ref().map(stream_quality),
             }
         }),
         spec: status.spec.map(spec),
@@ -130,6 +160,7 @@ pub fn status_dto(
             percent: volume.percent,
             muted: volume.muted,
         }),
+        quality_range,
     }
 }
 
@@ -201,6 +232,7 @@ pub fn event(event: &engine::Event, queue: &QueueSnapshot) -> ipc::Event {
                 duration_ms: meta.duration.map(ms),
                 spec: spec(*format),
                 gapless: *gapless,
+                quality: meta.quality.as_ref().map(stream_quality),
             }
         }
         engine::Event::TrackEnded { meta, reason } => ipc::Event::TrackEnded {
@@ -293,7 +325,7 @@ mod tests {
                 by: Some("jackd".into()),
             },
         };
-        let dto = status_dto(&status, &snapshot(), None, None);
+        let dto = status_dto(&status, &snapshot(), None, None, None);
         let track = dto.track.unwrap();
         assert_eq!(track.item_id, Some(ipc::ItemId(7)));
         assert_eq!(
@@ -309,6 +341,47 @@ mod tests {
                 by: Some("jackd".into())
             }
         );
+    }
+
+    #[test]
+    fn what_tidal_delivered_reaches_the_clients_in_events_and_status() {
+        let delivered = Delivered {
+            requested: Quality::Hires,
+            delivered: Quality::Lossless,
+        };
+        let meta = TrackMeta {
+            track: TrackRef("999".into()),
+            title: None,
+            duration: None,
+            quality: Some(delivered),
+        };
+        let started = engine::Event::TrackStarted {
+            meta: meta.clone(),
+            spec: SourceSpec {
+                sample_rate: 44_100,
+                channels: 2,
+                bits_per_sample: 16,
+            },
+            gapless: false,
+        };
+        let ipc::Event::TrackStarted { quality, .. } = event(&started, &snapshot()) else {
+            panic!("not a track_started");
+        };
+        let quality = quality.expect("the quality is reported");
+        assert_eq!(quality.requested, ipc::Quality::Hires);
+        assert_eq!(quality.delivered, ipc::Quality::Lossless);
+        assert!(quality.fell_back());
+
+        let status = Status {
+            state: engine::State::Playing,
+            track: Some(meta),
+            spec: None,
+            position: Duration::ZERO,
+            duration: None,
+            output: OutputState::Open,
+        };
+        let dto = status_dto(&status, &snapshot(), None, None, None);
+        assert_eq!(dto.track.unwrap().quality, Some(quality));
     }
 
     #[test]

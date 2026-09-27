@@ -153,6 +153,7 @@ pub struct Overrides {
     /// The output in shared mode, when the command line names one.
     pub sink: Option<String>,
     pub max_quality: Option<Quality>,
+    pub min_quality: Option<Quality>,
     pub socket: Option<PathBuf>,
     pub verbose: Option<bool>,
 }
@@ -210,7 +211,11 @@ pub fn resolve(overrides: Overrides, file: &ConfigFile) -> Settings {
             file.tidal.max_quality,
             Quality::default(),
         ),
-        min_quality: Sourced::pick(None, file.tidal.min_quality, Quality::Lossless),
+        min_quality: Sourced::pick(
+            overrides.min_quality,
+            file.tidal.min_quality,
+            Quality::Lossless,
+        ),
         session_store: Sourced::pick(None, file.tidal.session_store, SessionStoreKind::default()),
         socket: Sourced::pick(
             overrides.socket.map(Some),

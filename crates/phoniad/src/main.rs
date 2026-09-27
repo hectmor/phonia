@@ -44,6 +44,10 @@ struct Args {
     /// config file, else hires.
     #[arg(long, value_name = "hires|lossless|high|low")]
     quality: Option<Quality>,
+    /// The lowest quality to play: a track TIDAL only has below it fails instead of playing.
+    /// Default: [tidal] min_quality in the config file, else lossless.
+    #[arg(long, value_name = "hires|lossless|high|low")]
+    min_quality: Option<Quality>,
     /// Print the library's notes and warnings to the terminal.
     #[arg(long)]
     verbose: bool,
@@ -66,6 +70,7 @@ async fn run(args: Args) -> Result<()> {
     let mut overrides = Overrides {
         device: args.device,
         max_quality: args.quality,
+        min_quality: args.min_quality,
         socket: args.socket,
         verbose: args.verbose.then_some(true),
         ..Overrides::default()
@@ -102,6 +107,7 @@ async fn run(args: Args) -> Result<()> {
         settings.max_quality.value,
     )
     .min_quality(settings.min_quality.value);
+    let quality = tidal_opener.limits();
     let opener = Arc::new(DispatchOpener::new(Some(tidal_opener)));
 
     let (report_tx, reports) = mpsc::unbounded_channel();
@@ -126,6 +132,7 @@ async fn run(args: Args) -> Result<()> {
         sinks,
         outputs: Outputs::new(output.clone(), build),
         opener,
+        quality: Some(quality),
         reports,
         engine: engine::Options {
             release_after_pause: settings.release_after_pause.value.duration(),

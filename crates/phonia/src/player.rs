@@ -4,7 +4,7 @@
 use anyhow::{Result, anyhow};
 use phonia_core::control::Controller;
 use phonia_core::engine::{
-    self, Command, EndReason, Engine, Event, SeekTarget, State, TrackSupplier,
+    self, Command, Delivered, EndReason, Engine, Event, SeekTarget, State, TrackSupplier,
 };
 use phonia_core::output::SinkFactory;
 use phonia_core::queue::{ItemId, Queue, QueueSnapshot, Repeat};
@@ -47,6 +47,15 @@ enum Key {
     Help,
     Quit,
     Unknown(String),
+}
+
+/// The tier TIDAL delivered, and what was asked for if it was more.
+fn quality_text(quality: &Delivered) -> String {
+    if quality.fell_back() {
+        format!("{} (asked for {})", quality.delivered, quality.requested)
+    } else {
+        quality.delivered.to_string()
+    }
 }
 
 fn parse_key(line: &str) -> Key {
@@ -311,8 +320,11 @@ fn handle_event(
         Event::Position { position, duration } => console.progress(position, duration),
         Event::TrackStarted { meta, gapless, .. } => {
             console.line(format!(
-                "Playing: {}{}",
+                "Playing: {}{}{}",
                 meta.title.as_deref().unwrap_or(&meta.track.0),
+                meta.quality
+                    .map(|quality| format!(" [{}]", quality_text(&quality)))
+                    .unwrap_or_default(),
                 if gapless { " (gapless)" } else { "" }
             ));
         }

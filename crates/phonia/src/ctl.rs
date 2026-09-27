@@ -3,9 +3,10 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use phonia_ipc::{
-    AddAt, CAP_OUTPUT_RELEASE, CAP_OUTPUT_SELECT, CAP_VOLUME, Client, ClientError, ClientInfo,
-    Event, ItemId, NewTrack, Output, OutputInfo, OutputMode, Payload, Queue, ReleaseReason, Repeat,
-    Request, SeekTarget, State, Status, Volume,
+    AddAt, CAP_OUTPUT_RELEASE, CAP_OUTPUT_SELECT, CAP_QUALITY, CAP_VOLUME, Client, ClientError,
+    ClientInfo, Event, ItemId, NewTrack, Output, OutputInfo, OutputMode, Payload, Quality,
+    QualityRange, Queue, ReleaseReason, Repeat, Request, SeekTarget, State, Status, StreamQuality,
+    Volume,
 };
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -48,6 +49,13 @@ pub enum CtlCommand {
     Volume {
         #[arg(allow_hyphen_values = true)]
         change: Option<String>,
+    },
+    /// Shows the tiers phonia asks TIDAL for, or sets the best one (`quality lossless`): from the
+    /// next track opened on, so the one playing and the one already opened ahead keep theirs.
+    /// The tiers are hires, lossless, high and low; below the minimum in the config file
+    /// (`[tidal] min_quality`) is refused.
+    Quality {
+        tier: Option<Quality>,
     },
     /// Mutes (`on`), unmutes (`off`) or flips (`toggle`, the default) a shared output; the level is kept.
     Mute {
@@ -205,6 +213,7 @@ pub async fn run(args: CtlArgs, config_flag: Option<&Path>) -> Result<()> {
             .await
         }
         CtlCommand::Volume { change } => volume(&client, json, change).await,
+        CtlCommand::Quality { tier } => quality(&client, json, tier).await,
         CtlCommand::Mute { mode } => mute(&client, json, mode.unwrap_or(MuteMode::Toggle)).await,
         CtlCommand::Output { action } => output(&client, json, action).await,
         CtlCommand::Queue { action } => queue(&client, json, action).await,
@@ -370,6 +379,56 @@ async fn volume(client: &Client, json: bool, change: Option<String>) -> Result<(
             let percent = parse_volume(&change, current.percent)?;
             ack(client, json, Request::SetVolume { percent }).await
         }
+    }
+}
+
+async fn quality(client: &Client, json: bool, tier: Option<Quality>) -> Result<()> {
+    if !client
+        .server()
+        .capabilities
+        .iter()
+        .any(|capability| capability == CAP_QUALITY)
+    {
+        bail!(
+            "this phoniad is too old to report or set the quality (protocol 1.5): restart it after updating"
+        );
+    }
+    match tier {
+        None => {
+            let status = client.status().await?;
+            print_payload(json, &Payload::Status(status.clone()), || {
+                format_quality_status(&status)
+            })
+        }
+        Some(quality) => ack(client, json, Request::SetMaxQuality { quality }).await,
+    }
+}
+
+/// The tiers asked for, and what the track playing got.
+fn format_quality_status(status: &Status) -> String {
+    let mut text = match &status.quality_range {
+        Some(range) => format_range(range),
+        None => "Quality: this daemon does not play from TIDAL".to_string(),
+    };
+    if let Some(quality) = status.track.as_ref().and_then(|track| track.quality) {
+        text.push_str(&format!("\nPlaying: {}", format_stream_quality(&quality)));
+    }
+    text
+}
+
+fn format_range(range: &QualityRange) -> String {
+    format!(
+        "Quality: asking for up to {}, playing nothing below {}",
+        range.max, range.min
+    )
+}
+
+/// What TIDAL delivered: the tier, and what was asked for if it was more.
+fn format_stream_quality(quality: &StreamQuality) -> String {
+    if quality.fell_back() {
+        format!("{} (asked for {})", quality.delivered, quality.requested)
+    } else {
+        quality.delivered.to_string()
     }
 }
 
@@ -657,6 +716,9 @@ fn format_status(status: &Status) -> String {
             "\nPosition: {}{total}",
             format_ms(status.position_ms)
         ));
+        if let Some(quality) = &track.quality {
+            text.push_str(&format!("\nQuality:  {}", format_stream_quality(quality)));
+        }
     }
     if let Some(route) = &status.route {
         let how = match route.mode {
@@ -741,14 +803,19 @@ fn format_event(event: &Event) -> String {
             source,
             spec,
             gapless,
+            quality,
             ..
         } => format!(
-            "started {} ({}-bit / {} Hz){}",
+            "started {} ({}-bit / {} Hz){}{}",
             title.as_deref().or(source.as_deref()).unwrap_or("?"),
             spec.bits_per_sample,
             spec.sample_rate,
+            quality
+                .map(|quality| format!(" [{}]", format_stream_quality(&quality)))
+                .unwrap_or_default(),
             if *gapless { " [gapless]" } else { "" }
         ),
+        Event::MaxQualityChanged { quality } => format!("best quality asked for is now {quality}"),
         Event::TrackEnded { reason, .. } => format!("ended ({reason:?})").to_lowercase(),
         Event::Position {
             position_ms,
@@ -936,6 +1003,7 @@ mod tests {
                 source: Some("tidal:1".into()),
                 title: Some("Song".into()),
                 duration_ms: Some(348_680),
+                quality: None,
             }),
             spec: Some(Spec {
                 sample_rate: 192_000,
@@ -947,6 +1015,7 @@ mod tests {
             output: Output::Open,
             route: None,
             volume: None,
+            quality_range: None,
         };
         assert_eq!(
             format_status(&status),
@@ -961,6 +1030,7 @@ mod tests {
             output: Output::Closed,
             route: None,
             volume: None,
+            quality_range: None,
         };
         assert_eq!(format_status(&idle), "State:    stopped");
 
@@ -1152,6 +1222,7 @@ mod tests {
                 percent: 72,
                 muted: false,
             }),
+            quality_range: None,
         };
         assert_eq!(
             format_status(&status),
@@ -1278,6 +1349,7 @@ mod tests {
                 bits_per_sample: 24,
             },
             gapless,
+            quality: None,
         };
         assert_eq!(
             format_event(&started(false)),
@@ -1287,5 +1359,77 @@ mod tests {
             format_event(&started(true)),
             "started Song (24-bit / 96000 Hz) [gapless]"
         );
+    }
+
+    #[test]
+    fn what_tidal_delivered_is_said_plainly_and_a_fallback_says_what_was_asked() {
+        let same = StreamQuality {
+            requested: Quality::Hires,
+            delivered: Quality::Hires,
+        };
+        let fell = StreamQuality {
+            requested: Quality::Hires,
+            delivered: Quality::Lossless,
+        };
+        assert_eq!(format_stream_quality(&same), "hires");
+        assert_eq!(format_stream_quality(&fell), "lossless (asked for hires)");
+
+        let started = |quality| Event::TrackStarted {
+            item_id: None,
+            source: None,
+            title: Some("Song".into()),
+            duration_ms: None,
+            spec: Spec {
+                sample_rate: 44_100,
+                channels: 2,
+                bits_per_sample: 16,
+            },
+            gapless: true,
+            quality: Some(quality),
+        };
+        assert_eq!(
+            format_event(&started(fell)),
+            "started Song (16-bit / 44100 Hz) [lossless (asked for hires)] [gapless]"
+        );
+        assert_eq!(
+            format_event(&Event::MaxQualityChanged {
+                quality: Quality::Lossless
+            }),
+            "best quality asked for is now lossless"
+        );
+    }
+
+    #[test]
+    fn the_quality_command_shows_the_range_and_the_track() {
+        let mut status = Status {
+            state: State::Playing,
+            track: Some(Track {
+                item_id: None,
+                source: Some("tidal:1".into()),
+                title: None,
+                duration_ms: None,
+                quality: Some(StreamQuality {
+                    requested: Quality::Hires,
+                    delivered: Quality::Lossless,
+                }),
+            }),
+            spec: None,
+            position_ms: 0,
+            duration_ms: None,
+            output: Output::Open,
+            route: None,
+            volume: None,
+            quality_range: Some(QualityRange {
+                max: Quality::Hires,
+                min: Quality::Lossless,
+            }),
+        };
+        assert_eq!(
+            format_quality_status(&status),
+            "Quality: asking for up to hires, playing nothing below lossless\nPlaying: lossless (asked for hires)"
+        );
+        status.quality_range = None;
+        status.track = None;
+        assert!(format_quality_status(&status).contains("does not play from TIDAL"));
     }
 }

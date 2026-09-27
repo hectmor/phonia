@@ -44,6 +44,7 @@ fn status() -> Status {
             source: Some("file:/music/a.flac".into()),
             title: Some("a.flac".into()),
             duration_ms: Some(215_000),
+            quality: None,
         }),
         spec: Some(spec()),
         position_ms: 1_234,
@@ -51,10 +52,11 @@ fn status() -> Status {
         output: Output::Open,
         route: None,
         volume: None,
+        quality_range: None,
     }
 }
 
-const STATUS_JSON: &str = r#"{"state":"playing","track":{"item_id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000},"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"position_ms":1234,"duration_ms":215000,"output":{"state":"open"},"route":null,"volume":null}"#;
+const STATUS_JSON: &str = r#"{"state":"playing","track":{"item_id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000,"quality":null},"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"position_ms":1234,"duration_ms":215000,"output":{"state":"open"},"route":null,"volume":null,"quality_range":null}"#;
 
 fn queue() -> Queue {
     Queue {
@@ -274,9 +276,10 @@ fn the_server_banner() {
                 CAP_OUTPUT_SELECT.into(),
                 CAP_VOLUME.into(),
                 CAP_GAPLESS.into(),
+                CAP_QUALITY.into(),
             ],
         }),
-        r#"{"type":"hello","protocol":{"major":1,"minor":4},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless"]}"#,
+        r#"{"type":"hello","protocol":{"major":1,"minor":5},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality"]}"#,
     );
 }
 
@@ -291,8 +294,8 @@ fn successful_responses() {
         2,
         Reply::Ok(Payload::Status(status())),
         &format!(
-            r#"{{"type":"response","id":2,"ok":{{"type":"status","state":"playing","track":{},"spec":{},"position_ms":1234,"duration_ms":215000,"output":{{"state":"open"}},"route":null,"volume":null}}}}"#,
-            r#"{"item_id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000}"#,
+            r#"{{"type":"response","id":2,"ok":{{"type":"status","state":"playing","track":{},"spec":{},"position_ms":1234,"duration_ms":215000,"output":{{"state":"open"}},"route":null,"volume":null,"quality_range":null}}}}"#,
+            r#"{"item_id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000,"quality":null}"#,
             r#"{"sample_rate":96000,"channels":2,"bits_per_sample":24}"#
         ),
     );
@@ -383,8 +386,9 @@ fn events() {
             duration_ms: Some(1000),
             spec: spec(),
             gapless: false,
+            quality: None,
         },
-        r#"{"type":"event","seq":2,"event":{"type":"track_started","item_id":7,"source":"tidal:1","title":"t","duration_ms":1000,"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"gapless":false}}"#,
+        r#"{"type":"event","seq":2,"event":{"type":"track_started","item_id":7,"source":"tidal:1","title":"t","duration_ms":1000,"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"gapless":false,"quality":null}}"#,
     );
     event(
         21,
@@ -395,8 +399,12 @@ fn events() {
             duration_ms: None,
             spec: spec(),
             gapless: true,
+            quality: Some(StreamQuality {
+                requested: Quality::Hires,
+                delivered: Quality::Lossless,
+            }),
         },
-        r#"{"type":"event","seq":21,"event":{"type":"track_started","item_id":8,"source":null,"title":null,"duration_ms":null,"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"gapless":true}}"#,
+        r#"{"type":"event","seq":21,"event":{"type":"track_started","item_id":8,"source":null,"title":null,"duration_ms":null,"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"gapless":true,"quality":{"requested":"hires","delivered":"lossless"}}}"#,
     );
     event(
         3,
@@ -627,6 +635,75 @@ fn a_track_started_from_a_1_3_daemon_is_not_gapless() {
 }
 
 #[test]
+fn the_quality_tier_requests_events_and_ranges() {
+    request(
+        1,
+        Request::SetMaxQuality {
+            quality: Quality::Lossless,
+        },
+        r#"{"id":1,"request":{"type":"set_max_quality","quality":"lossless"}}"#,
+    );
+    event(
+        22,
+        Event::MaxQualityChanged {
+            quality: Quality::Hires,
+        },
+        r#"{"type":"event","seq":22,"event":{"type":"max_quality_changed","quality":"hires"}}"#,
+    );
+    let range = QualityRange {
+        max: Quality::Hires,
+        min: Quality::Lossless,
+    };
+    assert_eq!(
+        serde_json::to_string(&range).unwrap(),
+        r#"{"max":"hires","min":"lossless"}"#
+    );
+    assert!(Quality::Low < Quality::High && Quality::Lossless < Quality::Hires);
+    assert!(
+        StreamQuality {
+            requested: Quality::Hires,
+            delivered: Quality::Lossless
+        }
+        .fell_back()
+    );
+    assert!(
+        !StreamQuality {
+            requested: Quality::Lossless,
+            delivered: Quality::Lossless
+        }
+        .fell_back()
+    );
+}
+
+#[test]
+fn a_tier_from_a_newer_daemon_is_unknown_not_an_error() {
+    let quality: Quality = serde_json::from_str(r#""dolby""#).unwrap();
+    assert_eq!(quality, Quality::Unknown);
+    let told = StreamQuality {
+        requested: Quality::Unknown,
+        delivered: Quality::Lossless,
+    };
+    assert!(!told.fell_back());
+}
+
+#[test]
+fn a_1_4_status_and_track_say_nothing_of_quality() {
+    let old = r#"{"state":"playing","track":{"item_id":7,"source":"tidal:1","title":"t","duration_ms":1000},"spec":null,"position_ms":0,"duration_ms":null,"output":{"state":"open"},"route":null,"volume":null}"#;
+    let status = serde_json::from_str::<Status>(old).unwrap();
+    assert_eq!(status.quality_range, None);
+    assert_eq!(status.track.unwrap().quality, None);
+    let old = r#"{"type":"event","seq":2,"event":{"type":"track_started","item_id":7,"source":"tidal:1","title":"t","duration_ms":1000,"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"gapless":false}}"#;
+    let ServerMessage::Event {
+        event: Event::TrackStarted { quality, .. },
+        ..
+    } = serde_json::from_str(old).unwrap()
+    else {
+        panic!("not a track_started")
+    };
+    assert_eq!(quality, None);
+}
+
+#[test]
 fn a_1_2_status_has_no_volume() {
     let old = r#"{"state":"paused","track":null,"spec":null,"position_ms":0,"duration_ms":null,"output":{"state":"open"},"route":null}"#;
     assert_eq!(serde_json::from_str::<Status>(old).unwrap().volume, None);
@@ -827,7 +904,7 @@ fn versions_are_compatible_across_minors_but_not_majors() {
     assert!(v(1, 0).compatible_with(v(1, 7)));
     assert!(v(1, 7).compatible_with(v(1, 0)));
     assert!(!v(1, 0).compatible_with(v(2, 0)));
-    assert_eq!(PROTOCOL, v(1, 4));
+    assert_eq!(PROTOCOL, v(1, 5));
 }
 
 #[test]
