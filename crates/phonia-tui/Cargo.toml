@@ -9,5 +9,12 @@ description = "The terminal interface of phonia: a client of the daemon"
 anyhow.workspace = true
 crossterm.workspace = true
 futures-util.workspace = true
+phonia-ipc.workspace = true
 ratatui.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+# The scripted daemon of the connection tests speaks the protocol by hand.
+serde_json.workspace = true
+# Paused time, so the tests of the reconnection do not wait for the real delays.
+tokio = { workspace = true, features = ["test-util"] }

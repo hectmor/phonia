@@ -109,7 +109,12 @@ enum Command {
     /// Controls a running `phoniad` (the daemon): playback, queue and events.
     Ctl(ctl::CtlArgs),
     /// Opens the terminal interface, which drives a running `phoniad`. `q` quits.
-    Tui,
+    Tui {
+        /// The daemon's socket. Default: [daemon] socket in the config file, else
+        /// `$XDG_RUNTIME_DIR/phonia/phoniad.sock`.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
     /// Lists the sound cards that can play, with the device name to put in the config file.
     Devices,
     /// Shows where the configuration comes from and what it says.
@@ -240,7 +245,10 @@ async fn main() -> ExitCode {
             }
         }
         Command::Ctl(args) => ctl::run(args, cli.config.as_deref()).await,
-        Command::Tui => phonia_tui::run().await,
+        Command::Tui { socket } => match ctl::socket_path(cli.config.as_deref(), socket) {
+            Ok(socket) => phonia_tui::run(socket).await,
+            Err(error) => Err(error),
+        },
         Command::Devices => run_devices().await,
         Command::Config { action } => config_cmd::run(action, cli.config.as_deref()),
         Command::ProbeDevice { device } => {

@@ -29,13 +29,16 @@ chain works with real hardware (a Fosi Audio DS2 during development).
   -- Decodes and plays local files (FLAC or fMP4), one after another, through the same playback
   engine and ALSA output, without touching TIDAL. Useful for testing the DAC in isolation.
 
-- **`phonia tui`** -- the terminal interface, a client of a running `phoniad`. It has a sidebar
-  (Queue, Search, Library), a main panel and a bar at the bottom; the sections are still empty and
-  the connection to the daemon comes next. Keys are vim-like: `j`/`k` (or the arrows) move, `gg`
-  and `G` go to the ends, `Ctrl-d`/`Ctrl-u` move half a page, `h`/`l`/`Tab` change panel, `1`-`3`
-  jump to a section, `?` shows the keys and `q` (or `Ctrl-c`) quits. The help is drawn from the
-  same table the keys are read from, so it cannot go out of date. It needs a terminal, and says so
-  when it is run from a pipe.
+- **`phonia tui [--socket <path>]`** -- the terminal interface, a client of a running `phoniad`. It
+  has a sidebar (Queue, Search, Library), a main panel and a bar at the bottom that says how the
+  connection stands. It connects by itself, and if the daemon is not there yet, or goes away, it
+  keeps trying (after 0.25 s, then twice as long each time up to 5 s) and shows a countdown; `R`
+  tries at once. It stops trying only when what answers is not a compatible phonia daemon, and says
+  why. The sections are still empty: the queue and the playback keys come next. Keys are vim-like:
+  `j`/`k` (or the arrows) move, `gg` and `G` go to the ends, `Ctrl-d`/`Ctrl-u` move half a page,
+  `h`/`l`/`Tab` change panel, `1`-`3` jump to a section, `?` shows the keys and `q` (or `Ctrl-c`)
+  quits. The help is drawn from the same table the keys are read from, so it cannot go out of
+  date. It needs a terminal, and says so when it is run from a pipe.
 
 - **`--shuffle` / `--repeat`** (on `play` and `play-file`): the tracks form a queue. `--shuffle`
   plays them in a random order, each once per cycle; `--repeat one` repeats the track that ends
@@ -434,8 +437,9 @@ more importantly, *why* it was chosen.
   `tokio` rather than a codec crate.
 
 - **`phonia-tui`** (a crate of this workspace) -- the terminal interface. Like `phonia-ipc` it does
-  not depend on `phonia-core`, so it builds without ALSA; it will talk to the daemon through
-  `phonia-ipc` only. It is an Elm-style loop: a pure `update(state, message)` and a pure
+  not depend on `phonia-core`, so it builds without ALSA; it talks to the daemon through
+  `phonia-ipc` only, and how it connects is a parameter, so the reconnection is tested against a
+  scripted daemon over an in-memory pipe with `tokio`'s paused clock. It is an Elm-style loop: a pure `update(state, message)` and a pure
   `view(state)`, tested with plain values and a test backend, and only `run` touches the terminal.
   All colours live in one `theme` module and are the terminal's own sixteen, so it follows the
   user's palette; with `NO_COLOR` set it uses none.

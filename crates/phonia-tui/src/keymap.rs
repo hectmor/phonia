@@ -13,6 +13,8 @@ pub enum Action {
     ToggleHelp,
     /// Closes the help, when it is open.
     CloseHelp,
+    /// Connects to the daemon now, when it is not connected.
+    Reconnect,
     Down,
     Up,
     First,
@@ -128,6 +130,13 @@ pub const BINDINGS: &[Binding] = &[
         "Esc",
         Action::CloseHelp,
         "close the help",
+        Group::General,
+    ),
+    bind(
+        &[c('R')],
+        "R",
+        Action::Reconnect,
+        "connect to the daemon now",
         Group::General,
     ),
     bind(&[c('j')], "j", Action::Down, "down", Group::Movement),
