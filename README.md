@@ -92,7 +92,12 @@ gapless = true          # join a track to the next one of the same format with n
   TIDAL for `max_quality`; when a track doesn't exist at that tier TIDAL answers with a lower one
   by itself, and phonia plays it and says so (a warning) as long as it is not below
   `min_quality`. Below that the track fails with a message saying so, so playback never turns
-  lossy without you agreeing to it. When TIDAL answers a tier with an HTTP 4xx (other than 401,
+  lossy without you agreeing to it. `--quality` and `--min-quality` (on `phoniad` and
+  `phonia play`) override the two settings for one run, and `phonia ctl quality <tier>` changes
+  the best one while the daemon runs (not written to the file), from the next track opened on: the one playing, and one
+  already opened ahead, keep theirs. Over the socket, `track_started` and `status` say what TIDAL
+  delivered (`quality` with `requested` and `delivered`, protocol 1.5), and `phonia ctl watch`
+  and `status` show it, with what was asked for when it was more. When TIDAL answers a tier with an HTTP 4xx (other than 401,
   408 and 429) or with a manifest that can't be read, phonia asks again one tier lower, down to
   `min_quality`; network errors, timeouts and 5xx are not retried, so an outage never shows up as
   a lower quality. A track that is seeked keeps the tier it started in. phonia
@@ -168,6 +173,7 @@ phonia ctl play                              # or `play 3` for entry 3
 phonia ctl pause | resume | toggle | next | prev | stop
 phonia ctl output                            # the outputs; `output set <n>` plays through another one
 phonia ctl volume 60 | +5 | -5   /   phonia ctl mute   # shared outputs only
+phonia ctl quality                           # the tiers asked for and what the playing track got; `quality lossless` sets the best
 phonia ctl release                           # pause and hand the DAC back, so another program can use it
 phonia ctl seek 90                           # 1:30; `+10` / `-10` are relative
 phonia ctl shuffle on   /   phonia ctl repeat all
@@ -206,7 +212,7 @@ One connection carries requests, their responses and, once subscribed, events, a
 JSON, so `socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/phonia/phoniad.sock` is a working client:
 
 ```
-< {"type":"hello","protocol":{"major":1,"minor":4},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless"]}
+< {"type":"hello","protocol":{"major":1,"minor":5},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality"]}
 > {"id":1,"request":{"type":"hello","protocol":{"major":1,"minor":0},"client":{"name":"me","version":"0"}}}
 < {"type":"response","id":1,"ok":{"type":"ack"}}
 > {"id":2,"request":{"type":"subscribe"}}

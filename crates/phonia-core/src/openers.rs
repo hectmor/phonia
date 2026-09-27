@@ -198,14 +198,52 @@ impl TrackOpener for FileOpener {
     }
 }
 
+/// The tiers TIDAL is asked for: the best, which can be changed while the daemon runs, and the
+/// worst that will be played.
+#[derive(Debug)]
+pub struct QualityLimits {
+    max: Mutex<Quality>,
+    min: Quality,
+}
+
+impl QualityLimits {
+    pub fn new(max: Quality, min: Quality) -> Self {
+        Self {
+            max: Mutex::new(max),
+            min,
+        }
+    }
+
+    /// The best tier to ask for.
+    pub fn max(&self) -> Quality {
+        *self.max.lock().unwrap()
+    }
+
+    /// The worst tier that will be played.
+    pub fn min(&self) -> Quality {
+        self.min
+    }
+
+    /// Changes the best tier, from the next track opened on. Refused below the worst tier
+    /// accepted: nothing could play.
+    pub fn set_max(&self, max: Quality) -> Result<()> {
+        if max < self.min {
+            bail!(
+                "{max} is below the minimum quality ({}): lower tidal.min_quality to allow it",
+                self.min
+            );
+        }
+        *self.max.lock().unwrap() = max;
+        Ok(())
+    }
+}
+
 /// Opens TIDAL tracks, which a track's reference names by TIDAL track id, and streams them.
 pub struct TidalOpener {
     http: reqwest::Client,
     session: Arc<TidalSession>,
-    /// The best tier to ask for.
-    quality: Quality,
-    /// The worst tier that will be played.
-    min_quality: Quality,
+    /// The best tier to ask for, and the worst that will be played.
+    limits: Arc<QualityLimits>,
     /// The tier TIDAL delivered for each track opened from its start, so that reopening it for a
     /// seek asks for that tier again: the format must not change in the middle of a track.
     delivered: Arc<Mutex<HashMap<String, Quality>>>,
@@ -224,8 +262,7 @@ impl TidalOpener {
         Self {
             http,
             session: Arc::new(session),
-            quality,
-            min_quality: Quality::Lossless,
+            limits: Arc::new(QualityLimits::new(quality, Quality::Lossless)),
             delivered: Arc::default(),
             print_info: false,
             save_to: Mutex::new(None),
@@ -245,8 +282,7 @@ impl TidalOpener {
         Self {
             http,
             session: Arc::new(session),
-            quality,
-            min_quality: Quality::Lossless,
+            limits: Arc::new(QualityLimits::new(quality, Quality::Lossless)),
             delivered: Arc::default(),
             print_info: false,
             save_to: Mutex::new(None),
@@ -272,8 +308,14 @@ impl TidalOpener {
     /// The worst tier to play (default `lossless`): a track TIDAL only has below it fails to
     /// open, rather than playing at a quality nobody asked to accept.
     pub fn min_quality(mut self, min_quality: Quality) -> Self {
-        self.min_quality = min_quality;
+        self.limits = Arc::new(QualityLimits::new(self.limits.max(), min_quality));
         self
+    }
+
+    /// The tiers this opener asks for, which the best can be changed on while it runs. Take it
+    /// after [`TidalOpener::min_quality`]: that makes a new one.
+    pub fn limits(&self) -> Arc<QualityLimits> {
+        self.limits.clone()
     }
 
     /// Print what TIDAL says about a track (quality, bit depth, rate) whenever one is opened
@@ -314,8 +356,8 @@ impl TrackOpener for TidalOpener {
     fn open(&self, track: TrackRef, at: Duration) -> BoxFuture<'static, Result<LoadedTrack>> {
         let http = self.http.clone();
         let session = self.session.clone();
-        let quality = self.quality;
-        let min_quality = self.min_quality;
+        let quality = self.limits.max();
+        let min_quality = self.limits.min();
         let pinned = self.delivered.lock().unwrap().get(&track.0).copied();
         let ask_for = tier_to_ask(quality, at, pinned);
         let delivered_tiers = self.delivered.clone();
@@ -512,6 +554,22 @@ mod tests {
 
     fn tidal_track() -> TrackRef {
         TrackRef("123".into())
+    }
+
+    #[test]
+    fn the_best_tier_can_change_but_not_below_the_floor() {
+        let limits = QualityLimits::new(Quality::Hires, Quality::Lossless);
+        limits.set_max(Quality::Lossless).unwrap();
+        assert_eq!(limits.max(), Quality::Lossless);
+        assert_eq!(limits.min(), Quality::Lossless);
+
+        let error = limits.set_max(Quality::High).unwrap_err().to_string();
+        assert!(error.contains("min_quality"), "{error}");
+        assert_eq!(
+            limits.max(),
+            Quality::Lossless,
+            "a refused change changes nothing"
+        );
     }
 
     #[test]

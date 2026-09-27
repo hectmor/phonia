@@ -2,7 +2,7 @@
 //! device: everything except real hardware and real sockets.
 
 use phonia_core::config::OutputSpec;
-use phonia_core::openers::DispatchOpener;
+use phonia_core::openers::{DispatchOpener, QualityLimits};
 use phonia_core::output::VolumeControl as _;
 use phonia_core::output::alsa::{ProcReading, SinkReport};
 use phonia_core::output::catalog::{Entry, Mode};
@@ -88,6 +88,10 @@ async fn fixture_with(
         sinks: sinks.clone(),
         outputs,
         opener: Arc::new(DispatchOpener::new(None)),
+        quality: Some(Arc::new(QualityLimits::new(
+            phonia_core::config::Quality::Hires,
+            phonia_core::config::Quality::Lossless,
+        ))),
         reports: report_rx,
         engine: options,
     })
@@ -1404,6 +1408,63 @@ async fn a_request_after_the_connection_drops_fails_instead_of_hanging() {
     assert!(
         matches!(error, ClientError::Closed | ClientError::Io(_)),
         "{error}"
+    );
+    f.finish().await;
+}
+
+async fn range_of(client: &Client) -> Option<QualityRange> {
+    client.status().await.unwrap().quality_range
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_best_quality_is_changed_announced_and_never_set_below_the_floor() {
+    let f = fixture("max-quality", false).await;
+    let client = f.client().await;
+    assert!(
+        client
+            .server()
+            .capabilities
+            .iter()
+            .any(|capability| capability == CAP_QUALITY)
+    );
+    assert_eq!(
+        range_of(&client).await,
+        Some(QualityRange {
+            max: Quality::Hires,
+            min: Quality::Lossless
+        })
+    );
+
+    let (_, mut events) = client.subscribe().await.unwrap();
+    assert_eq!(
+        client
+            .request(Request::SetMaxQuality {
+                quality: Quality::Lossless
+            })
+            .await
+            .unwrap(),
+        Payload::Ack
+    );
+    let (_, event) = next_event(&mut events).await;
+    assert_eq!(
+        event,
+        Event::MaxQualityChanged {
+            quality: Quality::Lossless
+        }
+    );
+    assert_eq!(range_of(&client).await.unwrap().max, Quality::Lossless);
+
+    let error = client
+        .request(Request::SetMaxQuality {
+            quality: Quality::High,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(protocol_code(error), ErrorCode::BadRequest);
+    assert_eq!(
+        range_of(&client).await.unwrap().max,
+        Quality::Lossless,
+        "a refused change changes nothing"
     );
     f.finish().await;
 }

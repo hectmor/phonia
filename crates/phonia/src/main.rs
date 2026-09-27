@@ -70,6 +70,10 @@ enum Command {
         /// in the config file, else hires.
         #[arg(long, value_name = "hires|lossless|high|low")]
         quality: Option<Quality>,
+        /// The lowest quality to play: a track TIDAL only has below it fails instead of playing.
+        /// Default: [tidal] min_quality in the config file, else lossless.
+        #[arg(long, value_name = "hires|lossless|high|low")]
+        min_quality: Option<Quality>,
         /// If given, saves the downloaded bytes (fMP4/DASH or the JSON manifest) to this path.
         #[arg(long)]
         save_mp4: Option<PathBuf>,
@@ -183,6 +187,7 @@ async fn main() -> ExitCode {
             device,
             output,
             quality,
+            min_quality,
             save_mp4,
             interactive,
             shuffle,
@@ -191,6 +196,7 @@ async fn main() -> ExitCode {
             match (Overrides {
                 device,
                 max_quality: quality,
+                min_quality,
                 ..Overrides::default()
             })
             .with_output(output.as_deref())

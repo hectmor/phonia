@@ -10,7 +10,7 @@ use futures_util::StreamExt;
 use futures_util::stream;
 use phonia_core::control::Controller;
 use phonia_core::engine::{self, Command, Engine, TrackOpener};
-use phonia_core::openers::{DescribeError, DispatchOpener, Source};
+use phonia_core::openers::{DescribeError, DispatchOpener, QualityLimits, Source};
 use phonia_core::output::SinkFactory;
 use phonia_core::output::alsa::SinkReport;
 use phonia_core::queue::{ItemId, Queue, QueueTrack};
@@ -42,12 +42,15 @@ pub struct DaemonParts {
     pub engine: engine::Options,
     /// Which output the daemon is on and how to move it.
     pub outputs: Outputs,
+    /// The tiers TIDAL is asked for, if the daemon plays from TIDAL.
+    pub quality: Option<Arc<QualityLimits>>,
 }
 
 pub struct Daemon {
     controller: Controller,
     outputs: Outputs,
     opener: Arc<DispatchOpener>,
+    quality: Option<Arc<QualityLimits>>,
     events: broadcast::Sender<(u64, ipc::Event)>,
     /// The sequence number of the last event published; only changed under `publish_lock`.
     seq: AtomicU64,
@@ -80,6 +83,7 @@ impl Daemon {
             controller,
             outputs: parts.outputs,
             opener: parts.opener,
+            quality: parts.quality,
             events,
             seq: AtomicU64::new(0),
             publish_lock: Mutex::new(()),
@@ -154,9 +158,37 @@ impl Daemon {
                 &queue,
                 Some(self.outputs.route()),
                 self.outputs.volume(),
+                self.quality_range(),
             ),
             convert::queue_dto(&queue),
         )
+    }
+
+    fn quality_range(&self) -> Option<ipc::QualityRange> {
+        self.quality.as_ref().map(|limits| ipc::QualityRange {
+            max: convert::quality(limits.max()),
+            min: convert::quality(limits.min()),
+        })
+    }
+
+    /// Changes the best tier to ask TIDAL for and tells everyone.
+    fn set_max_quality(&self, quality: ipc::Quality) -> Reply {
+        let Some(limits) = &self.quality else {
+            return self::error(
+                ErrorCode::Unsupported,
+                "this daemon does not play from TIDAL",
+            );
+        };
+        let Some(tier) = convert::core_quality(quality) else {
+            return self::error(ErrorCode::BadRequest, "that quality is not known");
+        };
+        match limits.set_max(tier) {
+            Ok(()) => {
+                self.publish(|_| ipc::Event::MaxQualityChanged { quality });
+                Reply::Ok(Payload::Ack)
+            }
+            Err(error) => self::error(ErrorCode::BadRequest, &format!("{error:#}")),
+        }
     }
 
     /// The state right now, with the sequence number of the last event it includes. A snapshot
@@ -182,6 +214,7 @@ impl Daemon {
                 ipc::CAP_OUTPUT_SELECT.to_string(),
                 ipc::CAP_VOLUME.to_string(),
                 ipc::CAP_GAPLESS.to_string(),
+                ipc::CAP_QUALITY.to_string(),
             ],
         }
     }
@@ -323,6 +356,7 @@ impl Daemon {
             Request::Release => send(Command::Release),
             Request::SetVolume { percent } => self.change_volume(|volume| volume.percent = percent),
             Request::SetMute { mute } => self.change_volume(|volume| volume.muted = mute),
+            Request::SetMaxQuality { quality } => self.set_max_quality(quality),
             Request::Seek { target } => send(Command::Seek(convert::seek_target(target))),
             Request::QueueRemove { ids } => {
                 let ids: Vec<ItemId> = ids.iter().map(|id| ItemId(id.0)).collect();
