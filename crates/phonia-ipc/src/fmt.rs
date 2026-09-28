@@ -1,6 +1,8 @@
 //! Turning wire values into short text, shared by every client that prints them.
 
-use crate::dto::StreamQuality;
+use crate::dto::{
+    AlbumSummary, ArtistRef, ArtistSummary, PlaylistSummary, StreamQuality, TrackSummary,
+};
 
 /// `1:30`, or `1:02:05` from an hour on.
 pub fn ms(ms: u64) -> String {
@@ -35,10 +37,96 @@ pub fn sample_rate(hz: u32) -> String {
     }
 }
 
+/// `Korn, Jonathan Davis`; empty when there are no artists.
+pub fn artists(artists: &[ArtistRef]) -> String {
+    artists
+        .iter()
+        .map(|artist| artist.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The name with its version, `Falling Away from Me (Remastered)`.
+fn titled(title: &str, version: Option<&str>) -> String {
+    match version {
+        Some(version) if !version.is_empty() => format!("{title} ({version})"),
+        _ => title.to_string(),
+    }
+}
+
+/// `Korn - Here to Stay (Remastered) - Untouchables - 4:31 - hires`, leaving out what is not known.
+pub fn track(track: &TrackSummary) -> String {
+    let mut parts = Vec::new();
+    let artists = artists(&track.artists);
+    let title = titled(&track.title, track.version.as_deref());
+    parts.push(if artists.is_empty() {
+        title
+    } else {
+        format!("{artists} - {title}")
+    });
+    if let Some(album) = &track.album {
+        parts.push(album.title.clone());
+    }
+    if let Some(ms) = track.duration_ms {
+        parts.push(self::ms(ms));
+    }
+    if let Some(quality) = track.quality {
+        parts.push(quality.to_string());
+    }
+    if track.explicit {
+        parts.push("explicit".to_string());
+    }
+    if !track.streamable {
+        parts.push("not available".to_string());
+    }
+    parts.join(" - ")
+}
+
+/// `Korn - Untouchables - 2002 - 14 tracks - hires`.
+pub fn album(album: &AlbumSummary) -> String {
+    let mut parts = Vec::new();
+    let artists = artists(&album.artists);
+    let title = titled(&album.title, album.version.as_deref());
+    parts.push(if artists.is_empty() {
+        title
+    } else {
+        format!("{artists} - {title}")
+    });
+    if let Some(year) = album.release_date.as_deref().and_then(|date| date.get(..4)) {
+        parts.push(year.to_string());
+    }
+    if let Some(count) = album.track_count {
+        parts.push(format!("{count} tracks"));
+    }
+    if let Some(quality) = album.quality {
+        parts.push(quality.to_string());
+    }
+    if album.explicit {
+        parts.push("explicit".to_string());
+    }
+    parts.join(" - ")
+}
+
+pub fn artist(artist: &ArtistSummary) -> String {
+    artist.name.clone()
+}
+
+/// `Nu metal - TIDAL - 40 tracks`.
+pub fn playlist(playlist: &PlaylistSummary) -> String {
+    let mut parts = vec![playlist.title.clone()];
+    if let Some(creator) = &playlist.creator {
+        parts.push(creator.clone());
+    }
+    if let Some(count) = playlist.track_count {
+        parts.push(format!("{count} tracks"));
+    }
+    parts.join(" - ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dto::Quality;
+    use crate::dto::{AlbumRef, Quality};
 
     #[test]
     fn minutes_below_an_hour_seconds_at_two_digits_and_hours_from_3600() {
@@ -70,5 +158,95 @@ mod tests {
         };
         assert_eq!(stream_quality(&same), "hires");
         assert_eq!(stream_quality(&fell), "lossless (asked for hires)");
+    }
+
+    fn a_track() -> TrackSummary {
+        TrackSummary {
+            id: "1".into(),
+            title: "Here to Stay".into(),
+            version: Some("Remastered".into()),
+            artists: vec![
+                ArtistRef {
+                    id: "1".into(),
+                    name: "Korn".into(),
+                },
+                ArtistRef {
+                    id: "2".into(),
+                    name: "Jonathan Davis".into(),
+                },
+            ],
+            album: Some(AlbumRef {
+                id: "9".into(),
+                title: "Untouchables".into(),
+            }),
+            duration_ms: Some(271_000),
+            explicit: true,
+            track_number: Some(2),
+            quality: Some(Quality::Hires),
+            streamable: true,
+        }
+    }
+
+    #[test]
+    fn a_track_reads_as_one_line_with_what_is_known() {
+        assert_eq!(
+            track(&a_track()),
+            "Korn, Jonathan Davis - Here to Stay (Remastered) - Untouchables - 4:31 - hires - explicit"
+        );
+        let bare = TrackSummary {
+            id: "2".into(),
+            title: "Untitled".into(),
+            version: Some(String::new()),
+            artists: vec![],
+            album: None,
+            duration_ms: None,
+            explicit: false,
+            track_number: None,
+            quality: None,
+            streamable: false,
+        };
+        assert_eq!(track(&bare), "Untitled - not available");
+    }
+
+    #[test]
+    fn an_album_shows_its_year_and_size() {
+        let album = AlbumSummary {
+            id: "9".into(),
+            title: "Untouchables".into(),
+            version: None,
+            artists: vec![ArtistRef {
+                id: "1".into(),
+                name: "Korn".into(),
+            }],
+            release_date: Some("2002-06-11".into()),
+            track_count: Some(14),
+            duration_ms: None,
+            explicit: false,
+            quality: Some(Quality::Lossless),
+        };
+        assert_eq!(
+            super::album(&album),
+            "Korn - Untouchables - 2002 - 14 tracks - lossless"
+        );
+    }
+
+    #[test]
+    fn a_playlist_shows_its_creator_and_size() {
+        let playlist = PlaylistSummary {
+            id: "u".into(),
+            title: "Nu metal".into(),
+            creator: Some("TIDAL".into()),
+            description: None,
+            track_count: Some(40),
+            duration_ms: None,
+        };
+        assert_eq!(super::playlist(&playlist), "Nu metal - TIDAL - 40 tracks");
+        assert_eq!(
+            artist(&ArtistSummary {
+                id: "1".into(),
+                name: "Korn".into()
+            }),
+            "Korn"
+        );
     }
 }

@@ -274,3 +274,111 @@ pub enum EndReason {
     Interrupted,
     Failed,
 }
+
+// --- The catalog (since 1.6) ---------------------------------------------------------------------
+
+/// The kinds of thing TIDAL's catalog has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogKind {
+    Tracks,
+    Albums,
+    Artists,
+    Playlists,
+    /// A kind a newer daemon has and this version does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtistRef {
+    /// TIDAL's id, as text.
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlbumRef {
+    pub id: String,
+    pub title: String,
+}
+
+fn yes() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackSummary {
+    pub id: String,
+    pub title: String,
+    /// "Remastered", "Live"...
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub artists: Vec<ArtistRef>,
+    #[serde(default)]
+    pub album: Option<AlbumRef>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub explicit: bool,
+    #[serde(default)]
+    pub track_number: Option<u32>,
+    /// The best tier TIDAL has the track in.
+    #[serde(default)]
+    pub quality: Option<Quality>,
+    /// Whether it can be played where the daemon is.
+    #[serde(default = "yes")]
+    pub streamable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlbumSummary {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub artists: Vec<ArtistRef>,
+    /// `2011-05-31`.
+    #[serde(default)]
+    pub release_date: Option<String>,
+    #[serde(default)]
+    pub track_count: Option<u32>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub explicit: bool,
+    #[serde(default)]
+    pub quality: Option<Quality>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtistSummary {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaylistSummary {
+    /// A UUID.
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub creator: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub track_count: Option<u32>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+}
+
+/// One page of a list that may be longer: `total` is how many there are in all, `offset` where
+/// this page starts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Page<T> {
+    pub items: Vec<T>,
+    pub total: u64,
+    pub offset: u64,
+}

@@ -2,6 +2,7 @@
 //! `phonia-ipc`): nothing internal is serialized directly, so an internal refactor can't change
 //! what clients see by accident.
 
+use phonia_core::catalog::{self as tidal_catalog, CatalogError};
 use phonia_core::config::Quality;
 use phonia_core::decode::SourceSpec;
 use phonia_core::engine::{self, Delivered, EndReason, OutputState, ReleaseReason, SeekTarget};
@@ -126,6 +127,94 @@ pub fn stream_quality(delivered: &Delivered) -> ipc::StreamQuality {
         requested: quality(delivered.requested),
         delivered: quality(delivered.delivered),
     }
+}
+
+pub fn catalog_kind(kind: ipc::CatalogKind) -> Option<tidal_catalog::Kind> {
+    match kind {
+        ipc::CatalogKind::Tracks => Some(tidal_catalog::Kind::Tracks),
+        ipc::CatalogKind::Albums => Some(tidal_catalog::Kind::Albums),
+        ipc::CatalogKind::Artists => Some(tidal_catalog::Kind::Artists),
+        ipc::CatalogKind::Playlists => Some(tidal_catalog::Kind::Playlists),
+        ipc::CatalogKind::Unknown => None,
+    }
+}
+
+fn artist_ref(artist: &tidal_catalog::ArtistRef) -> ipc::ArtistRef {
+    ipc::ArtistRef {
+        id: artist.id.clone(),
+        name: artist.name.clone(),
+    }
+}
+
+pub fn track_summary(track: &tidal_catalog::Track) -> ipc::TrackSummary {
+    ipc::TrackSummary {
+        id: track.id.clone(),
+        title: track.title.clone(),
+        version: track.version.clone(),
+        artists: track.artists.iter().map(artist_ref).collect(),
+        album: track.album.as_ref().map(|album| ipc::AlbumRef {
+            id: album.id.clone(),
+            title: album.title.clone(),
+        }),
+        duration_ms: track.duration.map(ms),
+        explicit: track.explicit,
+        track_number: track.track_number,
+        quality: track.quality.map(quality),
+        streamable: track.streamable,
+    }
+}
+
+pub fn album_summary(album: &tidal_catalog::Album) -> ipc::AlbumSummary {
+    ipc::AlbumSummary {
+        id: album.id.clone(),
+        title: album.title.clone(),
+        version: album.version.clone(),
+        artists: album.artists.iter().map(artist_ref).collect(),
+        release_date: album.release_date.clone(),
+        track_count: album.track_count,
+        duration_ms: album.duration.map(ms),
+        explicit: album.explicit,
+        quality: album.quality.map(quality),
+    }
+}
+
+pub fn artist_summary(artist: &tidal_catalog::Artist) -> ipc::ArtistSummary {
+    ipc::ArtistSummary {
+        id: artist.id.clone(),
+        name: artist.name.clone(),
+    }
+}
+
+pub fn playlist_summary(playlist: &tidal_catalog::Playlist) -> ipc::PlaylistSummary {
+    ipc::PlaylistSummary {
+        id: playlist.id.clone(),
+        title: playlist.title.clone(),
+        creator: playlist.creator.clone(),
+        description: playlist.description.clone(),
+        track_count: playlist.track_count,
+        duration_ms: playlist.duration.map(ms),
+    }
+}
+
+/// A page of the catalog as clients see it, each item mapped by `each`.
+pub fn page<T, U>(page: &tidal_catalog::Page<T>, each: impl Fn(&T) -> U) -> ipc::Page<U> {
+    ipc::Page {
+        items: page.items.iter().map(each).collect(),
+        total: page.total,
+        offset: page.offset,
+    }
+}
+
+/// How the catalog's failures are told to clients.
+pub fn catalog_error(error: &CatalogError) -> (ipc::ErrorCode, String) {
+    let code = match error {
+        CatalogError::NotLoggedIn(_) => ipc::ErrorCode::NotLoggedIn,
+        CatalogError::Unavailable(_) => ipc::ErrorCode::Unavailable,
+        CatalogError::RateLimited => ipc::ErrorCode::RateLimited,
+        CatalogError::NotFound => ipc::ErrorCode::NotFound,
+        CatalogError::Invalid(_) => ipc::ErrorCode::BadRequest,
+    };
+    (code, error.to_string())
 }
 
 pub fn status_dto(

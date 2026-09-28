@@ -1,8 +1,9 @@
 //! The messages: what a client may ask, and what the daemon answers and announces.
 
 use crate::dto::{
-    EndReason, ItemId, OutputInfo, Quality, Queue, ReleaseReason, Repeat, Route, SinkReport, Spec,
-    State, Status, StreamQuality,
+    AlbumSummary, ArtistSummary, CatalogKind, EndReason, ItemId, OutputInfo, Page, PlaylistSummary,
+    Quality, Queue, ReleaseReason, Repeat, Route, SinkReport, Spec, State, Status, StreamQuality,
+    TrackSummary,
 };
 use serde::{Deserialize, Serialize};
 
@@ -23,8 +24,12 @@ pub const CAP_GAPLESS: &str = "gapless";
 /// changed while it runs (protocol 1.5).
 pub const CAP_QUALITY: &str = "quality";
 
+/// Capability: the daemon can search TIDAL's catalog (protocol 1.6). Only advertised by a daemon
+/// that has a TIDAL login to do it with.
+pub const CAP_CATALOG: &str = "catalog";
+
 /// The protocol version this crate speaks.
-pub const PROTOCOL: Version = Version { major: 1, minor: 5 };
+pub const PROTOCOL: Version = Version { major: 1, minor: 6 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Version {
@@ -152,6 +157,18 @@ pub enum Request {
     SetMaxQuality {
         quality: Quality,
     },
+    /// Searches TIDAL's catalog (since 1.6). `kinds` empty means all of them; `offset` and `limit`
+    /// page each kind (`limit` defaults to 50 and is capped at 300). Answered with
+    /// [`Payload::SearchResults`], where a kind that was not asked for is absent.
+    Search {
+        query: String,
+        #[serde(default)]
+        kinds: Vec<CatalogKind>,
+        #[serde(default)]
+        offset: u32,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
     /// Adds tracks, resolving their titles and lengths first.
     QueueAdd {
         tracks: Vec<NewTrack>,
@@ -194,6 +211,12 @@ pub enum ErrorCode {
     NotFound,
     /// The request is fine but this output can't do it (a volume on an exclusive card). Since 1.3.
     Unsupported,
+    /// There is no TIDAL login, or TIDAL no longer accepts it: run `phonia login`. Since 1.6.
+    NotLoggedIn,
+    /// TIDAL, or the network to it, is not answering. Since 1.6.
+    Unavailable,
+    /// TIDAL is being asked too often, or the daemon has too many searches under way. Since 1.6.
+    RateLimited,
     /// The playback engine is gone.
     EngineGone,
     Internal,
@@ -241,6 +264,18 @@ pub enum Payload {
     Outputs {
         outputs: Vec<OutputInfo>,
         current: Option<String>,
+    },
+    /// What a search found (since 1.6): one page of each kind that was asked for.
+    SearchResults {
+        query: String,
+        #[serde(default)]
+        tracks: Option<Page<TrackSummary>>,
+        #[serde(default)]
+        albums: Option<Page<AlbumSummary>>,
+        #[serde(default)]
+        artists: Option<Page<ArtistSummary>>,
+        #[serde(default)]
+        playlists: Option<Page<PlaylistSummary>>,
     },
     /// The state right now, and the sequence number of the last event it includes.
     Snapshot {

@@ -277,9 +277,10 @@ fn the_server_banner() {
                 CAP_VOLUME.into(),
                 CAP_GAPLESS.into(),
                 CAP_QUALITY.into(),
+                CAP_CATALOG.into(),
             ],
         }),
-        r#"{"type":"hello","protocol":{"major":1,"minor":5},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality"]}"#,
+        r#"{"type":"hello","protocol":{"major":1,"minor":6},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","catalog"]}"#,
     );
 }
 
@@ -686,6 +687,126 @@ fn a_tier_from_a_newer_daemon_is_unknown_not_an_error() {
     assert!(!told.fell_back());
 }
 
+fn a_track_summary() -> TrackSummary {
+    TrackSummary {
+        id: "33723914".into(),
+        title: "Here to Stay".into(),
+        version: None,
+        artists: vec![ArtistRef {
+            id: "780".into(),
+            name: "Korn".into(),
+        }],
+        album: Some(AlbumRef {
+            id: "33723912".into(),
+            title: "Untouchables".into(),
+        }),
+        duration_ms: Some(271_000),
+        explicit: false,
+        track_number: Some(2),
+        quality: Some(Quality::Hires),
+        streamable: true,
+    }
+}
+
+#[test]
+fn search_requests_and_their_defaults() {
+    request(
+        1,
+        Request::Search {
+            query: "korn".into(),
+            kinds: vec![CatalogKind::Albums, CatalogKind::Tracks],
+            offset: 50,
+            limit: Some(25),
+        },
+        r#"{"id":1,"request":{"type":"search","query":"korn","kinds":["albums","tracks"],"offset":50,"limit":25}}"#,
+    );
+    // Only the query is required: every kind, from the start, the daemon's page size.
+    let minimal: ClientMessage =
+        serde_json::from_str(r#"{"id":2,"request":{"type":"search","query":"x"}}"#).unwrap();
+    assert_eq!(
+        minimal.request,
+        Request::Search {
+            query: "x".into(),
+            kinds: vec![],
+            offset: 0,
+            limit: None
+        }
+    );
+}
+
+#[test]
+fn search_results_carry_a_page_of_each_kind_asked_for() {
+    response(
+        3,
+        Reply::Ok(Payload::SearchResults {
+            query: "korn".into(),
+            tracks: Some(Page {
+                items: vec![a_track_summary()],
+                total: 123,
+                offset: 0,
+            }),
+            albums: None,
+            artists: Some(Page {
+                items: vec![ArtistSummary {
+                    id: "780".into(),
+                    name: "Korn".into(),
+                }],
+                total: 1,
+                offset: 0,
+            }),
+            playlists: None,
+        }),
+        r#"{"type":"response","id":3,"ok":{"type":"search_results","query":"korn","tracks":{"items":[{"id":"33723914","title":"Here to Stay","version":null,"artists":[{"id":"780","name":"Korn"}],"album":{"id":"33723912","title":"Untouchables"},"duration_ms":271000,"explicit":false,"track_number":2,"quality":"hires","streamable":true}],"total":123,"offset":0},"albums":null,"artists":{"items":[{"id":"780","name":"Korn"}],"total":1,"offset":0},"playlists":null}}"#,
+    );
+}
+
+#[test]
+fn the_catalog_errors_have_their_own_codes() {
+    for (code, text) in [
+        (ErrorCode::NotLoggedIn, "not_logged_in"),
+        (ErrorCode::Unavailable, "unavailable"),
+        (ErrorCode::RateLimited, "rate_limited"),
+    ] {
+        assert_eq!(serde_json::to_string(&code).unwrap(), format!("\"{text}\""));
+    }
+}
+
+#[test]
+fn summaries_from_a_daemon_that_says_less_still_parse() {
+    // Only the id and the title are required of a track; the rest has defaults.
+    let track: TrackSummary = serde_json::from_str(r#"{"id":"1","title":"t"}"#).unwrap();
+    assert!(track.artists.is_empty() && track.album.is_none() && track.streamable);
+    assert!(!track.explicit && track.quality.is_none());
+    let album: AlbumSummary = serde_json::from_str(r#"{"id":"1","title":"t"}"#).unwrap();
+    assert!(album.artists.is_empty() && album.track_count.is_none());
+    let playlist: PlaylistSummary = serde_json::from_str(r#"{"id":"u","title":"t"}"#).unwrap();
+    assert!(playlist.creator.is_none());
+}
+
+#[test]
+fn a_kind_from_a_newer_daemon_is_unknown_not_an_error() {
+    let kind: CatalogKind = serde_json::from_str(r#""podcasts""#).unwrap();
+    assert_eq!(kind, CatalogKind::Unknown);
+    // And a search results payload that has a kind this version lacks still parses.
+    let payload: Payload = serde_json::from_str(
+        r#"{"type":"search_results","query":"q","podcasts":{"items":[],"total":0,"offset":0}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        payload,
+        Payload::SearchResults { tracks: None, .. }
+    ));
+}
+
+#[test]
+fn a_1_5_daemon_has_no_catalog_capability() {
+    let hello = r#"{"type":"hello","protocol":{"major":1,"minor":5},"server":{"name":"phoniad","version":"0.1.0","pid":1},"capabilities":["volume","quality"]}"#;
+    let ServerMessage::Hello(hello) = serde_json::from_str(hello).unwrap() else {
+        panic!("not a hello")
+    };
+    assert!(!hello.capabilities.iter().any(|c| c == CAP_CATALOG));
+}
+
 #[test]
 fn a_1_4_status_and_track_say_nothing_of_quality() {
     let old = r#"{"state":"playing","track":{"item_id":7,"source":"tidal:1","title":"t","duration_ms":1000},"spec":null,"position_ms":0,"duration_ms":null,"output":{"state":"open"},"route":null,"volume":null}"#;
@@ -904,7 +1025,7 @@ fn versions_are_compatible_across_minors_but_not_majors() {
     assert!(v(1, 0).compatible_with(v(1, 7)));
     assert!(v(1, 7).compatible_with(v(1, 0)));
     assert!(!v(1, 0).compatible_with(v(2, 0)));
-    assert_eq!(PROTOCOL, v(1, 5));
+    assert_eq!(PROTOCOL, v(1, 6));
 }
 
 #[test]

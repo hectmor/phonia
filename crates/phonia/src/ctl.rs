@@ -3,9 +3,10 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use phonia_ipc::{
-    AddAt, CAP_OUTPUT_RELEASE, CAP_OUTPUT_SELECT, CAP_QUALITY, CAP_VOLUME, Client, ClientError,
-    ClientInfo, Event, ItemId, NewTrack, Output, OutputInfo, OutputMode, Payload, Quality,
-    QualityRange, Queue, ReleaseReason, Repeat, Request, SeekTarget, State, Status, Volume,
+    AddAt, CAP_CATALOG, CAP_OUTPUT_RELEASE, CAP_OUTPUT_SELECT, CAP_QUALITY, CAP_VOLUME,
+    CatalogKind, Client, ClientError, ClientInfo, Event, ItemId, NewTrack, Output, OutputInfo,
+    OutputMode, Payload, Quality, QualityRange, Queue, ReleaseReason, Repeat, Request, SeekTarget,
+    State, Status, Volume,
 };
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -55,6 +56,22 @@ pub enum CtlCommand {
     /// (`[tidal] min_quality`) is refused.
     Quality {
         tier: Option<Quality>,
+    },
+    /// Searches TIDAL: `search korn`, or `search nu metal --kind albums --kind tracks --limit 10`.
+    /// Tracks are printed with the `tidal:<id>` that `queue add` takes.
+    Search {
+        /// What to look for (several words are one search).
+        #[arg(required = true)]
+        query: Vec<String>,
+        /// Only this kind of result; may be given more than once. Default: all four.
+        #[arg(long = "kind", value_enum)]
+        kinds: Vec<SearchKind>,
+        /// How many of each kind, 1 to 300. Default: 50.
+        #[arg(long)]
+        limit: Option<u32>,
+        /// Where to start, to see the next page.
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
     },
     /// Mutes (`on`), unmutes (`off`) or flips (`toggle`, the default) a shared output; the level is kept.
     Mute {
@@ -132,6 +149,26 @@ pub enum QueueAction {
 pub enum Switch {
     On,
     Off,
+}
+
+/// What `search --kind` can name.
+#[derive(Clone, Copy, ValueEnum)]
+pub enum SearchKind {
+    Tracks,
+    Albums,
+    Artists,
+    Playlists,
+}
+
+impl From<SearchKind> for CatalogKind {
+    fn from(kind: SearchKind) -> Self {
+        match kind {
+            SearchKind::Tracks => CatalogKind::Tracks,
+            SearchKind::Albums => CatalogKind::Albums,
+            SearchKind::Artists => CatalogKind::Artists,
+            SearchKind::Playlists => CatalogKind::Playlists,
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -218,6 +255,12 @@ pub async fn run(args: CtlArgs, config_flag: Option<&Path>) -> Result<()> {
         }
         CtlCommand::Volume { change } => volume(&client, json, change).await,
         CtlCommand::Quality { tier } => quality(&client, json, tier).await,
+        CtlCommand::Search {
+            query,
+            kinds,
+            limit,
+            offset,
+        } => search(&client, json, query.join(" "), kinds, limit, offset).await,
         CtlCommand::Mute { mode } => mute(&client, json, mode.unwrap_or(MuteMode::Toggle)).await,
         CtlCommand::Output { action } => output(&client, json, action).await,
         CtlCommand::Queue { action } => queue(&client, json, action).await,
@@ -428,6 +471,89 @@ fn format_range(range: &QualityRange) -> String {
         "Quality: asking for up to {}, playing nothing below {}",
         range.max, range.min
     )
+}
+
+async fn search(
+    client: &Client,
+    json: bool,
+    query: String,
+    kinds: Vec<SearchKind>,
+    limit: Option<u32>,
+    offset: u32,
+) -> Result<()> {
+    if !client
+        .server()
+        .capabilities
+        .iter()
+        .any(|capability| capability == CAP_CATALOG)
+    {
+        bail!(
+            "this phoniad cannot search TIDAL: it needs protocol 1.6 and a TIDAL login \
+             (run `phonia login`, then restart it)"
+        );
+    }
+    let payload = client
+        .request(Request::Search {
+            query,
+            kinds: kinds.into_iter().map(CatalogKind::from).collect(),
+            offset,
+            limit,
+        })
+        .await?;
+    print_payload(json, &payload, || format_search(&payload))
+}
+
+/// One section per kind that was asked for, each row numbered from the start of the list and
+/// ending with what to give the other commands.
+fn format_search(payload: &Payload) -> String {
+    let Payload::SearchResults {
+        query,
+        tracks,
+        albums,
+        artists,
+        playlists,
+    } = payload
+    else {
+        return "unexpected answer".to_string();
+    };
+    fn section<T>(
+        text: &mut String,
+        title: &str,
+        page: &Option<phonia_ipc::Page<T>>,
+        row: impl Fn(&T) -> String,
+    ) {
+        let Some(page) = page else { return };
+        text.push_str(&format!(
+            "\n\n{title} ({} of {}):",
+            page.items.len(),
+            page.total
+        ));
+        if page.items.is_empty() {
+            text.push_str("\n  none");
+        }
+        for (index, item) in page.items.iter().enumerate() {
+            let number = page.offset as usize + index + 1;
+            text.push_str(&format!("\n {number:>3}. {}", row(item)));
+        }
+    }
+    let mut text = format!("Search for {query:?}:");
+    section(&mut text, "Tracks", tracks, |track| {
+        format!("{}   tidal:{}", phonia_ipc::fmt::track(track), track.id)
+    });
+    section(&mut text, "Albums", albums, |album| {
+        format!("{}   album {}", phonia_ipc::fmt::album(album), album.id)
+    });
+    section(&mut text, "Artists", artists, |artist| {
+        format!("{}   artist {}", phonia_ipc::fmt::artist(artist), artist.id)
+    });
+    section(&mut text, "Playlists", playlists, |playlist| {
+        format!(
+            "{}   playlist {}",
+            phonia_ipc::fmt::playlist(playlist),
+            playlist.id
+        )
+    });
+    text
 }
 
 async fn mute(client: &Client, json: bool, mode: MuteMode) -> Result<()> {
@@ -1404,5 +1530,56 @@ mod tests {
         status.quality_range = None;
         status.track = None;
         assert!(format_quality_status(&status).contains("does not play from TIDAL"));
+    }
+
+    #[test]
+    fn a_search_prints_a_section_per_kind_with_what_to_give_the_other_commands() {
+        use phonia_ipc::{AlbumRef, ArtistRef, ArtistSummary, Page, TrackSummary};
+        let payload = Payload::SearchResults {
+            query: "korn".into(),
+            tracks: Some(Page {
+                items: vec![TrackSummary {
+                    id: "33723914".into(),
+                    title: "Here to Stay".into(),
+                    version: None,
+                    artists: vec![ArtistRef {
+                        id: "780".into(),
+                        name: "Korn".into(),
+                    }],
+                    album: Some(AlbumRef {
+                        id: "9".into(),
+                        title: "Untouchables".into(),
+                    }),
+                    duration_ms: Some(271_000),
+                    explicit: false,
+                    track_number: Some(2),
+                    quality: Some(Quality::Hires),
+                    streamable: true,
+                }],
+                total: 123,
+                offset: 50,
+            }),
+            albums: Some(Page {
+                items: vec![],
+                total: 0,
+                offset: 0,
+            }),
+            artists: Some(Page {
+                items: vec![ArtistSummary {
+                    id: "780".into(),
+                    name: "Korn".into(),
+                }],
+                total: 1,
+                offset: 0,
+            }),
+            playlists: None,
+        };
+        assert_eq!(
+            format_search(&payload),
+            "Search for \"korn\":\n\
+             \nTracks (1 of 123):\n  51. Korn - Here to Stay - Untouchables - 4:31 - hires   tidal:33723914\n\
+             \nAlbums (0 of 0):\n  none\n\
+             \nArtists (1 of 1):\n   1. Korn   artist 780"
+        );
     }
 }

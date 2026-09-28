@@ -130,6 +130,18 @@ gapless = true          # join a track to the next one of the same format with n
   word that isn't an option stops it with the file, the line and what was expected, instead of
   being ignored and playing on the wrong card. A missing file just means the defaults; a file you
   named with `--config` (or `PHONIA_CONFIG`) that doesn't exist is an error.
+- **Searching TIDAL** (`phonia ctl search <words> [--kind tracks|albums|artists|playlists]...
+  [--limit N] [--offset N]`, and the request `search` of protocol 1.6, advertised as the `catalog`
+  capability by a daemon that has a TIDAL login): one page of each kind asked for, up to 300 each
+  (50 by default), with the total so a client can ask for the next page. Results say when a track
+  or an album is available in hi-res, which TIDAL tells apart from plain lossless only in a
+  separate field. A kind that was not asked for is absent, not an empty page. The daemon talks to
+  TIDAL's API directly, not through `tidlers`' search calls, which fail a whole search if one
+  field is missing. A search can take a second or two, so the daemon runs it beside the rest of
+  the connection's requests (at most four at once per connection, then it answers
+  `rate_limited` at once) instead of holding up the play and pause behind it. Failures come with
+  their own error codes: `not_logged_in`, `unavailable` (TIDAL or the network) and
+  `rate_limited`.
 - `phonia config path` prints which file is used, and `phonia config show` prints every setting
   with where its value comes from (the file or the default). `--config <file>` (or the
   `PHONIA_CONFIG` environment variable) selects another file, also for `phoniad`.
@@ -195,6 +207,7 @@ phonia ctl pause | resume | toggle | next | prev | stop
 phonia ctl output                            # the outputs; `output set <n>` plays through another one
 phonia ctl volume 60 | +5 | -5   /   phonia ctl mute   # shared outputs only
 phonia ctl quality                           # the tiers asked for and what the playing track got; `quality lossless` sets the best
+phonia ctl search nu metal --kind albums     # search TIDAL; tracks print the `tidal:<id>` that `queue add` takes
 phonia ctl release                           # pause and hand the DAC back, so another program can use it
 phonia ctl seek 90                           # 1:30; `+10` / `-10` are relative
 phonia ctl shuffle on   /   phonia ctl repeat all
@@ -233,7 +246,7 @@ One connection carries requests, their responses and, once subscribed, events, a
 JSON, so `socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/phonia/phoniad.sock` is a working client:
 
 ```
-< {"type":"hello","protocol":{"major":1,"minor":5},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality"]}
+< {"type":"hello","protocol":{"major":1,"minor":6},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","catalog"]}
 > {"id":1,"request":{"type":"hello","protocol":{"major":1,"minor":0},"client":{"name":"me","version":"0"}}}
 < {"type":"response","id":1,"ok":{"type":"ack"}}
 > {"id":2,"request":{"type":"subscribe"}}
