@@ -87,12 +87,11 @@ fn draw_main(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
     // The search has its own layout inside the panel: the line, the tabs and the results, or an
     // album or a playlist opened from one of them.
     if state.section() == Section::Search {
-        let title = match state.search_views.top() {
-            Some(crate::browse::View::TrackList(view)) => {
-                format!("{} \u{203a} {}", Section::Search.title(), view.title())
-            }
-            None => Section::Search.title().to_string(),
-        };
+        let crumbs = state.search_views.titles();
+        let title = std::iter::once(Section::Search.title())
+            .chain(crumbs)
+            .collect::<Vec<_>>()
+            .join(" \u{203a} ");
         let block = panel(&title, focused, theme);
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -1139,6 +1138,137 @@ mod tests {
     #[test]
     fn a_narrow_terminal_does_not_break_the_album_view() {
         let state = open_album_view();
+        for (w, h) in [(0, 0), (1, 1), (16, 4), (20, 5), (40, 8)] {
+            let _ = screen(&state, w, h);
+        }
+    }
+
+    /// A search of "korn" that found one artist, opened, and loaded: two top tracks, one album.
+    fn open_artist_view() -> State {
+        use crate::app::{Tag, submit_search};
+        let mut state = in_the_search();
+        submit_search(&mut state, "korn");
+        let generation = state.search.generation;
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::Search { generation },
+                result: Ok(phonia_ipc::Payload::SearchResults {
+                    query: "korn".into(),
+                    tracks: None,
+                    albums: None,
+                    artists: Some(phonia_ipc::Page {
+                        items: vec![phonia_ipc::ArtistSummary {
+                            id: "780".into(),
+                            name: "Korn".into(),
+                        }],
+                        total: 1,
+                        offset: 0,
+                    }),
+                    playlists: None,
+                }),
+            },
+        );
+        press(&mut state, 'l');
+        press(&mut state, ']');
+        press(&mut state, ']'); // Artists
+        let (tag, _) = tagged_request(press_key(&mut state, KeyCode::Enter));
+        let Tag::View { serial } = tag else {
+            panic!("not a view tag")
+        };
+        let track = |id: &str, title: &str| phonia_ipc::TrackSummary {
+            id: id.into(),
+            title: title.into(),
+            version: None,
+            artists: vec![],
+            album: None,
+            duration_ms: Some(75_000),
+            explicit: false,
+            track_number: None,
+            volume_number: None,
+            quality: Some(phonia_ipc::Quality::Hires),
+            streamable: true,
+        };
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::View { serial },
+                result: Ok(phonia_ipc::Payload::Artist {
+                    artist: phonia_ipc::ArtistSummary {
+                        id: "780".into(),
+                        name: "Korn".into(),
+                    },
+                    bio: Some("A nu metal band.\nMore about it.".into()),
+                    top_tracks: phonia_ipc::Page {
+                        items: vec![track("1", "Freak On a Leash"), track("2", "Blind")],
+                        total: 300,
+                        offset: 0,
+                    },
+                    albums: phonia_ipc::Page {
+                        items: vec![phonia_ipc::AlbumSummary {
+                            id: "9".into(),
+                            title: "Issues".into(),
+                            version: None,
+                            artists: vec![],
+                            release_date: Some("1999-11-16".into()),
+                            track_count: Some(16),
+                            duration_ms: None,
+                            explicit: true,
+                            quality: Some(phonia_ipc::Quality::Hires),
+                            kind: None,
+                            copyright: None,
+                        }],
+                        total: 35,
+                        offset: 0,
+                    },
+                    singles: phonia_ipc::Page {
+                        items: vec![],
+                        total: 0,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn an_artist_page_shows_its_name_bio_and_tabs_with_counts() {
+        let state = open_artist_view();
+        let text = screen(&state, 100, 14);
+        assert!(text.contains("Korn"), "{text}");
+        assert!(text.contains("A nu metal band."), "{text}");
+        assert!(
+            !text.contains("More about it."),
+            "only the first line of the bio: {text}"
+        );
+        assert!(text.contains("Top tracks (300)"), "{text}");
+        assert!(text.contains("Albums (35)"), "{text}");
+        assert!(text.contains("EPs & singles (0)"), "{text}");
+        assert!(text.contains("Freak On a Leash"), "{text}");
+    }
+
+    #[test]
+    fn switching_the_artists_tab_shows_its_albums() {
+        let mut state = open_artist_view();
+        press(&mut state, ']');
+        let text = screen(&state, 100, 14);
+        assert!(text.contains("Issues"), "{text}");
+        assert!(!text.contains("Freak On a Leash"), "{text}");
+    }
+
+    #[test]
+    fn an_empty_list_says_so() {
+        let mut state = open_artist_view();
+        press(&mut state, ']');
+        press(&mut state, ']'); // EPs & singles, empty
+        let text = screen(&state, 100, 14);
+        assert!(text.contains("No albums."), "{text}");
+    }
+
+    #[test]
+    fn a_narrow_terminal_does_not_break_the_artist_view() {
+        let state = open_artist_view();
         for (w, h) in [(0, 0), (1, 1), (16, 4), (20, 5), (40, 8)] {
             let _ = screen(&state, w, h);
         }
