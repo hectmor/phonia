@@ -3,11 +3,18 @@
 use crate::cursor::Cursor;
 use crate::keymap::{self, Action, Key, Resolution};
 use crossterm::event::KeyEvent;
-use phonia_ipc::{Event, Queue, Request, ServerInfo, Status, Track, Version};
+use phonia_ipc::{
+    CAP_VOLUME, Event, Queue, Repeat, Request, SeekTarget, ServerInfo, Status, Track, Version,
+};
 use std::time::Duration;
 
 /// How often the interface wakes up on its own (see [`Msg::Tick`]).
 pub const TICK: Duration = Duration::from_millis(250);
+
+/// How far `<` and `>` move within the track.
+const SEEK_STEP_MS: u64 = 10_000;
+/// How much `+` and `-` change the volume, in percent.
+const VOLUME_STEP: i16 = 5;
 
 /// The panels the user can be in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -73,6 +80,8 @@ pub struct State {
     /// The selected row of the sidebar, which is also the section shown.
     pub sidebar: Cursor,
     pub help: bool,
+    /// How many lines the help is scrolled down, when it is longer than the screen.
+    pub help_scroll: usize,
     /// Keys pressed that begin a longer binding (the first `g` of `gg`).
     pub pending: Vec<Key>,
     /// The size of the terminal, columns and rows.
@@ -284,6 +293,30 @@ fn on_daemon_event(state: &mut State, event: Event) -> Effects {
             });
             Effects::redraw()
         }
+        Event::VolumeChanged { percent, muted } => {
+            set_status(state, |status| {
+                status.volume = Some(phonia_ipc::Volume { percent, muted });
+            });
+            Effects::redraw()
+        }
+        Event::OutputChanged { route } => {
+            set_status(state, |status| {
+                // An exclusive card plays the audio unscaled: it has no volume to show.
+                if route.mode == phonia_ipc::OutputMode::Exclusive {
+                    status.volume = None;
+                }
+                status.route = Some(route);
+            });
+            Effects::redraw()
+        }
+        Event::Seeked { position_ms } => {
+            set_status(state, |status| status.position_ms = position_ms);
+            Effects::redraw()
+        }
+        Event::SeekRejected { reason } => {
+            state.last_error = Some(format!("seek rejected: {reason}"));
+            Effects::redraw()
+        }
         Event::TrackEnded { .. } => {
             set_status(state, |status| {
                 status.track = None;
@@ -324,8 +357,8 @@ fn on_key(state: &mut State, key: Key) -> Effects {
     }
 }
 
-/// The help covers the screen and answers only to what closes it (and to `Ctrl-c`, which always
-/// quits).
+/// The help covers the screen and answers only to what closes it, to the movement keys, which
+/// scroll it when it is longer than the screen, and to `Ctrl-c`, which always quits.
 fn on_key_in_help(state: &mut State, key: Key) -> Effects {
     match keymap::resolve(&[], key) {
         Resolution::Action(Action::Quit) if key == Key::ctrl('c') => Effects::command(Cmd::Quit),
@@ -333,7 +366,41 @@ fn on_key_in_help(state: &mut State, key: Key) -> Effects {
             state.help = false;
             Effects::redraw()
         }
+        Resolution::Action(
+            action @ (Action::Down
+            | Action::Up
+            | Action::First
+            | Action::Last
+            | Action::HalfPageDown
+            | Action::HalfPageUp),
+        ) => scroll_help(state, action),
         _ => Effects::default(),
+    }
+}
+
+/// How far the help can scroll: the lines it has beyond those that fit on the screen.
+pub fn help_max_scroll(state: &State) -> usize {
+    crate::view::help_overflow(state.size.1)
+}
+
+fn scroll_help(state: &mut State, action: Action) -> Effects {
+    let max = help_max_scroll(state);
+    let page = state.half_page();
+    let before = state.help_scroll;
+    state.help_scroll = match action {
+        Action::Down => before + 1,
+        Action::Up => before.saturating_sub(1),
+        Action::First => 0,
+        Action::Last => max,
+        Action::HalfPageDown => before + page,
+        Action::HalfPageUp => before.saturating_sub(page),
+        _ => before,
+    }
+    .min(max);
+    if state.help_scroll == before {
+        Effects::default()
+    } else {
+        Effects::redraw()
     }
 }
 
@@ -342,7 +409,10 @@ fn apply(state: &mut State, action: Action) -> Effects {
     match action {
         Action::Quit => return Effects::command(Cmd::Quit),
         Action::Reconnect => return reconnect(state),
-        Action::ToggleHelp => state.help = !state.help,
+        Action::ToggleHelp => {
+            state.help = !state.help;
+            state.help_scroll = 0;
+        }
         // Only means something while the help is open, which is handled apart.
         Action::CloseHelp => {}
         Action::FocusNext => {
@@ -360,9 +430,16 @@ fn apply(state: &mut State, action: Action) -> Effects {
         | Action::Last
         | Action::HalfPageDown
         | Action::HalfPageUp => move_cursor(state, action),
-        Action::TogglePause | Action::Next | Action::Previous => {
-            return send_playback(state, action);
-        }
+        Action::TogglePause
+        | Action::Next
+        | Action::Previous
+        | Action::SeekBack
+        | Action::SeekForward
+        | Action::VolumeUp
+        | Action::VolumeDown
+        | Action::ToggleMute
+        | Action::ToggleShuffle
+        | Action::CycleRepeat => return send_playback(state, action),
     }
     if (state.focus, state.help, state.sidebar) == before {
         Effects::default()
@@ -372,23 +449,74 @@ fn apply(state: &mut State, action: Action) -> Effects {
 }
 
 /// Sends a playback request, if there is a connection to send it to; refused, silently, while
-/// there is none, rather than queued for later.
+/// there is none, rather than queued for later. One that cannot be made (a volume on an exclusive
+/// card) is explained instead.
 fn send_playback(state: &mut State, action: Action) -> Effects {
     if state.connection != Connection::Connected {
         return Effects::default();
     }
     let had_error = state.last_error.take().is_some();
-    let request = match action {
+    match request_for(state, action) {
+        Ok(request) => Effects {
+            // Nothing visible changes from sending it, except clearing a previous error.
+            redraw: had_error,
+            commands: vec![Cmd::Send(request)],
+        },
+        Err(reason) => {
+            state.last_error = Some(reason);
+            Effects::redraw()
+        }
+    }
+}
+
+/// The request a playback key stands for, given what is known of the daemon now.
+fn request_for(state: &State, action: Action) -> Result<Request, String> {
+    let volume = || -> Result<phonia_ipc::Volume, String> {
+        if !state.has(CAP_VOLUME) {
+            return Err(
+                "this phoniad is too old to set the volume: restart it after updating".to_string(),
+            );
+        }
+        state
+            .status
+            .as_ref()
+            .and_then(|status| status.volume)
+            .ok_or_else(|| {
+                "this output has no volume to set: an exclusive card plays the audio unscaled. Use \
+                 the DAC's own volume, or switch to a shared output"
+                    .to_string()
+            })
+    };
+    let step = |volume: phonia_ipc::Volume, change: i16| Request::SetVolume {
+        percent: (i16::from(volume.percent) + change).clamp(0, 100) as u8,
+    };
+    Ok(match action {
         Action::TogglePause => Request::TogglePause,
         Action::Next => Request::Next,
         Action::Previous => Request::Previous,
-        _ => unreachable!(),
-    };
-    Effects {
-        // Nothing visible changes from sending it, except clearing a previous error.
-        redraw: had_error,
-        commands: vec![Cmd::Send(request)],
-    }
+        Action::SeekBack => Request::Seek {
+            target: SeekTarget::Backward { ms: SEEK_STEP_MS },
+        },
+        Action::SeekForward => Request::Seek {
+            target: SeekTarget::Forward { ms: SEEK_STEP_MS },
+        },
+        Action::VolumeUp => step(volume()?, VOLUME_STEP),
+        Action::VolumeDown => step(volume()?, -VOLUME_STEP),
+        Action::ToggleMute => Request::SetMute {
+            mute: !volume()?.muted,
+        },
+        Action::ToggleShuffle => Request::SetShuffle {
+            shuffle: !state.queue.as_ref().is_some_and(|queue| queue.shuffle),
+        },
+        Action::CycleRepeat => Request::SetRepeat {
+            repeat: match state.queue.as_ref().map(|queue| queue.repeat) {
+                Some(Repeat::Off) | None => Repeat::All,
+                Some(Repeat::All) => Repeat::One,
+                Some(Repeat::One) => Repeat::Off,
+            },
+        },
+        _ => unreachable!("not a request: {action:?}"),
+    })
 }
 
 /// Asks to connect now, if the daemon is not connected.
@@ -611,11 +739,17 @@ mod tests {
         let mut state = State::default();
         assert!(ch(&mut state, '?').redraw);
         assert!(state.help);
-        assert!(
-            !ch(&mut state, 'j').redraw,
+        // Inside the help `j` scrolls it, it does not move the sidebar behind it.
+        ch(&mut state, 'j');
+        assert_eq!(
+            state.section(),
+            Section::Queue,
             "the keys behind the help are off"
         );
-        assert_eq!(state.section(), Section::Queue);
+        assert!(
+            ch(&mut state, 's').commands.is_empty(),
+            "so are the playback keys"
+        );
         assert!(ch(&mut state, '?').redraw);
         assert!(!state.help);
 
@@ -808,5 +942,258 @@ mod tests {
             assert_eq!(update(&mut state, Msg::Daemon(event)), Effects::default());
         }
         assert_eq!(state, before);
+    }
+
+    fn playing_with_volume(volume: Option<phonia_ipc::Volume>, capabilities: &[&str]) -> State {
+        let mut state = State::default();
+        update(&mut state, connected_msg(capabilities));
+        state.status.as_mut().unwrap().volume = volume;
+        state
+    }
+
+    fn sent(effects: Effects) -> Request {
+        match effects.commands.as_slice() {
+            [Cmd::Send(request)] => request.clone(),
+            other => panic!("expected one request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_seek_keys_move_ten_seconds_either_way() {
+        let mut state = playing_with_volume(None, &[]);
+        assert_eq!(
+            sent(ch(&mut state, '>')),
+            Request::Seek {
+                target: SeekTarget::Forward { ms: 10_000 }
+            }
+        );
+        assert_eq!(
+            sent(ch(&mut state, '<')),
+            Request::Seek {
+                target: SeekTarget::Backward { ms: 10_000 }
+            }
+        );
+    }
+
+    #[test]
+    fn the_volume_keys_step_five_percent_within_zero_and_a_hundred() {
+        let volume = |percent| {
+            Some(phonia_ipc::Volume {
+                percent,
+                muted: false,
+            })
+        };
+        let mut state = playing_with_volume(volume(50), &["volume"]);
+        assert_eq!(
+            sent(ch(&mut state, '+')),
+            Request::SetVolume { percent: 55 }
+        );
+        assert_eq!(
+            sent(ch(&mut state, '=')),
+            Request::SetVolume { percent: 55 }
+        );
+        assert_eq!(
+            sent(ch(&mut state, '-')),
+            Request::SetVolume { percent: 45 }
+        );
+
+        let mut state = playing_with_volume(volume(98), &["volume"]);
+        assert_eq!(
+            sent(ch(&mut state, '+')),
+            Request::SetVolume { percent: 100 }
+        );
+        let mut state = playing_with_volume(volume(3), &["volume"]);
+        assert_eq!(sent(ch(&mut state, '-')), Request::SetVolume { percent: 0 });
+    }
+
+    #[test]
+    fn mute_flips_what_the_output_has_now() {
+        let mut state = playing_with_volume(
+            Some(phonia_ipc::Volume {
+                percent: 40,
+                muted: false,
+            }),
+            &["volume"],
+        );
+        assert_eq!(sent(ch(&mut state, 'm')), Request::SetMute { mute: true });
+        state.status.as_mut().unwrap().volume = Some(phonia_ipc::Volume {
+            percent: 40,
+            muted: true,
+        });
+        assert_eq!(sent(ch(&mut state, 'm')), Request::SetMute { mute: false });
+    }
+
+    #[test]
+    fn an_output_without_a_volume_says_why_instead_of_sending() {
+        let mut state = playing_with_volume(None, &["volume"]);
+        for key in ['+', '-', 'm'] {
+            let effects = ch(&mut state, key);
+            assert!(effects.commands.is_empty(), "{key}");
+            assert!(effects.redraw, "{key}");
+            assert!(
+                state
+                    .last_error
+                    .as_deref()
+                    .unwrap()
+                    .contains("no volume to set"),
+                "{key}: {:?}",
+                state.last_error
+            );
+        }
+    }
+
+    #[test]
+    fn a_daemon_without_the_volume_capability_says_it_is_too_old() {
+        let mut state = playing_with_volume(
+            Some(phonia_ipc::Volume {
+                percent: 40,
+                muted: false,
+            }),
+            &[],
+        );
+        let effects = ch(&mut state, '+');
+        assert!(effects.commands.is_empty());
+        assert!(state.last_error.as_deref().unwrap().contains("too old"));
+    }
+
+    #[test]
+    fn shuffle_flips_and_repeat_goes_around() {
+        let mut state = playing_with_volume(None, &[]);
+        assert_eq!(
+            sent(ch(&mut state, 's')),
+            Request::SetShuffle { shuffle: true }
+        );
+        state.queue.as_mut().unwrap().shuffle = true;
+        assert_eq!(
+            sent(ch(&mut state, 's')),
+            Request::SetShuffle { shuffle: false }
+        );
+
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            let Request::SetRepeat { repeat } = sent(ch(&mut state, 'r')) else {
+                panic!("not a repeat request");
+            };
+            state.queue.as_mut().unwrap().repeat = repeat;
+            seen.push(repeat);
+        }
+        assert_eq!(seen, [Repeat::All, Repeat::One, Repeat::Off]);
+    }
+
+    #[test]
+    fn none_of_the_control_keys_do_anything_without_a_connection() {
+        let mut state = State::default();
+        for key in ['<', '>', '+', '-', 'm', 's', 'r'] {
+            assert_eq!(ch(&mut state, key), Effects::default(), "{key}");
+        }
+        assert_eq!(state.last_error, None);
+    }
+
+    #[test]
+    fn the_volume_the_output_and_the_position_follow_the_daemon() {
+        let mut state = playing_with_volume(None, &["volume"]);
+        update(
+            &mut state,
+            Msg::Daemon(Event::VolumeChanged {
+                percent: 30,
+                muted: true,
+            }),
+        );
+        assert_eq!(
+            state.status.as_ref().unwrap().volume,
+            Some(phonia_ipc::Volume {
+                percent: 30,
+                muted: true
+            })
+        );
+
+        // Switching to an exclusive card takes the volume away; a shared output keeps it.
+        let route = |mode| phonia_ipc::Route {
+            id: "x".into(),
+            mode,
+            description: "x".into(),
+        };
+        update(
+            &mut state,
+            Msg::Daemon(Event::OutputChanged {
+                route: route(phonia_ipc::OutputMode::Shared),
+            }),
+        );
+        assert!(state.status.as_ref().unwrap().volume.is_some());
+        update(
+            &mut state,
+            Msg::Daemon(Event::OutputChanged {
+                route: route(phonia_ipc::OutputMode::Exclusive),
+            }),
+        );
+        assert_eq!(state.status.as_ref().unwrap().volume, None);
+
+        update(
+            &mut state,
+            Msg::Daemon(Event::Seeked {
+                position_ms: 90_000,
+            }),
+        );
+        assert_eq!(state.status.as_ref().unwrap().position_ms, 90_000);
+    }
+
+    #[test]
+    fn a_rejected_seek_is_explained_until_the_next_key() {
+        let mut state = playing_with_volume(None, &[]);
+        assert!(
+            update(
+                &mut state,
+                Msg::Daemon(Event::SeekRejected {
+                    reason: "this track can't seek".into()
+                })
+            )
+            .redraw
+        );
+        assert_eq!(
+            state.last_error.as_deref(),
+            Some("seek rejected: this track can't seek")
+        );
+        ch(&mut state, '>');
+        assert_eq!(state.last_error, None, "the next command clears it");
+    }
+
+    #[test]
+    fn a_help_longer_than_the_screen_scrolls_and_stops_at_its_ends() {
+        let mut state = State::default();
+        update(&mut state, Msg::Resize(80, 24));
+        ch(&mut state, '?');
+        let max = help_max_scroll(&state);
+        assert!(max > 0, "the help does not fit in 24 rows");
+
+        assert!(!ch(&mut state, 'k').redraw, "already at the top");
+        assert!(ch(&mut state, 'j').redraw);
+        assert_eq!(state.help_scroll, 1);
+        ch(&mut state, 'G');
+        assert_eq!(state.help_scroll, max);
+        assert!(!ch(&mut state, 'j').redraw, "already at the bottom");
+        ch(&mut state, 'g');
+        ch(&mut state, 'g');
+        assert_eq!(
+            state.help_scroll, max,
+            "gg is not a key inside the help, only its first g"
+        );
+        ctrl(&mut state, 'u');
+        assert!(state.help_scroll < max);
+    }
+
+    #[test]
+    fn a_help_that_fits_has_nothing_to_scroll_and_starts_at_the_top_each_time() {
+        let mut state = State::default();
+        update(&mut state, Msg::Resize(80, 80));
+        ch(&mut state, '?');
+        assert_eq!(help_max_scroll(&state), 0);
+        assert!(!ch(&mut state, 'j').redraw);
+
+        update(&mut state, Msg::Resize(80, 24));
+        ch(&mut state, 'j');
+        ch(&mut state, 'j');
+        ch(&mut state, '?');
+        ch(&mut state, '?');
+        assert_eq!(state.help_scroll, 0, "opened again, it starts at the top");
     }
 }

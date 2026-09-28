@@ -79,18 +79,38 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     cell
 }
 
-pub fn draw(theme: &Theme, frame: &mut Frame) {
+/// The rows the help takes, without its border.
+pub fn content_rows() -> usize {
+    lines(&Theme::new(false)).len()
+}
+
+/// How many lines of the help do not fit in a terminal `screen_rows` tall: how far it can scroll.
+pub fn overflow(screen_rows: u16) -> usize {
+    // The box is the help and a border on each side, but never more than the screen.
+    let visible = usize::from(screen_rows).saturating_sub(2);
+    content_rows().saturating_sub(visible)
+}
+
+pub fn draw(theme: &Theme, scroll: usize, frame: &mut Frame) {
     let lines = lines(theme);
     let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 4;
     let height = lines.len() as u16 + 2;
     let area = centered(frame.area(), width, height);
+    let scrollable = overflow(frame.area().height) > 0;
+    let title = if scrollable {
+        " Keys (j/k scroll) "
+    } else {
+        " Keys "
+    };
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::bordered()
-                .border_style(theme.accent)
-                .title(Span::styled(" Keys ", theme.title)),
-        ),
+        Paragraph::new(lines)
+            .scroll((scroll.min(overflow(frame.area().height)) as u16, 0))
+            .block(
+                Block::bordered()
+                    .border_style(theme.accent)
+                    .title(Span::styled(title, theme.title)),
+            ),
         area,
     );
 }
