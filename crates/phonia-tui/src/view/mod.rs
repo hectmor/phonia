@@ -1,5 +1,6 @@
 //! Painting a state onto the screen.
 
+mod browse;
 mod help;
 mod search;
 
@@ -83,12 +84,23 @@ fn draw_sidebar(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
 
 fn draw_main(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
     let focused = state.focus == Focus::Main;
-    // The search has its own layout inside the panel: the line, the tabs and the results.
+    // The search has its own layout inside the panel: the line, the tabs and the results, or an
+    // album or a playlist opened from one of them.
     if state.section() == Section::Search {
-        let block = panel(Section::Search.title(), focused, theme);
+        let title = match state.search_views.top() {
+            Some(crate::browse::View::TrackList(view)) => {
+                format!("{} \u{203a} {}", Section::Search.title(), view.title())
+            }
+            None => Section::Search.title().to_string(),
+        };
+        let block = panel(&title, focused, theme);
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        search::draw(state, theme, frame, inner);
+        if state.search_views.is_empty() {
+            search::draw(state, theme, frame, inner);
+        } else {
+            browse::draw(state, theme, frame, inner);
+        }
         return;
     }
     let (title, lines) = match (state.section(), &state.queue) {
@@ -341,6 +353,10 @@ mod tests {
             state,
             Msg::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)),
         );
+    }
+
+    fn press_key(state: &mut State, code: KeyCode) -> crate::app::Effects {
+        update(state, Msg::Key(KeyEvent::new(code, KeyModifiers::NONE)))
     }
 
     #[test]
@@ -657,9 +673,9 @@ mod tests {
     #[test]
     fn on_a_tall_terminal_the_whole_help_shows_without_scrolling() {
         let mut state = State::default();
-        update(&mut state, Msg::Resize(100, 60));
+        update(&mut state, Msg::Resize(100, 70));
         press(&mut state, '?');
-        let text = screen(&state, 100, 60);
+        let text = screen(&state, 100, 70);
         assert!(!text.contains("j/k scroll"), "{text}");
         for wanted in [
             "General",
@@ -1016,5 +1032,115 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("Added 12 tracks"), "{text}");
+    }
+
+    fn tagged_request(effects: crate::app::Effects) -> (crate::app::Tag, phonia_ipc::Request) {
+        match effects.commands.as_slice() {
+            [crate::app::Cmd::Request { tag, request }] => (*tag, request.clone()),
+            other => panic!("expected one tagged request, got {other:?}"),
+        }
+    }
+
+    /// The album from `with_results` opened and loaded with three tracks, the second not
+    /// streamable, and the cursor on the first.
+    fn open_album_view() -> State {
+        use crate::app::Tag;
+        let mut state = with_results();
+        press(&mut state, 'l'); // give the results the focus, so Enter can open one
+        press(&mut state, ']'); // Albums
+        let (tag, _) = tagged_request(press_key(&mut state, KeyCode::Enter));
+        let Tag::View { serial } = tag else {
+            panic!("not a view tag")
+        };
+        let track =
+            |id: &str, title: &str, number: u32, streamable: bool| phonia_ipc::TrackSummary {
+                id: id.into(),
+                title: title.into(),
+                version: None,
+                artists: vec![],
+                album: None,
+                duration_ms: Some(75_000),
+                explicit: false,
+                track_number: Some(number),
+                volume_number: Some(1),
+                quality: Some(phonia_ipc::Quality::Hires),
+                streamable,
+            };
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::View { serial },
+                result: Ok(phonia_ipc::Payload::Tracks {
+                    from: phonia_ipc::CatalogRef::Album { id: "9".into() },
+                    page: phonia_ipc::Page {
+                        items: vec![
+                            track("1", "Dead", 1, true),
+                            track("2", "Trash", 2, false),
+                            track("3", "4U", 3, true),
+                        ],
+                        total: 3,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn opening_an_album_shows_its_header_before_the_tracks_have_loaded() {
+        let mut state = with_results();
+        press(&mut state, 'l');
+        press(&mut state, ']');
+        let _ = tagged_request(press_key(&mut state, KeyCode::Enter));
+        let text = screen(&state, 100, 14);
+        assert!(text.contains("Search \u{203a} Issues"), "{text}");
+        assert!(
+            text.contains("Korn - Issues"),
+            "the header, known at once: {text}"
+        );
+        assert!(text.contains("Loading..."), "{text}");
+    }
+
+    #[test]
+    fn an_open_album_lists_its_tracks_numbered_with_the_unstreamable_one_dimmed() {
+        let state = open_album_view();
+        let text = screen(&state, 100, 14);
+        assert!(text.contains("1. Dead"), "{text}");
+        assert!(text.contains("2. Trash"), "{text}");
+        assert!(text.contains("3. 4U"), "{text}");
+        assert!(
+            !text.contains("Korn, Jonathan"),
+            "the row leaves out the artists it already knows: {text}"
+        );
+    }
+
+    #[test]
+    fn the_selected_track_in_an_open_album_is_highlighted() {
+        let theme = Theme::new(false);
+        let reversed_rows = |state: &State| {
+            let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
+            terminal.draw(|frame| draw(state, &theme, frame)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..14)
+                .filter(|y| {
+                    (16..60).any(|x| {
+                        buffer[(x, *y)]
+                            .modifier
+                            .contains(ratatui::style::Modifier::REVERSED)
+                    })
+                })
+                .count()
+        };
+        let state = open_album_view();
+        assert_eq!(reversed_rows(&state), 1);
+    }
+
+    #[test]
+    fn a_narrow_terminal_does_not_break_the_album_view() {
+        let state = open_album_view();
+        for (w, h) in [(0, 0), (1, 1), (16, 4), (20, 5), (40, 8)] {
+            let _ = screen(&state, w, h);
+        }
     }
 }

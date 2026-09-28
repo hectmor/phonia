@@ -52,6 +52,8 @@ pub enum Action {
     AddToQueue,
     /// Adds the result under the cursor right after the track that is playing.
     AddNext,
+    /// Leaves the album or the playlist open, back to what it was opened from.
+    Back,
 }
 
 /// A key press, with the modifiers that matter.
@@ -351,6 +353,13 @@ pub const BINDINGS: &[Binding] = &[
         "A",
         Action::AddNext,
         "add the result after the track playing",
+        Group::Search,
+    ),
+    bind(
+        &[Key::plain(KeyCode::Backspace)],
+        "Backspace",
+        Action::Back,
+        "close an album or a playlist that is open (h does the same)",
         Group::Search,
     ),
     bind(
