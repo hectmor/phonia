@@ -6,15 +6,11 @@
 
 use crate::cursor::Cursor;
 use crate::input::TextInput;
-use phonia_ipc::{
-    AlbumSummary, ArtistSummary, Page, Payload, PlaylistSummary, Request, TrackSummary,
-};
+use crate::list::Found;
+use phonia_ipc::{AlbumSummary, ArtistSummary, Payload, PlaylistSummary, Request, TrackSummary};
 
 /// How many results of each kind one search asks for.
 pub const PAGE_SIZE: u32 = 50;
-
-/// When the cursor is this close to the end of what is loaded, the next page is asked for.
-pub const PREFETCH: usize = 10;
 
 /// The four lists of results, one shown at a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -84,63 +80,6 @@ pub enum Phase {
     Failed(String),
     /// The results are in.
     Done,
-}
-
-/// What was found of one kind: the rows loaded so far, how many there are in all, and the cursor.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Found<T> {
-    pub items: Vec<T>,
-    pub total: u64,
-    pub cursor: Cursor,
-    /// Whether the next page has been asked for and not come yet.
-    pub loading: bool,
-}
-
-impl<T> Default for Found<T> {
-    fn default() -> Self {
-        Self {
-            items: Vec::new(),
-            total: 0,
-            cursor: Cursor::default(),
-            loading: false,
-        }
-    }
-}
-
-impl<T> Found<T> {
-    fn from_page(page: Page<T>) -> Self {
-        Self {
-            items: page.items,
-            total: page.total,
-            cursor: Cursor::default(),
-            loading: false,
-        }
-    }
-
-    /// If the cursor is near the end of what is loaded and there is more, marks the next page as
-    /// asked for and says where it starts. Asking again while it is on its way does nothing.
-    fn next_offset(&mut self) -> Option<u32> {
-        let loaded = self.items.len();
-        let near_the_end = self.cursor.selected() + PREFETCH >= loaded;
-        if self.loading || !near_the_end || loaded as u64 >= self.total {
-            return None;
-        }
-        self.loading = true;
-        Some(loaded as u32)
-    }
-
-    /// Adds a page that came. One with nothing in it ends the list, even if the total said more,
-    /// so a listing that is short of its total cannot be asked for over and over.
-    fn append(&mut self, page: Option<Page<T>>) {
-        self.loading = false;
-        match page {
-            Some(page) if !page.items.is_empty() => {
-                self.items.extend(page.items);
-                self.total = self.total.max(page.total);
-            }
-            _ => self.total = self.items.len() as u64,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -325,6 +264,7 @@ impl SearchState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phonia_ipc::Page;
 
     fn page<T>(items: Vec<T>, total: u64) -> Option<Page<T>> {
         Some(Page {
