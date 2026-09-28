@@ -15,6 +15,7 @@ use crate::decode::Decoder;
 use crate::engine::{
     Delivered, LoadedTrack, SeekMode, TrackMedia, TrackMeta, TrackOpener, TrackRef,
 };
+use crate::session::TidalSession;
 use crate::stream;
 use crate::tidal::{self, ManifestKind};
 use anyhow::{Context, Result, anyhow, bail};
@@ -25,45 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tidlers::TidalClient;
-use tokio::sync::{RwLock, RwLockReadGuard};
-
-/// The TIDAL login of a process: read from its store the first time it is needed (so a daemon
-/// that started before the network, or before `phonia login`, still works once they are there),
-/// and kept fresh from then on.
-struct TidalSession {
-    /// Behind a lock because the access token expires after a while and has to be refreshed in
-    /// place, which a long-running process (a daemon) will always eventually need.
-    client: RwLock<Option<TidalClient>>,
-    /// Where to read the login from when there is no client yet.
-    store: Option<Arc<dyn auth::SessionStore>>,
-}
-
-impl TidalSession {
-    /// The client with a valid access token, refreshed if the old one has expired. TIDAL does not
-    /// rotate refresh tokens, so there is nothing to save afterwards.
-    async fn fresh(&self) -> Result<RwLockReadGuard<'_, TidalClient>> {
-        {
-            let mut guard = self.client.write().await;
-            if guard.is_none() {
-                let store = self
-                    .store
-                    .as_deref()
-                    .ok_or_else(|| anyhow!("there is no TIDAL session"))?;
-                *guard = Some(auth::load_client(store).await?);
-            }
-            let client = guard.as_mut().expect("loaded just above");
-            client
-                .refresh_access_token(false)
-                .await
-                .map_err(|error| anyhow!("refreshing the TIDAL access token: {error}"))?;
-        }
-        Ok(RwLockReadGuard::map(self.client.read().await, |client| {
-            client
-                .as_ref()
-                .expect("a loaded client is never taken away")
-        }))
-    }
-}
+use tokio::sync::RwLock;
 
 /// Where a track's audio comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,6 +250,11 @@ impl TidalOpener {
             print_info: false,
             save_to: Mutex::new(None),
         }
+    }
+
+    /// TIDAL's catalog (search, the tracks of an album or a playlist), through the same login.
+    pub fn catalog(&self) -> crate::catalog::TidalCatalog {
+        crate::catalog::TidalCatalog::new(self.http.clone(), self.session.clone())
     }
 
     /// Name and length of a TIDAL track, without streaming it.
