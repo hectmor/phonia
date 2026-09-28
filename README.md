@@ -31,7 +31,11 @@ chain works with real hardware (a Fosi Audio DS2 during development).
 
 - **`phonia tui [--socket <path>]`** -- the terminal interface, a client of a running `phoniad`. It
   has a sidebar (Queue, Search, Library), a main panel and a bar at the bottom. The queue is listed
-  live, in play order, with the one playing marked. The bar shows the state, the track and how it
+  live, in queue order (the order `phonia ctl queue list` shows and that edits act on, not the
+  shuffled play order), with the one playing marked and the row under the cursor highlighted. With
+  the focus on the list (`l`), `j`/`k` select an entry, `Enter` plays it, `d` removes it, `J`/`K`
+  move it down or up (the cursor goes with it) and `cc` clears the queue: two presses, so a stray
+  `c` never does. The bar shows the state, the track and how it
   is delivered (bit depth, rate, quality, and what was asked for if TIDAL gave less), a progress
   bar with the times, and the volume and the shuffle and repeat modes when they are on. Playback
   keys: `Space` pauses or resumes, `n`/`p` skip, `<`/`>` seek 10 s back or forward, `+`/`-`

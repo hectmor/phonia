@@ -37,6 +37,12 @@ pub enum Action {
     ToggleShuffle,
     /// Off, then all, then one, then off again.
     CycleRepeat,
+    /// Enter: open the section from the sidebar; in the queue, play the selected entry.
+    Activate,
+    RemoveEntry,
+    MoveEntryDown,
+    MoveEntryUp,
+    ClearQueue,
 }
 
 /// A key press, with the modifiers that matter.
@@ -78,6 +84,7 @@ pub enum Group {
     Movement,
     Panels,
     Playback,
+    Queue,
 }
 
 impl Group {
@@ -87,6 +94,7 @@ impl Group {
             Group::Movement => "Movement",
             Group::Panels => "Panels",
             Group::Playback => "Playback",
+            Group::Queue => "Queue",
         }
     }
 }
@@ -228,8 +236,8 @@ pub const BINDINGS: &[Binding] = &[
     bind(
         &[Key::plain(KeyCode::Enter)],
         "Enter",
-        Action::FocusMain,
-        "go to the list",
+        Action::Activate,
+        "open the section, or play the selected track",
         Group::Panels,
     ),
     bind(&[c('1')], "1", Action::Section(0), "Queue", Group::Panels),
@@ -298,6 +306,34 @@ pub const BINDINGS: &[Binding] = &[
         Action::ToggleShuffle,
         "shuffle on or off",
         Group::Playback,
+    ),
+    bind(
+        &[c('d')],
+        "d",
+        Action::RemoveEntry,
+        "remove the selected track",
+        Group::Queue,
+    ),
+    bind(
+        &[c('J')],
+        "J",
+        Action::MoveEntryDown,
+        "move the selected track down",
+        Group::Queue,
+    ),
+    bind(
+        &[c('K')],
+        "K",
+        Action::MoveEntryUp,
+        "move the selected track up",
+        Group::Queue,
+    ),
+    bind(
+        &[c('c'), c('c')],
+        "cc",
+        Action::ClearQueue,
+        "clear the queue",
+        Group::Queue,
     ),
     bind(
         &[c('r')],
