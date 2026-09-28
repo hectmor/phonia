@@ -159,6 +159,16 @@ gapless = true          # join a track to the next one of the same format with n
   one, and answers like `queue_add`. At most 1000 tracks at once; a track TIDAL lists but does not
   stream where you are is refused and the rest is added. Like a search it runs beside the
   connection's other requests.
+- **Albums and artists** (the requests `album`, `artist`, `tracks` and `albums` of protocol 1.6):
+  `album` answers with the album's details (title, artists, release date, whether it is an album,
+  an EP or a single, its copyright, its best quality) and the first page of its tracks; `artist`
+  answers with everything a view of it shows in one go: its bio as plain text (absent when TIDAL
+  has none, and never a reason to fail the rest), its most listened to tracks, its albums, and its
+  EPs and singles, a page of each. `tracks` and `albums` give the next pages of those lists.
+  A track carries its disc number, so an album of several discs can show where each begins (one
+  disc is also numbered, so only more than one is worth a heading). `queue_add_from` also takes
+  an artist's top tracks. Like a search, each of these runs beside the connection's other
+  requests, and takes one of its four slots however many calls it makes to TIDAL.
 - `phonia config path` prints which file is used, and `phonia config show` prints every setting
   with where its value comes from (the file or the default). `--config <file>` (or the
   `PHONIA_CONFIG` environment variable) selects another file, also for `phoniad`.

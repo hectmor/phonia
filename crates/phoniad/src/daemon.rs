@@ -8,7 +8,9 @@ use crate::outputs::{Outputs, VolumeError};
 use anyhow::Result;
 use futures_util::StreamExt;
 use futures_util::stream;
-use phonia_core::catalog::{self as tidal_catalog, Catalog, MAX_ITEMS_LIMIT, MAX_SEARCH_LIMIT};
+use phonia_core::catalog::{
+    self as tidal_catalog, AlbumFilter, Catalog, MAX_ITEMS_LIMIT, MAX_SEARCH_LIMIT,
+};
 use phonia_core::control::Controller;
 use phonia_core::engine::{self, Command, Engine, TrackOpener};
 use phonia_core::openers::{DescribeError, DispatchOpener, QualityLimits, Source};
@@ -268,6 +270,18 @@ impl Daemon {
             Request::Queue => Reply::Ok(Payload::Queue(self.state().1)),
             Request::QueueAdd { tracks, at } => self.queue_add(tracks, at).await,
             Request::QueueAddFrom { from, at } => self.queue_add_from(from, at).await,
+            Request::Album { id, limit } => self.album(id, limit).await,
+            Request::Artist { id, limit } => self.artist(id, limit).await,
+            Request::Tracks {
+                from,
+                offset,
+                limit,
+            } => self.tracks(from, offset, limit).await,
+            Request::Albums {
+                from,
+                offset,
+                limit,
+            } => self.albums(from, offset, limit).await,
             Request::Search {
                 query,
                 kinds,
@@ -361,6 +375,126 @@ impl Daemon {
                 let (code, message) = convert::catalog_error(&failure);
                 self::error(code, &message)
             }
+        }
+    }
+
+    /// The catalog, or the reply that says the daemon has none.
+    // A reply is built once per request and dropped: boxing it would only complicate the callers.
+    #[allow(clippy::result_large_err)]
+    fn catalog_or_refuse(&self, what: &str) -> Result<&Arc<dyn Catalog>, Reply> {
+        self.catalog.as_ref().ok_or_else(|| {
+            self::error(
+                ErrorCode::Unsupported,
+                &format!("this daemon has no TIDAL catalog to {what}"),
+            )
+        })
+    }
+
+    /// An album and the first page of its tracks, asked for at the same time.
+    async fn album(&self, id: String, limit: Option<u32>) -> Reply {
+        let catalog = match self.catalog_or_refuse("show albums from") {
+            Ok(catalog) => catalog,
+            Err(reply) => return reply,
+        };
+        let limit = match list_limit(limit, MAX_ITEMS_LIMIT) {
+            Ok(limit) => limit,
+            Err(reply) => return reply,
+        };
+        let (album, tracks) = tokio::join!(
+            catalog.album(id.clone()),
+            catalog.album_tracks(id, 0, limit)
+        );
+        match (album, tracks) {
+            (Ok(album), Ok(tracks)) => Reply::Ok(Payload::Album {
+                album: convert::album_summary(&album),
+                tracks: convert::page(&tracks, convert::track_summary),
+            }),
+            (Err(failure), _) | (_, Err(failure)) => catalog_failure(&failure),
+        }
+    }
+
+    /// An artist with all that its view shows, asked for at the same time. Only the bio may be
+    /// missing without failing the rest: it is a nicety, and TIDAL has none for many artists.
+    async fn artist(&self, id: String, limit: Option<u32>) -> Reply {
+        let catalog = match self.catalog_or_refuse("show artists from") {
+            Ok(catalog) => catalog,
+            Err(reply) => return reply,
+        };
+        let limit = match list_limit(limit, DEFAULT_SEARCH_LIMIT) {
+            Ok(limit) => limit,
+            Err(reply) => return reply,
+        };
+        let (artist, bio, top_tracks, albums, singles) = tokio::join!(
+            catalog.artist(id.clone()),
+            catalog.artist_bio(id.clone()),
+            catalog.artist_top_tracks(id.clone(), 0, limit),
+            catalog.artist_albums(id.clone(), AlbumFilter::Albums, 0, limit),
+            catalog.artist_albums(id, AlbumFilter::EpsAndSingles, 0, limit),
+        );
+        match (artist, top_tracks, albums, singles) {
+            (Ok(artist), Ok(top_tracks), Ok(albums), Ok(singles)) => Reply::Ok(Payload::Artist {
+                artist: convert::artist_summary(&artist),
+                bio: bio.ok().flatten(),
+                top_tracks: convert::page(&top_tracks, convert::track_summary),
+                albums: convert::page(&albums, convert::album_summary),
+                singles: convert::page(&singles, convert::album_summary),
+            }),
+            (Err(failure), ..)
+            | (_, Err(failure), ..)
+            | (_, _, Err(failure), _)
+            | (.., Err(failure)) => catalog_failure(&failure),
+        }
+    }
+
+    /// One page of a list of tracks.
+    async fn tracks(&self, from: ipc::CatalogRef, offset: u32, limit: Option<u32>) -> Reply {
+        let catalog = match self.catalog_or_refuse("list tracks from") {
+            Ok(catalog) => catalog,
+            Err(reply) => return reply,
+        };
+        let limit = match list_limit(limit, DEFAULT_SEARCH_LIMIT) {
+            Ok(limit) => limit,
+            Err(reply) => return reply,
+        };
+        let page = match track_page(catalog.as_ref(), &from, offset, limit) {
+            Ok(page) => page,
+            Err(reply) => return reply,
+        };
+        match page.await {
+            Ok(page) => Reply::Ok(Payload::Tracks {
+                from,
+                page: convert::page(&page, convert::track_summary),
+            }),
+            Err(failure) => catalog_failure(&failure),
+        }
+    }
+
+    /// One page of a list of albums.
+    async fn albums(&self, from: ipc::AlbumListRef, offset: u32, limit: Option<u32>) -> Reply {
+        let catalog = match self.catalog_or_refuse("list albums from") {
+            Ok(catalog) => catalog,
+            Err(reply) => return reply,
+        };
+        let limit = match list_limit(limit, DEFAULT_SEARCH_LIMIT) {
+            Ok(limit) => limit,
+            Err(reply) => return reply,
+        };
+        let (id, filter) = match &from {
+            ipc::AlbumListRef::ArtistAlbums { id } => (id.clone(), AlbumFilter::Albums),
+            ipc::AlbumListRef::ArtistSingles { id } => (id.clone(), AlbumFilter::EpsAndSingles),
+            ipc::AlbumListRef::Unknown => {
+                return self::error(
+                    ErrorCode::BadRequest,
+                    "this daemon does not know that list of albums",
+                );
+            }
+        };
+        match catalog.artist_albums(id, filter, offset, limit).await {
+            Ok(page) => Reply::Ok(Payload::Albums {
+                from,
+                page: convert::page(&page, convert::album_summary),
+            }),
+            Err(failure) => catalog_failure(&failure),
         }
     }
 
@@ -597,25 +731,18 @@ impl Daemon {
                 "this daemon has no TIDAL catalog to add from",
             );
         };
-        let listing = |offset: u32| match &from {
-            ipc::CatalogRef::Album { id } => {
-                Some(catalog.album_tracks(id.clone(), offset, MAX_ITEMS_LIMIT))
-            }
-            ipc::CatalogRef::Playlist { id } => {
-                Some(catalog.playlist_tracks(id.clone(), offset, MAX_ITEMS_LIMIT))
-            }
-            ipc::CatalogRef::Unknown => None,
-        };
-
         let mut tracks: Vec<tidal_catalog::Track> = Vec::new();
         loop {
-            let Some(request) = listing(tracks.len() as u32) else {
-                return self::error(
-                    ErrorCode::BadRequest,
-                    "this daemon does not know how to add that",
-                );
+            let page = match track_page(
+                catalog.as_ref(),
+                &from,
+                tracks.len() as u32,
+                MAX_ITEMS_LIMIT,
+            ) {
+                Ok(page) => page,
+                Err(reply) => return reply,
             };
-            let page = match request.await {
+            let page = match page.await {
                 Ok(page) => page,
                 Err(failure) => {
                     let (code, message) = convert::catalog_error(&failure);
@@ -661,6 +788,57 @@ impl Daemon {
         }
         self.add_to_queue(accepted, rejected, at).await
     }
+}
+
+/// The size of a page a client asks for: `default` when it does not say, and between 1 and 100
+/// when it does.
+// See `catalog_or_refuse`: the reply is the point, and it is built once.
+#[allow(clippy::result_large_err)]
+fn list_limit(limit: Option<u32>, default: u32) -> Result<u32, Reply> {
+    match limit.unwrap_or(default) {
+        0 => Err(error(ErrorCode::BadRequest, "the limit must be at least 1")),
+        n if n > MAX_ITEMS_LIMIT => Err(error(
+            ErrorCode::BadRequest,
+            &format!("the limit must be at most {MAX_ITEMS_LIMIT}"),
+        )),
+        n => Ok(n),
+    }
+}
+
+/// The catalog's failure as clients are told of it.
+fn catalog_failure(failure: &tidal_catalog::CatalogError) -> Reply {
+    let (code, message) = convert::catalog_error(failure);
+    error(code, &message)
+}
+
+/// Asks the catalog for a page of the list of tracks `from` names, or says that this daemon does
+/// not know that list.
+#[allow(clippy::result_large_err)]
+fn track_page(
+    catalog: &dyn Catalog,
+    from: &ipc::CatalogRef,
+    offset: u32,
+    limit: u32,
+) -> Result<
+    futures_util::future::BoxFuture<
+        'static,
+        Result<tidal_catalog::Page<tidal_catalog::Track>, tidal_catalog::CatalogError>,
+    >,
+    Reply,
+> {
+    Ok(match from {
+        ipc::CatalogRef::Album { id } => catalog.album_tracks(id.clone(), offset, limit),
+        ipc::CatalogRef::Playlist { id } => catalog.playlist_tracks(id.clone(), offset, limit),
+        ipc::CatalogRef::ArtistTopTracks { id } => {
+            catalog.artist_top_tracks(id.clone(), offset, limit)
+        }
+        ipc::CatalogRef::Unknown => {
+            return Err(error(
+                ErrorCode::BadRequest,
+                "this daemon does not know how to list that",
+            ));
+        }
+    })
 }
 
 fn error(code: ErrorCode, message: &str) -> Reply {

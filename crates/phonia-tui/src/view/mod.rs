@@ -828,6 +828,7 @@ mod tests {
             duration_ms: Some(271_000),
             explicit: false,
             track_number: None,
+            volume_number: None,
             quality: Some(phonia_ipc::Quality::Hires),
             streamable: true,
         };
@@ -856,6 +857,8 @@ mod tests {
                             duration_ms: None,
                             explicit: true,
                             quality: Some(phonia_ipc::Quality::Hires),
+                            kind: None,
+                            copyright: None,
                         }],
                         total: 20,
                         offset: 0,

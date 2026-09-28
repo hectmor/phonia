@@ -703,6 +703,7 @@ fn a_track_summary() -> TrackSummary {
         duration_ms: Some(271_000),
         explicit: false,
         track_number: Some(2),
+        volume_number: None,
         quality: Some(Quality::Hires),
         streamable: true,
     }
@@ -804,7 +805,7 @@ fn search_results_carry_a_page_of_each_kind_asked_for() {
             }),
             playlists: None,
         }),
-        r#"{"type":"response","id":3,"ok":{"type":"search_results","query":"korn","tracks":{"items":[{"id":"33723914","title":"Here to Stay","version":null,"artists":[{"id":"780","name":"Korn"}],"album":{"id":"33723912","title":"Untouchables"},"duration_ms":271000,"explicit":false,"track_number":2,"quality":"hires","streamable":true}],"total":123,"offset":0},"albums":null,"artists":{"items":[{"id":"780","name":"Korn"}],"total":1,"offset":0},"playlists":null}}"#,
+        r#"{"type":"response","id":3,"ok":{"type":"search_results","query":"korn","tracks":{"items":[{"id":"33723914","title":"Here to Stay","version":null,"artists":[{"id":"780","name":"Korn"}],"album":{"id":"33723912","title":"Untouchables"},"duration_ms":271000,"explicit":false,"track_number":2,"volume_number":null,"quality":"hires","streamable":true}],"total":123,"offset":0},"albums":null,"artists":{"items":[{"id":"780","name":"Korn"}],"total":1,"offset":0},"playlists":null}}"#,
     );
 }
 
@@ -1087,4 +1088,183 @@ fn every_message_is_one_line() {
     };
     let json = serde_json::to_string(&m).unwrap();
     assert!(!json.contains('\n'), "{json}");
+}
+
+#[test]
+fn the_album_artist_tracks_and_albums_requests_and_their_defaults() {
+    request(
+        1,
+        Request::Album {
+            id: "33723912".into(),
+            limit: Some(20),
+        },
+        r#"{"id":1,"request":{"type":"album","id":"33723912","limit":20}}"#,
+    );
+    request(
+        2,
+        Request::Artist {
+            id: "780".into(),
+            limit: None,
+        },
+        r#"{"id":2,"request":{"type":"artist","id":"780","limit":null}}"#,
+    );
+    request(
+        3,
+        Request::Tracks {
+            from: CatalogRef::ArtistTopTracks { id: "780".into() },
+            offset: 50,
+            limit: Some(50),
+        },
+        r#"{"id":3,"request":{"type":"tracks","from":{"type":"artist_top_tracks","id":"780"},"offset":50,"limit":50}}"#,
+    );
+    request(
+        4,
+        Request::Albums {
+            from: AlbumListRef::ArtistSingles { id: "780".into() },
+            offset: 0,
+            limit: None,
+        },
+        r#"{"id":4,"request":{"type":"albums","from":{"type":"artist_singles","id":"780"},"offset":0,"limit":null}}"#,
+    );
+    // Paging and the limit may be left out.
+    let minimal: ClientMessage = serde_json::from_str(
+        r#"{"id":5,"request":{"type":"tracks","from":{"type":"album","id":"1"}}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        minimal.request,
+        Request::Tracks {
+            from: CatalogRef::Album { id: "1".into() },
+            offset: 0,
+            limit: None
+        }
+    );
+    let album: ClientMessage =
+        serde_json::from_str(r#"{"id":6,"request":{"type":"album","id":"1"}}"#).unwrap();
+    assert_eq!(
+        album.request,
+        Request::Album {
+            id: "1".into(),
+            limit: None
+        }
+    );
+}
+
+fn an_album_summary() -> AlbumSummary {
+    AlbumSummary {
+        id: "33723912".into(),
+        title: "Issues".into(),
+        version: None,
+        artists: vec![ArtistRef {
+            id: "780".into(),
+            name: "Korn".into(),
+        }],
+        release_date: Some("1999-11-16".into()),
+        track_count: Some(16),
+        duration_ms: Some(3_200_000),
+        explicit: true,
+        quality: Some(Quality::Hires),
+        kind: Some(AlbumKind::Album),
+        copyright: Some("(P) 1999".into()),
+    }
+}
+
+#[test]
+fn an_album_an_artist_and_pages_come_back_whole() {
+    let track = a_track_summary();
+    let page = |n: u64| Page {
+        items: vec![track.clone()],
+        total: n,
+        offset: 0,
+    };
+    response(
+        1,
+        Reply::Ok(Payload::Album {
+            album: an_album_summary(),
+            tracks: page(16),
+        }),
+        r#"{"type":"response","id":1,"ok":{"type":"album","album":{"id":"33723912","title":"Issues","version":null,"artists":[{"id":"780","name":"Korn"}],"release_date":"1999-11-16","track_count":16,"duration_ms":3200000,"explicit":true,"quality":"hires","kind":"album","copyright":"(P) 1999"},"tracks":{"items":[{"id":"33723914","title":"Here to Stay","version":null,"artists":[{"id":"780","name":"Korn"}],"album":{"id":"33723912","title":"Untouchables"},"duration_ms":271000,"explicit":false,"track_number":2,"volume_number":null,"quality":"hires","streamable":true}],"total":16,"offset":0}}}"#,
+    );
+    // The artist: every list a page, and the bio only when there is one.
+    let artist = Payload::Artist {
+        artist: ArtistSummary {
+            id: "780".into(),
+            name: "Korn".into(),
+        },
+        bio: None,
+        top_tracks: page(300),
+        albums: Page {
+            items: vec![an_album_summary()],
+            total: 35,
+            offset: 0,
+        },
+        singles: Page {
+            items: vec![],
+            total: 30,
+            offset: 0,
+        },
+    };
+    let json = serde_json::to_string(&ServerMessage::Response {
+        id: RequestId(2),
+        reply: Reply::Ok(artist.clone()),
+    })
+    .unwrap();
+    assert!(
+        json.contains(r#""type":"artist""#) && json.contains(r#""bio":null"#),
+        "{json}"
+    );
+    let back: ServerMessage = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        back,
+        ServerMessage::Response {
+            id: RequestId(2),
+            reply: Reply::Ok(artist)
+        }
+    );
+    // A page of tracks says which list it is of.
+    response(
+        3,
+        Reply::Ok(Payload::Tracks {
+            from: CatalogRef::ArtistTopTracks { id: "780".into() },
+            page: Page {
+                items: vec![],
+                total: 300,
+                offset: 100,
+            },
+        }),
+        r#"{"type":"response","id":3,"ok":{"type":"tracks","from":{"type":"artist_top_tracks","id":"780"},"page":{"items":[],"total":300,"offset":100}}}"#,
+    );
+    response(
+        4,
+        Reply::Ok(Payload::Albums {
+            from: AlbumListRef::ArtistAlbums { id: "780".into() },
+            page: Page {
+                items: vec![],
+                total: 35,
+                offset: 0,
+            },
+        }),
+        r#"{"type":"response","id":4,"ok":{"type":"albums","from":{"type":"artist_albums","id":"780"},"page":{"items":[],"total":35,"offset":0}}}"#,
+    );
+}
+
+#[test]
+fn an_album_from_before_the_views_and_kinds_from_the_future_still_parse() {
+    // A 1.6 daemon from before the album view: no kind, no copyright, no disc number.
+    let old: AlbumSummary =
+        serde_json::from_str(r#"{"id":"1","title":"t","artists":[],"explicit":false}"#).unwrap();
+    assert_eq!((old.kind, old.copyright), (None, None));
+    let track: TrackSummary = serde_json::from_str(r#"{"id":"1","title":"t"}"#).unwrap();
+    assert_eq!(track.volume_number, None);
+    // A kind of release, and a list, this version does not know.
+    let kind: AlbumKind = serde_json::from_str(r#""compilation""#).unwrap();
+    assert_eq!(kind, AlbumKind::Unknown);
+    let list: AlbumListRef = serde_json::from_str(r#"{"type":"favorites"}"#).unwrap();
+    assert_eq!(list, AlbumListRef::Unknown);
+    // An artist answer without a bio.
+    let payload: Payload = serde_json::from_str(
+        r#"{"type":"artist","artist":{"id":"1","name":"a"},"top_tracks":{"items":[],"total":0,"offset":0},"albums":{"items":[],"total":0,"offset":0},"singles":{"items":[],"total":0,"offset":0}}"#,
+    )
+    .unwrap();
+    assert!(matches!(payload, Payload::Artist { bio: None, .. }));
 }

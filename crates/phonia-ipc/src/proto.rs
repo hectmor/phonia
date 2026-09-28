@@ -1,9 +1,9 @@
 //! The messages: what a client may ask, and what the daemon answers and announces.
 
 use crate::dto::{
-    AlbumSummary, ArtistSummary, CatalogKind, CatalogRef, EndReason, ItemId, OutputInfo, Page,
-    PlaylistSummary, Quality, Queue, ReleaseReason, Repeat, Route, SinkReport, Spec, State, Status,
-    StreamQuality, TrackSummary,
+    AlbumListRef, AlbumSummary, ArtistSummary, CatalogKind, CatalogRef, EndReason, ItemId,
+    OutputInfo, Page, PlaylistSummary, Quality, Queue, ReleaseReason, Repeat, Route, SinkReport,
+    Spec, State, Status, StreamQuality, TrackSummary,
 };
 use serde::{Deserialize, Serialize};
 
@@ -169,6 +169,38 @@ pub enum Request {
         #[serde(default)]
         limit: Option<u32>,
     },
+    /// An album: its details and its tracks (since 1.6). Answered with [`Payload::Album`].
+    /// `limit` (default and most 100) is how many tracks come in the first page.
+    Album {
+        id: String,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    /// An artist, all that a view of it shows, in one answer (since 1.6): its bio, its most
+    /// listened to tracks, its albums, and its EPs and singles. Answered with
+    /// [`Payload::Artist`]; `limit` (default 50, most 100) is the size of each list's first page.
+    Artist {
+        id: String,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    /// One page of a list of tracks (since 1.6): to go on after the first page of an album, or of
+    /// an artist's top tracks. Answered with [`Payload::Tracks`].
+    Tracks {
+        from: CatalogRef,
+        #[serde(default)]
+        offset: u32,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    /// One page of a list of albums (since 1.6). Answered with [`Payload::Albums`].
+    Albums {
+        from: AlbumListRef,
+        #[serde(default)]
+        offset: u32,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
     /// Adds the tracks of an album or a playlist (since 1.6): the daemon lists them from TIDAL
     /// itself, so their titles and lengths come with them, and answers like `queue_add`, with
     /// [`Payload::Added`]. A track TIDAL lists but does not stream where the daemon is comes back
@@ -285,6 +317,32 @@ pub enum Payload {
         artists: Option<Page<ArtistSummary>>,
         #[serde(default)]
         playlists: Option<Page<PlaylistSummary>>,
+    },
+    /// An album and the first page of its tracks (since 1.6).
+    Album {
+        album: AlbumSummary,
+        tracks: Page<TrackSummary>,
+    },
+    /// An artist with the first page of each of its lists (since 1.6). `bio` is plain text, and
+    /// absent for an artist TIDAL has nothing to say about (or when it could not be fetched: the
+    /// rest is worth showing without it).
+    Artist {
+        artist: ArtistSummary,
+        #[serde(default)]
+        bio: Option<String>,
+        top_tracks: Page<TrackSummary>,
+        albums: Page<AlbumSummary>,
+        singles: Page<AlbumSummary>,
+    },
+    /// A page of tracks, and the list it is of (since 1.6).
+    Tracks {
+        from: CatalogRef,
+        page: Page<TrackSummary>,
+    },
+    /// A page of albums, and the list it is of (since 1.6).
+    Albums {
+        from: AlbumListRef,
+        page: Page<AlbumSummary>,
     },
     /// The state right now, and the sequence number of the last event it includes.
     Snapshot {
