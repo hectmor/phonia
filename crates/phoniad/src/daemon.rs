@@ -8,6 +8,7 @@ use crate::outputs::{Outputs, VolumeError};
 use anyhow::Result;
 use futures_util::StreamExt;
 use futures_util::stream;
+use phonia_core::catalog::{Catalog, MAX_SEARCH_LIMIT};
 use phonia_core::control::Controller;
 use phonia_core::engine::{self, Command, Engine, TrackOpener};
 use phonia_core::openers::{DescribeError, DispatchOpener, QualityLimits, Source};
@@ -25,6 +26,9 @@ use tokio::sync::{broadcast, mpsc, watch};
 pub async fn wait_for_shutdown(signal: &mut watch::Receiver<bool>) {
     let _ = signal.wait_for(|stopping| *stopping).await;
 }
+
+/// How many results of each kind a search returns when the client does not say.
+const DEFAULT_SEARCH_LIMIT: u32 = 50;
 
 /// The most tracks one `queue_add` may carry.
 const MAX_ADD: usize = 1000;
@@ -44,6 +48,8 @@ pub struct DaemonParts {
     pub outputs: Outputs,
     /// The tiers TIDAL is asked for, if the daemon plays from TIDAL.
     pub quality: Option<Arc<QualityLimits>>,
+    /// TIDAL's catalog, if the daemon has a login to browse it with.
+    pub catalog: Option<Arc<dyn Catalog>>,
 }
 
 pub struct Daemon {
@@ -51,6 +57,7 @@ pub struct Daemon {
     outputs: Outputs,
     opener: Arc<DispatchOpener>,
     quality: Option<Arc<QualityLimits>>,
+    catalog: Option<Arc<dyn Catalog>>,
     events: broadcast::Sender<(u64, ipc::Event)>,
     /// The sequence number of the last event published; only changed under `publish_lock`.
     seq: AtomicU64,
@@ -84,6 +91,7 @@ impl Daemon {
             outputs: parts.outputs,
             opener: parts.opener,
             quality: parts.quality,
+            catalog: parts.catalog,
             events,
             seq: AtomicU64::new(0),
             publish_lock: Mutex::new(()),
@@ -206,16 +214,21 @@ impl Daemon {
     }
 
     pub fn hello(&self) -> ipc::ServerHello {
+        let mut capabilities = vec![
+            ipc::CAP_OUTPUT_RELEASE.to_string(),
+            ipc::CAP_OUTPUT_SELECT.to_string(),
+            ipc::CAP_VOLUME.to_string(),
+            ipc::CAP_GAPLESS.to_string(),
+            ipc::CAP_QUALITY.to_string(),
+        ];
+        // Only a daemon with a login to browse with can search.
+        if self.catalog.is_some() {
+            capabilities.push(ipc::CAP_CATALOG.to_string());
+        }
         ipc::ServerHello {
             protocol: ipc::PROTOCOL,
             server: self.info.clone(),
-            capabilities: vec![
-                ipc::CAP_OUTPUT_RELEASE.to_string(),
-                ipc::CAP_OUTPUT_SELECT.to_string(),
-                ipc::CAP_VOLUME.to_string(),
-                ipc::CAP_GAPLESS.to_string(),
-                ipc::CAP_QUALITY.to_string(),
-            ],
+            capabilities,
         }
     }
 
@@ -245,6 +258,12 @@ impl Daemon {
             Request::Status => Reply::Ok(Payload::Status(self.state().0)),
             Request::Queue => Reply::Ok(Payload::Queue(self.state().1)),
             Request::QueueAdd { tracks, at } => self.queue_add(tracks, at).await,
+            Request::Search {
+                query,
+                kinds,
+                offset,
+                limit,
+            } => self.search(query, kinds, offset, limit).await,
             Request::Outputs => {
                 let entries = self.outputs.list().await;
                 Reply::Ok(Payload::Outputs {
@@ -264,6 +283,73 @@ impl Daemon {
             mutating => {
                 let _serial = self.control_lock.lock().await;
                 self.change(mutating)
+            }
+        }
+    }
+
+    /// Searches TIDAL. Read-only, so it does not take the control lock; the server also runs it
+    /// beside the connection's other requests, because it can take a second or two.
+    async fn search(
+        &self,
+        query: String,
+        kinds: Vec<ipc::CatalogKind>,
+        offset: u32,
+        limit: Option<u32>,
+    ) -> Reply {
+        let Some(catalog) = &self.catalog else {
+            return self::error(
+                ErrorCode::Unsupported,
+                "this daemon has no TIDAL catalog to search",
+            );
+        };
+        let query = query.trim().to_string();
+        if query.is_empty() {
+            return self::error(ErrorCode::BadRequest, "there is nothing to search for");
+        }
+        let limit = limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
+        if limit == 0 || limit > MAX_SEARCH_LIMIT {
+            return self::error(
+                ErrorCode::BadRequest,
+                &format!("the limit must be between 1 and {MAX_SEARCH_LIMIT}"),
+            );
+        }
+        let mut wanted = Vec::new();
+        for kind in &kinds {
+            if let Some(kind) = convert::catalog_kind(*kind)
+                && !wanted.contains(&kind)
+            {
+                wanted.push(kind);
+            }
+        }
+        if !kinds.is_empty() && wanted.is_empty() {
+            return self::error(
+                ErrorCode::BadRequest,
+                "this daemon knows none of those kinds",
+            );
+        }
+        match catalog.search(query.clone(), wanted, offset, limit).await {
+            Ok(found) => Reply::Ok(Payload::SearchResults {
+                query,
+                tracks: found
+                    .tracks
+                    .as_ref()
+                    .map(|page| convert::page(page, convert::track_summary)),
+                albums: found
+                    .albums
+                    .as_ref()
+                    .map(|page| convert::page(page, convert::album_summary)),
+                artists: found
+                    .artists
+                    .as_ref()
+                    .map(|page| convert::page(page, convert::artist_summary)),
+                playlists: found
+                    .playlists
+                    .as_ref()
+                    .map(|page| convert::page(page, convert::playlist_summary)),
+            }),
+            Err(failure) => {
+                let (code, message) = convert::catalog_error(&failure);
+                self::error(code, &message)
             }
         }
     }

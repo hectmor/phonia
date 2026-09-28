@@ -1,6 +1,8 @@
 //! The daemon, its server and the client, talking through in-memory pipes with a fake audio
 //! device: everything except real hardware and real sockets.
 
+use phonia_core::catalog::fake::FakeCatalog;
+use phonia_core::catalog::{self, Catalog, CatalogError};
 use phonia_core::config::OutputSpec;
 use phonia_core::openers::{DispatchOpener, QualityLimits};
 use phonia_core::output::VolumeControl as _;
@@ -42,6 +44,20 @@ async fn fixture_with(
     name: &str,
     blocking: bool,
     options: phonia_core::engine::Options,
+) -> Fixture {
+    fixture_full(name, blocking, options, None).await
+}
+
+/// A fixture with a catalog of the test's choosing (none, like a daemon with no TIDAL login).
+async fn fixture_with_catalog(name: &str, catalog: Option<Arc<dyn Catalog>>) -> Fixture {
+    fixture_full(name, false, Default::default(), catalog).await
+}
+
+async fn fixture_full(
+    name: &str,
+    blocking: bool,
+    options: phonia_core::engine::Options,
+    catalog: Option<Arc<dyn Catalog>>,
 ) -> Fixture {
     let sinks = if blocking {
         FakeSinkFactory::blocking()
@@ -88,6 +104,7 @@ async fn fixture_with(
         sinks: sinks.clone(),
         outputs,
         opener: Arc::new(DispatchOpener::new(None)),
+        catalog,
         quality: Some(Arc::new(QualityLimits::new(
             phonia_core::config::Quality::Hires,
             phonia_core::config::Quality::Lossless,
@@ -1466,5 +1483,287 @@ async fn the_best_quality_is_changed_announced_and_never_set_below_the_floor() {
         Quality::Lossless,
         "a refused change changes nothing"
     );
+    f.finish().await;
+}
+
+// --- Searching the catalog (protocol 1.6) ---------------------------------------------------------
+
+fn a_track(id: &str, title: &str) -> catalog::Track {
+    catalog::Track {
+        id: id.into(),
+        title: title.into(),
+        version: None,
+        artists: vec![catalog::ArtistRef {
+            id: "780".into(),
+            name: "Korn".into(),
+        }],
+        album: Some(catalog::AlbumRef {
+            id: "9".into(),
+            title: "Untouchables".into(),
+        }),
+        duration: Some(Duration::from_secs(271)),
+        explicit: false,
+        track_number: Some(2),
+        quality: Some(phonia_core::config::Quality::Hires),
+        streamable: true,
+    }
+}
+
+fn a_catalog() -> FakeCatalog {
+    FakeCatalog::new().with_search(catalog::SearchResults {
+        tracks: Some(catalog::Page {
+            items: vec![a_track("33723914", "Here to Stay")],
+            total: 123,
+            offset: 0,
+        }),
+        albums: Some(catalog::Page {
+            items: vec![catalog::Album {
+                id: "9".into(),
+                title: "Untouchables".into(),
+                version: None,
+                artists: vec![],
+                release_date: Some("2002-06-11".into()),
+                track_count: Some(14),
+                duration: None,
+                explicit: false,
+                quality: None,
+            }],
+            total: 1,
+            offset: 0,
+        }),
+        artists: Some(catalog::Page::empty()),
+        playlists: Some(catalog::Page::empty()),
+    })
+}
+
+fn search(query: &str, kinds: Vec<CatalogKind>, limit: Option<u32>) -> Request {
+    Request::Search {
+        query: query.into(),
+        kinds,
+        offset: 0,
+        limit,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_a_daemon_with_a_catalog_says_so_and_searches() {
+    let f = fixture_with_catalog("no-catalog", None).await;
+    let client = f.client().await;
+    assert!(
+        !client
+            .server()
+            .capabilities
+            .iter()
+            .any(|c| c == CAP_CATALOG)
+    );
+    let error = client
+        .request(search("korn", vec![], None))
+        .await
+        .unwrap_err();
+    assert_eq!(protocol_code(error), ErrorCode::Unsupported);
+    f.finish().await;
+
+    let f = fixture_with_catalog("with-catalog", Some(Arc::new(a_catalog()))).await;
+    let client = f.client().await;
+    assert!(
+        client
+            .server()
+            .capabilities
+            .iter()
+            .any(|c| c == CAP_CATALOG)
+    );
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_search_answers_with_a_page_of_each_kind_asked_for() {
+    let catalog = a_catalog();
+    let f = fixture_with_catalog("search", Some(Arc::new(catalog.clone()))).await;
+    let client = f.client().await;
+
+    let Payload::SearchResults {
+        query,
+        tracks,
+        albums,
+        artists,
+        playlists,
+    } = client
+        .request(search("  korn  ", vec![], None))
+        .await
+        .unwrap()
+    else {
+        panic!("not search results");
+    };
+    assert_eq!(query, "korn", "the query is trimmed");
+    let tracks = tracks.unwrap();
+    assert_eq!((tracks.total, tracks.offset), (123, 0));
+    let track = &tracks.items[0];
+    assert_eq!(track.id, "33723914");
+    assert_eq!(track.duration_ms, Some(271_000));
+    assert_eq!(track.quality, Some(Quality::Hires));
+    assert_eq!(track.album.as_ref().unwrap().title, "Untouchables");
+    assert_eq!(
+        albums.unwrap().items[0].release_date.as_deref(),
+        Some("2002-06-11")
+    );
+    assert!(artists.is_some() && playlists.is_some());
+
+    // What the catalog was asked: every kind, from the start, the daemon's page size.
+    assert_eq!(
+        catalog.calls(),
+        [phonia_core::catalog::fake::Call::Search {
+            query: "korn".into(),
+            kinds: vec![],
+            offset: 0,
+            limit: 50
+        }]
+    );
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_search_for_some_kinds_asks_for_only_those_and_passes_the_paging_on() {
+    let catalog = a_catalog();
+    let f = fixture_with_catalog("search-kinds", Some(Arc::new(catalog.clone()))).await;
+    let client = f.client().await;
+    let Payload::SearchResults { tracks, albums, .. } = client
+        .request(Request::Search {
+            query: "korn".into(),
+            kinds: vec![
+                CatalogKind::Tracks,
+                CatalogKind::Unknown,
+                CatalogKind::Tracks,
+            ],
+            offset: 100,
+            limit: Some(25),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("not search results");
+    };
+    assert!(
+        tracks.is_some() && albums.is_none(),
+        "only tracks were asked for"
+    );
+    assert_eq!(
+        catalog.calls(),
+        [phonia_core::catalog::fake::Call::Search {
+            query: "korn".into(),
+            kinds: vec![catalog::Kind::Tracks],
+            offset: 100,
+            limit: 25
+        }],
+        "unknown kinds are dropped and repeats collapse"
+    );
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_search_that_makes_no_sense_is_refused_before_it_reaches_tidal() {
+    let catalog = a_catalog();
+    let f = fixture_with_catalog("search-invalid", Some(Arc::new(catalog.clone()))).await;
+    let client = f.client().await;
+    for request in [
+        search("", vec![], None),
+        search("   ", vec![], None),
+        search("korn", vec![], Some(0)),
+        search("korn", vec![], Some(301)),
+        search("korn", vec![CatalogKind::Unknown], None),
+    ] {
+        let error = client.request(request.clone()).await.unwrap_err();
+        assert_eq!(protocol_code(error), ErrorCode::BadRequest, "{request:?}");
+    }
+    assert!(catalog.calls().is_empty(), "none of them went to TIDAL");
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_catalog_failures_become_their_own_error_codes() {
+    for (failure, code) in [
+        (
+            CatalogError::NotLoggedIn("no session".into()),
+            ErrorCode::NotLoggedIn,
+        ),
+        (
+            CatalogError::Unavailable("timed out".into()),
+            ErrorCode::Unavailable,
+        ),
+        (CatalogError::RateLimited, ErrorCode::RateLimited),
+        (CatalogError::NotFound, ErrorCode::NotFound),
+        (CatalogError::Invalid("bad".into()), ErrorCode::BadRequest),
+    ] {
+        let catalog = FakeCatalog::new().failing(failure.clone());
+        let f = fixture_with_catalog("search-fails", Some(Arc::new(catalog))).await;
+        let client = f.client().await;
+        let error = client
+            .request(search("korn", vec![], None))
+            .await
+            .unwrap_err();
+        let ClientError::Protocol(error) = error else {
+            panic!("not a protocol error");
+        };
+        assert_eq!(error.code, code, "{failure:?}");
+        assert_eq!(error.message, failure.to_string());
+        f.finish().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_search_does_not_hold_up_the_requests_behind_it() {
+    let catalog = a_catalog().delayed(Duration::from_millis(700));
+    let f = fixture_with_catalog("search-slow", Some(Arc::new(catalog))).await;
+    let mut raw = f.raw().await;
+    raw.hello().await;
+
+    raw.send(r#"{"id":2,"request":{"type":"search","query":"korn"}}"#)
+        .await;
+    raw.send(r#"{"id":3,"request":{"type":"status"}}"#).await;
+    // The status was asked for second and comes first: the search is still under way.
+    let started = std::time::Instant::now();
+    let Some(ServerMessage::Response { id, reply }) = raw.recv().await else {
+        panic!("no response");
+    };
+    assert_eq!(id, RequestId(3));
+    assert!(matches!(reply, Reply::Ok(Payload::Status(_))));
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "it did not wait for the search"
+    );
+
+    let Some(ServerMessage::Response { id, reply }) = raw.recv().await else {
+        panic!("no response");
+    };
+    assert_eq!(id, RequestId(2));
+    assert!(matches!(reply, Reply::Ok(Payload::SearchResults { .. })));
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn too_many_searches_at_once_on_a_connection_are_refused_at_once() {
+    let catalog = a_catalog().delayed(Duration::from_millis(600));
+    let f = fixture_with_catalog("search-many", Some(Arc::new(catalog))).await;
+    let mut raw = f.raw().await;
+    raw.hello().await;
+    for id in 2..=6 {
+        raw.send(&format!(
+            r#"{{"id":{id},"request":{{"type":"search","query":"korn"}}}}"#
+        ))
+        .await;
+    }
+    // Four are under way; the fifth is turned away without waiting for them.
+    let (id, code) = code_of(raw.recv().await);
+    assert_eq!((id, code), (RequestId(6), ErrorCode::RateLimited));
+    let mut answered = 0;
+    for _ in 0..4 {
+        if let Some(ServerMessage::Response {
+            reply: Reply::Ok(Payload::SearchResults { .. }),
+            ..
+        }) = raw.recv().await
+        {
+            answered += 1;
+        }
+    }
+    assert_eq!(answered, 4);
     f.finish().await;
 }

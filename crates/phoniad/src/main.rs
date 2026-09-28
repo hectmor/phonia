@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use phonia_core::catalog::Catalog;
 use phonia_core::config::{self, Overrides, Quality};
 use phonia_core::diag::{self, Level};
 use phonia_core::engine;
@@ -108,6 +109,7 @@ async fn run(args: Args) -> Result<()> {
     )
     .min_quality(settings.min_quality.value);
     let quality = tidal_opener.limits();
+    let catalog: Arc<dyn Catalog> = Arc::new(tidal_opener.catalog());
     let opener = Arc::new(DispatchOpener::new(Some(tidal_opener)));
 
     let (report_tx, reports) = mpsc::unbounded_channel();
@@ -133,6 +135,7 @@ async fn run(args: Args) -> Result<()> {
         outputs: Outputs::new(output.clone(), build),
         opener,
         quality: Some(quality),
+        catalog: Some(catalog),
         reports,
         engine: engine::Options {
             release_after_pause: settings.release_after_pause.value.duration(),

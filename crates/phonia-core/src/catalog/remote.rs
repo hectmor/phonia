@@ -183,7 +183,7 @@ impl Catalog for TidalCatalog {
             let body = catalog
                 .get("/search", search_query(&query, &kinds, offset, limit))
                 .await?;
-            parse_search(&body)
+            Ok(only_kinds(parse_search(&body)?, &kinds))
         })
     }
 
@@ -490,6 +490,28 @@ fn parse_search(body: &str) -> Result<SearchResults, CatalogError> {
     })
 }
 
+/// Keeps only the kinds that were asked for (all of them when `kinds` is empty). TIDAL answers
+/// with a page for every kind, empty for those it was not asked about, and a client cannot tell
+/// that from "nothing found" unless the ones not asked for are left out.
+fn only_kinds(mut results: SearchResults, kinds: &[Kind]) -> SearchResults {
+    if kinds.is_empty() {
+        return results;
+    }
+    if !kinds.contains(&Kind::Tracks) {
+        results.tracks = None;
+    }
+    if !kinds.contains(&Kind::Albums) {
+        results.albums = None;
+    }
+    if !kinds.contains(&Kind::Artists) {
+        results.artists = None;
+    }
+    if !kinds.contains(&Kind::Playlists) {
+        results.playlists = None;
+    }
+    results
+}
+
 /// The listing of an album's or a playlist's items: each is `{"item": {track}, "type": "track"}`,
 /// and videos (`"type": "video"`) are not tracks, so they are left out.
 fn parse_track_items(body: &str) -> Result<Page<Track>, CatalogError> {
@@ -604,6 +626,25 @@ mod tests {
         assert_eq!(playlist.creator.as_deref(), Some("TIDAL"));
         assert_eq!(playlist.description, None, "an empty description is none");
         assert_eq!(playlist.track_count, Some(40));
+    }
+
+    #[test]
+    fn the_kinds_that_were_not_asked_for_are_left_out_even_when_tidal_sends_them_empty() {
+        let answer = parse_search(SEARCH).unwrap();
+        let only_albums = only_kinds(answer.clone(), &[Kind::Albums]);
+        assert!(only_albums.albums.is_some());
+        assert!(only_albums.tracks.is_none() && only_albums.artists.is_none());
+        assert!(only_albums.playlists.is_none());
+
+        let two = only_kinds(answer.clone(), &[Kind::Tracks, Kind::Playlists]);
+        assert!(two.tracks.is_some() && two.playlists.is_some());
+        assert!(two.albums.is_none() && two.artists.is_none());
+
+        assert_eq!(
+            only_kinds(answer.clone(), &[]),
+            answer,
+            "no kinds means all of them"
+        );
     }
 
     #[test]
