@@ -2,6 +2,11 @@
 
 mod help;
 
+/// How far the help can scroll on a screen `rows` tall.
+pub fn help_overflow(rows: u16) -> usize {
+    help::overflow(rows)
+}
+
 use crate::app::{Connection, Focus, Section, State, seconds_left};
 use crate::theme::Theme;
 use ratatui::Frame;
@@ -11,8 +16,8 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 /// The columns the sidebar takes: the longest section name and room for the border and the mark.
 const SIDEBAR_WIDTH: u16 = 14;
-/// The rows of the bar at the bottom: a border and two lines.
-const BAR_HEIGHT: u16 = 3;
+/// The rows of the bar at the bottom: a border and three lines.
+const BAR_HEIGHT: u16 = 4;
 
 /// The three areas of the screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +41,7 @@ pub fn draw(state: &State, theme: &Theme, frame: &mut Frame) {
     draw_main(state, theme, frame, areas.main);
     draw_bar(state, theme, frame, areas.bar);
     if state.help {
-        help::draw(theme, frame);
+        help::draw(theme, state.help_scroll, frame);
     }
 }
 
@@ -109,6 +114,7 @@ fn queue_lines<'a>(queue: &phonia_ipc::Queue, theme: &Theme) -> Vec<Line<'a>> {
         .collect()
 }
 
+/// What is playing: the state, the track, and how it is being delivered.
 fn connected_line<'a>(state: &State, theme: &Theme) -> Line<'a> {
     if let Some(reason) = &state.last_error {
         return Line::styled(format!("Could not do that: {reason}"), theme.error);
@@ -121,19 +127,70 @@ fn connected_line<'a>(state: &State, theme: &Theme) -> Line<'a> {
         .as_ref()
         .and_then(|track| track.title.clone().or_else(|| track.source.clone()))
         .unwrap_or_else(|| "Nothing playing".to_string());
-    let position = if status.track.is_some() {
-        let total = status
-            .duration_ms
-            .map(|ms| format!(" / {}", phonia_ipc::fmt::ms(ms)))
-            .unwrap_or_default();
-        format!("  {}{total}", phonia_ipc::fmt::ms(status.position_ms))
-    } else {
-        String::new()
+    let mut text = format!("{}  {name}", state_word(status.state));
+    if status.track.is_some() {
+        let mut details = Vec::new();
+        if let Some(spec) = &status.spec {
+            details.push(format!(
+                "{}-bit / {}",
+                spec.bits_per_sample,
+                phonia_ipc::fmt::sample_rate(spec.sample_rate)
+            ));
+        }
+        if let Some(quality) = status.track.as_ref().and_then(|track| track.quality) {
+            details.push(phonia_ipc::fmt::stream_quality(&quality));
+        }
+        if !details.is_empty() {
+            text.push_str(&format!("  ({})", details.join(", ")));
+        }
+    }
+    Line::styled(text, theme.text)
+}
+
+/// `1:05 ████████░░░░░░░░ 5:43`, as wide as `width`; just the times when there is no room or the
+/// length of the track is not known.
+pub fn progress_line(position_ms: u64, duration_ms: Option<u64>, width: u16) -> String {
+    let position = phonia_ipc::fmt::ms(position_ms);
+    let Some(duration_ms) = duration_ms.filter(|ms| *ms > 0) else {
+        return position;
     };
-    Line::styled(
-        format!("{}  {name}{position}", state_word(status.state)),
-        theme.text,
+    let total = phonia_ipc::fmt::ms(duration_ms);
+    // The times, and a space on each side of the bar.
+    let taken = position.chars().count() + total.chars().count() + 2;
+    let room = usize::from(width).saturating_sub(taken);
+    if room < 4 {
+        return format!("{position} / {total}");
+    }
+    let done = (u128::from(position_ms.min(duration_ms)) * room as u128 / u128::from(duration_ms))
+        as usize;
+    format!(
+        "{position} {}{} {total}",
+        "█".repeat(done),
+        "░".repeat(room - done)
     )
+}
+
+/// The volume and the queue's modes, when they are not the plain ones.
+fn flags(state: &State) -> String {
+    let mut flags = Vec::new();
+    if let Some(volume) = state.status.as_ref().and_then(|status| status.volume) {
+        flags.push(if volume.muted {
+            format!("vol {}% (muted)", volume.percent)
+        } else {
+            format!("vol {}%", volume.percent)
+        });
+    }
+    if let Some(queue) = &state.queue {
+        if queue.shuffle {
+            flags.push("shuffle".to_string());
+        }
+        match queue.repeat {
+            phonia_ipc::Repeat::Off => {}
+            phonia_ipc::Repeat::All => flags.push("repeat all".to_string()),
+            phonia_ipc::Repeat::One => flags.push("repeat one".to_string()),
+        }
+    }
+    flags.join("   ")
 }
 
 fn state_word(state: phonia_ipc::State) -> &'static str {
@@ -146,29 +203,58 @@ fn state_word(state: phonia_ipc::State) -> &'static str {
     }
 }
 
+const KEYS: &str =
+    "Space pause  n/p skip  </> seek  +/- volume  m mute  s shuffle  r repeat  ? help  q quit";
+
 fn draw_bar(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
-    let (first, second) = match &state.connection {
-        Connection::Connecting => (
+    let lines = match &state.connection {
+        Connection::Connecting => vec![
             Line::styled("Connecting to phoniad...", theme.dim),
-            "? help   q quit".to_string(),
-        ),
-        Connection::Connected => (
-            connected_line(state, theme),
-            "Space pause   n next   p prev   ? help   q quit".to_string(),
-        ),
-        Connection::Disconnected { reason, retry_in } => (
+            Line::raw(""),
+            Line::styled("? help   q quit", theme.dim),
+        ],
+        Connection::Connected => {
+            let status = state.status.as_ref();
+            let progress = match status {
+                Some(status) if status.track.is_some() => {
+                    progress_line(status.position_ms, status.duration_ms, area.width)
+                }
+                _ => String::new(),
+            };
+            let flags = flags(state);
+            vec![
+                connected_line(state, theme),
+                Line::styled(progress, theme.accent),
+                Line::from(vec![
+                    Span::styled(KEYS, theme.dim),
+                    Span::styled(
+                        if flags.is_empty() {
+                            String::new()
+                        } else {
+                            format!("   | {flags}")
+                        },
+                        theme.text,
+                    ),
+                ]),
+            ]
+        }
+        Connection::Disconnected { reason, retry_in } => vec![
             Line::styled(format!("phoniad is not reachable: {reason}"), theme.error),
-            format!(
-                "Trying again in {} s (R: now). Start the daemon with `phoniad`.   ? help   q quit",
-                seconds_left(*retry_in)
+            Line::styled(
+                format!(
+                    "Trying again in {} s (R: now). Start the daemon with `phoniad`.",
+                    seconds_left(*retry_in)
+                ),
+                theme.dim,
             ),
-        ),
-        Connection::Refused { reason } => (
+            Line::styled("? help   q quit", theme.dim),
+        ],
+        Connection::Refused { reason } => vec![
             Line::styled(format!("Cannot use this daemon: {reason}"), theme.error),
-            "R: try again   ? help   q quit".to_string(),
-        ),
+            Line::styled("R: try again", theme.dim),
+            Line::styled("? help   q quit", theme.dim),
+        ],
     };
-    let lines = vec![first, Line::styled(second, theme.dim)];
     frame.render_widget(
         Paragraph::new(lines).block(Block::new().borders(Borders::TOP).border_style(theme.dim)),
         area,
@@ -324,7 +410,13 @@ mod tests {
         let text = screen(&state, 90, 12);
         assert!(text.contains("Playing"), "{text}");
         assert!(text.contains("Aerodynamic"), "{text}");
-        assert!(text.contains("1:05 / 5:43"), "{text}");
+        assert!(text.contains("1:05 "), "{text}");
+        assert!(text.contains(" 5:43"), "{text}");
+        assert!(
+            text.contains('█') && text.contains('░'),
+            "the progress bar: {text}"
+        );
+        assert!(text.contains("(16-bit / 44.1 kHz)"), "{text}");
     }
 
     #[test]
@@ -378,6 +470,148 @@ mod tests {
             "tidal:9 (order[0]) should be listed before A: {text}"
         );
         assert!(text.contains(">  1. tidal:9"), "{text}");
+    }
+
+    #[test]
+    fn the_progress_bar_fills_in_proportion_and_fits_the_width() {
+        // Halfway through, in a bar 20 wide: the times take 4 + 4 + 2, so 10 cells are left.
+        let line = progress_line(30_000, Some(60_000), 20);
+        assert_eq!(line, "0:30 █████░░░░░ 1:00");
+        assert_eq!(line.chars().count(), 20);
+        assert_eq!(progress_line(0, Some(60_000), 20), "0:00 ░░░░░░░░░░ 1:00");
+        assert_eq!(
+            progress_line(60_000, Some(60_000), 20),
+            "1:00 ██████████ 1:00"
+        );
+    }
+
+    #[test]
+    fn a_position_past_the_end_does_not_overflow_the_bar() {
+        let line = progress_line(90_000, Some(60_000), 20);
+        assert_eq!(line.chars().count(), 20);
+        assert!(line.contains("██████████"), "{line}");
+    }
+
+    #[test]
+    fn without_a_length_or_room_it_is_just_the_times() {
+        assert_eq!(progress_line(65_000, None, 80), "1:05");
+        assert_eq!(progress_line(65_000, Some(0), 80), "1:05");
+        assert_eq!(progress_line(65_000, Some(343_000), 12), "1:05 / 5:43");
+        assert_eq!(progress_line(0, Some(60_000), 0), "0:00 / 1:00");
+    }
+
+    #[test]
+    fn the_volume_and_the_queue_modes_show_when_they_are_not_the_plain_ones() {
+        use phonia_ipc::{Queue, Repeat, Volume};
+        let mut state = connected();
+        assert_eq!(
+            flags(&state),
+            "",
+            "an exclusive card and a plain queue: nothing to say"
+        );
+
+        state.status.as_mut().unwrap().volume = Some(Volume {
+            percent: 72,
+            muted: false,
+        });
+        assert_eq!(flags(&state), "vol 72%");
+        state.status.as_mut().unwrap().volume = Some(Volume {
+            percent: 72,
+            muted: true,
+        });
+        state.queue = Some(Queue {
+            shuffle: true,
+            repeat: Repeat::All,
+            ..state.queue.clone().unwrap()
+        });
+        assert_eq!(flags(&state), "vol 72% (muted)   shuffle   repeat all");
+        let text = screen(&state, 140, 12);
+        assert!(
+            text.contains("| vol 72% (muted)   shuffle   repeat all"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_controls_are_listed_in_the_bar() {
+        let text = screen(&connected(), 140, 12);
+        for wanted in [
+            "Space pause",
+            "n/p skip",
+            "</> seek",
+            "+/- volume",
+            "m mute",
+            "s shuffle",
+            "r repeat",
+        ] {
+            assert!(text.contains(wanted), "{wanted:?} missing from:\n{text}");
+        }
+    }
+
+    #[test]
+    fn a_fallback_shows_what_was_asked_for_next_to_the_format() {
+        let mut state = connected();
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::TrackStarted {
+                item_id: None,
+                source: None,
+                title: Some("Song".into()),
+                duration_ms: Some(60_000),
+                spec: phonia_ipc::Spec {
+                    sample_rate: 96_000,
+                    channels: 2,
+                    bits_per_sample: 24,
+                },
+                gapless: false,
+                quality: Some(phonia_ipc::StreamQuality {
+                    requested: phonia_ipc::Quality::Hires,
+                    delivered: phonia_ipc::Quality::Lossless,
+                }),
+            }),
+        );
+        let text = screen(&state, 120, 12);
+        assert!(
+            text.contains("(24-bit / 96 kHz, lossless (asked for hires))"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn on_a_short_terminal_the_help_scrolls_to_show_every_key() {
+        let mut state = State::default();
+        update(&mut state, Msg::Resize(100, 24));
+        press(&mut state, '?');
+        let top = screen(&state, 100, 24);
+        assert!(top.contains("j/k scroll"), "{top}");
+        assert!(top.contains("General"), "{top}");
+        assert!(
+            !top.contains("repeat: off, all, one"),
+            "cut off at the bottom:\n{top}"
+        );
+
+        state.help_scroll = crate::app::help_max_scroll(&state);
+        let bottom = screen(&state, 100, 24);
+        assert!(bottom.contains("repeat: off, all, one"), "{bottom}");
+        assert!(bottom.contains("volume up"), "{bottom}");
+    }
+
+    #[test]
+    fn on_a_tall_terminal_the_whole_help_shows_without_scrolling() {
+        let mut state = State::default();
+        update(&mut state, Msg::Resize(100, 60));
+        press(&mut state, '?');
+        let text = screen(&state, 100, 60);
+        assert!(!text.contains("j/k scroll"), "{text}");
+        for wanted in [
+            "General",
+            "Movement",
+            "Panels",
+            "Playback",
+            "repeat: off, all, one",
+        ] {
+            assert!(text.contains(wanted), "{wanted:?} missing:\n{text}");
+        }
     }
 
     #[test]

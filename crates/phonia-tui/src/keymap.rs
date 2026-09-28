@@ -29,6 +29,14 @@ pub enum Action {
     TogglePause,
     Next,
     Previous,
+    SeekBack,
+    SeekForward,
+    VolumeUp,
+    VolumeDown,
+    ToggleMute,
+    ToggleShuffle,
+    /// Off, then all, then one, then off again.
+    CycleRepeat,
 }
 
 /// A key press, with the modifiers that matter.
@@ -240,6 +248,62 @@ pub const BINDINGS: &[Binding] = &[
         "p",
         Action::Previous,
         "previous track",
+        Group::Playback,
+    ),
+    bind(
+        &[c('<')],
+        "<",
+        Action::SeekBack,
+        "back 10 s",
+        Group::Playback,
+    ),
+    bind(
+        &[c('>')],
+        ">",
+        Action::SeekForward,
+        "forward 10 s",
+        Group::Playback,
+    ),
+    bind(
+        &[c('+')],
+        "+",
+        Action::VolumeUp,
+        "volume up",
+        Group::Playback,
+    ),
+    bind(
+        &[c('=')],
+        "=",
+        Action::VolumeUp,
+        "volume up",
+        Group::Playback,
+    ),
+    bind(
+        &[c('-')],
+        "-",
+        Action::VolumeDown,
+        "volume down",
+        Group::Playback,
+    ),
+    bind(
+        &[c('m')],
+        "m",
+        Action::ToggleMute,
+        "mute or unmute",
+        Group::Playback,
+    ),
+    bind(
+        &[c('s')],
+        "s",
+        Action::ToggleShuffle,
+        "shuffle on or off",
+        Group::Playback,
+    ),
+    bind(
+        &[c('r')],
+        "r",
+        Action::CycleRepeat,
+        "repeat: off, all, one",
         Group::Playback,
     ),
 ];

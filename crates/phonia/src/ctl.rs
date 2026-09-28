@@ -5,8 +5,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use phonia_ipc::{
     AddAt, CAP_OUTPUT_RELEASE, CAP_OUTPUT_SELECT, CAP_QUALITY, CAP_VOLUME, Client, ClientError,
     ClientInfo, Event, ItemId, NewTrack, Output, OutputInfo, OutputMode, Payload, Quality,
-    QualityRange, Queue, ReleaseReason, Repeat, Request, SeekTarget, State, Status, StreamQuality,
-    Volume,
+    QualityRange, Queue, ReleaseReason, Repeat, Request, SeekTarget, State, Status, Volume,
 };
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -416,7 +415,10 @@ fn format_quality_status(status: &Status) -> String {
         None => "Quality: this daemon does not play from TIDAL".to_string(),
     };
     if let Some(quality) = status.track.as_ref().and_then(|track| track.quality) {
-        text.push_str(&format!("\nPlaying: {}", format_stream_quality(&quality)));
+        text.push_str(&format!(
+            "\nPlaying: {}",
+            phonia_ipc::fmt::stream_quality(&quality)
+        ));
     }
     text
 }
@@ -426,15 +428,6 @@ fn format_range(range: &QualityRange) -> String {
         "Quality: asking for up to {}, playing nothing below {}",
         range.max, range.min
     )
-}
-
-/// What TIDAL delivered: the tier, and what was asked for if it was more.
-fn format_stream_quality(quality: &StreamQuality) -> String {
-    if quality.fell_back() {
-        format!("{} (asked for {})", quality.delivered, quality.requested)
-    } else {
-        quality.delivered.to_string()
-    }
 }
 
 async fn mute(client: &Client, json: bool, mode: MuteMode) -> Result<()> {
@@ -708,7 +701,10 @@ fn format_status(status: &Status) -> String {
             phonia_ipc::fmt::ms(status.position_ms)
         ));
         if let Some(quality) = &track.quality {
-            text.push_str(&format!("\nQuality:  {}", format_stream_quality(quality)));
+            text.push_str(&format!(
+                "\nQuality:  {}",
+                phonia_ipc::fmt::stream_quality(quality)
+            ));
         }
     }
     if let Some(route) = &status.route {
@@ -802,7 +798,7 @@ fn format_event(event: &Event) -> String {
             spec.bits_per_sample,
             spec.sample_rate,
             quality
-                .map(|quality| format!(" [{}]", format_stream_quality(&quality)))
+                .map(|quality| format!(" [{}]", phonia_ipc::fmt::stream_quality(&quality)))
                 .unwrap_or_default(),
             if *gapless { " [gapless]" } else { "" }
         ),
@@ -1345,17 +1341,11 @@ mod tests {
     }
 
     #[test]
-    fn what_tidal_delivered_is_said_plainly_and_a_fallback_says_what_was_asked() {
-        let same = StreamQuality {
-            requested: Quality::Hires,
-            delivered: Quality::Hires,
-        };
-        let fell = StreamQuality {
+    fn a_track_that_fell_back_says_what_was_asked_in_events() {
+        let fell = phonia_ipc::StreamQuality {
             requested: Quality::Hires,
             delivered: Quality::Lossless,
         };
-        assert_eq!(format_stream_quality(&same), "hires");
-        assert_eq!(format_stream_quality(&fell), "lossless (asked for hires)");
 
         let started = |quality| Event::TrackStarted {
             item_id: None,
@@ -1391,7 +1381,7 @@ mod tests {
                 source: Some("tidal:1".into()),
                 title: None,
                 duration_ms: None,
-                quality: Some(StreamQuality {
+                quality: Some(phonia_ipc::StreamQuality {
                     requested: Quality::Hires,
                     delivered: Quality::Lossless,
                 }),
