@@ -54,6 +54,7 @@ fn lines(theme: &Theme) -> Vec<Line<'static>> {
         Group::Panels,
         Group::Playback,
         Group::Queue,
+        Group::Search,
     ] {
         if !lines.is_empty() {
             lines.push(Line::raw(""));
@@ -65,6 +66,20 @@ fn lines(theme: &Theme) -> Vec<Line<'static>> {
                 Span::styled(row.help, theme.text),
             ]));
         }
+    }
+    // What works while the search is being typed: no bindings, but keys all the same.
+    lines.push(Line::raw(""));
+    lines.push(Line::styled("While typing a search", theme.title));
+    let typing_width = crate::keymap::TYPING
+        .iter()
+        .map(|(keys, _)| keys.chars().count())
+        .max()
+        .unwrap_or(0);
+    for (keys, what) in crate::keymap::TYPING {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {keys:<typing_width$}  "), theme.accent),
+            Span::styled(*what, theme.text),
+        ]));
     }
     lines
 }

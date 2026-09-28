@@ -1,6 +1,7 @@
 //! Painting a state onto the screen.
 
 mod help;
+mod search;
 
 /// How far the help can scroll on a screen `rows` tall.
 pub fn help_overflow(rows: u16) -> usize {
@@ -82,6 +83,14 @@ fn draw_sidebar(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
 
 fn draw_main(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
     let focused = state.focus == Focus::Main;
+    // The search has its own layout inside the panel: the line, the tabs and the results.
+    if state.section() == Section::Search {
+        let block = panel(Section::Search.title(), focused, theme);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        search::draw(state, theme, frame, inner);
+        return;
+    }
     let (title, lines) = match (state.section(), &state.queue) {
         (Section::Queue, Some(queue)) => {
             let title = format!("Queue ({})", queue.items.len());
@@ -627,14 +636,19 @@ mod tests {
         assert!(top.contains("j/k scroll"), "{top}");
         assert!(top.contains("General"), "{top}");
         assert!(
-            !top.contains("repeat: off, all, one"),
-            "cut off at the bottom:\n{top}"
+            !top.contains("delete everything before the cursor"),
+            "the last line is cut off at the bottom:\n{top}"
         );
 
         state.help_scroll = crate::app::help_max_scroll(&state);
         let bottom = screen(&state, 100, 24);
-        assert!(bottom.contains("repeat: off, all, one"), "{bottom}");
-        assert!(bottom.contains("volume up"), "{bottom}");
+        assert!(
+            bottom.contains("delete everything before the cursor"),
+            "{bottom}"
+        );
+        assert!(bottom.contains("While typing a search"), "{bottom}");
+        // What was on top has scrolled out of view.
+        assert!(!bottom.contains("General"), "{bottom}");
     }
 
     #[test]
@@ -766,5 +780,215 @@ mod tests {
         press(&mut state, '?');
         let screen = screen(&state, 70, 30);
         assert!(screen.contains("Movement"), "{screen}");
+    }
+
+    // --- The search section ------------------------------------------------------------------
+
+    fn in_the_search() -> State {
+        let mut state = State::default();
+        update(
+            &mut state,
+            Msg::Connected {
+                server: phonia_ipc::ServerInfo {
+                    name: "phoniad".into(),
+                    version: "0.1.0".into(),
+                    pid: 1,
+                },
+                protocol: phonia_ipc::Version { major: 1, minor: 6 },
+                capabilities: vec!["catalog".into()],
+                status: crate::app::tests_support::status(),
+                queue: crate::app::tests_support::queue(),
+            },
+        );
+        press(&mut state, '2');
+        state
+    }
+
+    /// The search of "korn" done, with two tracks and one album found.
+    fn with_results() -> State {
+        use crate::app::{Tag, submit_search};
+        let mut state = in_the_search();
+        submit_search(&mut state, "korn");
+        let generation = state.search.generation;
+        let track = |id: &str, title: &str| phonia_ipc::TrackSummary {
+            id: id.into(),
+            title: title.into(),
+            version: None,
+            artists: vec![phonia_ipc::ArtistRef {
+                id: "780".into(),
+                name: "Korn".into(),
+            }],
+            album: Some(phonia_ipc::AlbumRef {
+                id: "9".into(),
+                title: "Issues".into(),
+            }),
+            duration_ms: Some(271_000),
+            explicit: false,
+            track_number: None,
+            quality: Some(phonia_ipc::Quality::Hires),
+            streamable: true,
+        };
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::Search { generation },
+                result: Ok(phonia_ipc::Payload::SearchResults {
+                    query: "korn".into(),
+                    tracks: Some(phonia_ipc::Page {
+                        items: vec![track("1", "Falling Away from Me"), track("2", "Dead")],
+                        total: 123,
+                        offset: 0,
+                    }),
+                    albums: Some(phonia_ipc::Page {
+                        items: vec![phonia_ipc::AlbumSummary {
+                            id: "9".into(),
+                            title: "Issues".into(),
+                            version: None,
+                            artists: vec![phonia_ipc::ArtistRef {
+                                id: "780".into(),
+                                name: "Korn".into(),
+                            }],
+                            release_date: Some("1999-11-16".into()),
+                            track_count: Some(16),
+                            duration_ms: None,
+                            explicit: true,
+                            quality: Some(phonia_ipc::Quality::Hires),
+                        }],
+                        total: 20,
+                        offset: 0,
+                    }),
+                    artists: Some(phonia_ipc::Page {
+                        items: vec![],
+                        total: 0,
+                        offset: 0,
+                    }),
+                    playlists: None,
+                }),
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn before_a_search_the_section_invites_to_start_one() {
+        let text = screen(&in_the_search(), 80, 14);
+        assert!(text.contains("Press / to search TIDAL."), "{text}");
+        assert!(
+            text.contains("Tracks") && text.contains("Playlists"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn what_is_typed_shows_after_the_prompt_with_the_cursor_at_its_end() {
+        let mut state = in_the_search();
+        press(&mut state, '/');
+        for c in "korn".chars() {
+            press(&mut state, c);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
+        terminal
+            .draw(|frame| draw(&state, &Theme::new(false), frame))
+            .unwrap();
+        let cursor = terminal.get_cursor_position().unwrap();
+        // The sidebar (14) and the panel's border (1), then "/ " and four letters, on the first
+        // row inside the border.
+        assert_eq!((cursor.x, cursor.y), (14 + 1 + 2 + 4, 1));
+        let text = screen(&state, 80, 14);
+        assert!(text.contains("/ korn"), "{text}");
+    }
+
+    #[test]
+    fn a_search_under_way_says_so() {
+        let mut state = in_the_search();
+        crate::app::submit_search(&mut state, "korn");
+        let text = screen(&state, 80, 14);
+        assert!(text.contains("Searching..."), "{text}");
+        assert!(text.contains("/ "), "{text}");
+    }
+
+    #[test]
+    fn a_failure_is_shown_where_the_results_would_be() {
+        let mut state = in_the_search();
+        crate::app::submit_search(&mut state, "korn");
+        let generation = state.search.generation;
+        update(
+            &mut state,
+            Msg::Response {
+                tag: crate::app::Tag::Search { generation },
+                result: Err("not logged in to TIDAL (no session): run `phonia login`".into()),
+            },
+        );
+        let text = screen(&state, 100, 14);
+        assert!(text.contains("run `phonia login`"), "{text}");
+    }
+
+    #[test]
+    fn the_results_are_listed_with_the_counts_in_the_tabs() {
+        let state = with_results();
+        let text = screen(&state, 120, 14);
+        assert!(text.contains("Tracks (123)"), "{text}");
+        assert!(text.contains("Albums (20)"), "{text}");
+        assert!(text.contains("Artists (0)"), "{text}");
+        assert!(
+            text.contains("1. Korn - Falling Away from Me - Issues - 4:31 - hires"),
+            "{text}"
+        );
+        assert!(text.contains("2. Korn - Dead"), "{text}");
+    }
+
+    #[test]
+    fn another_tab_shows_its_own_list_and_an_empty_one_says_nothing_was_found() {
+        let mut state = with_results();
+        press(&mut state, ']');
+        let text = screen(&state, 120, 14);
+        assert!(
+            text.contains("1. Korn - Issues - 1999 - 16 tracks - hires - explicit"),
+            "{text}"
+        );
+        assert!(!text.contains("Falling Away from Me"), "{text}");
+
+        press(&mut state, ']');
+        let text = screen(&state, 120, 14);
+        assert!(text.contains("No artists for \"korn\"."), "{text}");
+    }
+
+    #[test]
+    fn the_row_under_the_cursor_is_highlighted_only_when_the_list_has_the_focus_and_no_typing() {
+        let theme = Theme::new(false);
+        let reversed_rows = |state: &State| {
+            let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
+            terminal.draw(|frame| draw(state, &theme, frame)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..14)
+                .filter(|y| {
+                    (16..60).any(|x| {
+                        buffer[(x, *y)]
+                            .modifier
+                            .contains(ratatui::style::Modifier::REVERSED)
+                    })
+                })
+                .count()
+        };
+        let mut state = with_results();
+        press(&mut state, 'l');
+        assert_eq!(reversed_rows(&state), 1, "the list has the focus");
+        press(&mut state, '/');
+        assert_eq!(reversed_rows(&state), 0, "typing: no row is selected");
+        update(
+            &mut state,
+            Msg::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+        press(&mut state, 'h');
+        assert_eq!(reversed_rows(&state), 0, "the focus is on the sidebar");
+    }
+
+    #[test]
+    fn a_narrow_terminal_does_not_break_the_search_screen() {
+        let mut state = with_results();
+        press(&mut state, '/');
+        for (w, h) in [(0, 0), (1, 1), (16, 4), (20, 5), (40, 8)] {
+            let _ = screen(&state, w, h);
+        }
     }
 }
