@@ -1,5 +1,6 @@
 //! What the interface knows, what can happen to it, and how one becomes the other.
 
+use crate::browse::{self as browse, Header, Stack};
 use crate::cursor::Cursor;
 use crate::keymap::{self, Action, Key, Resolution};
 use crate::search::{Phase, SearchState, Selected, Tab};
@@ -101,6 +102,10 @@ pub struct State {
     /// A line of good news ("Added 12 tracks"), shown in the bar until the next key.
     pub notice: Option<String>,
     pub search: SearchState,
+    /// The album and playlist views opened from a search result.
+    pub search_views: Stack,
+    /// The number the next view opened is pushed with.
+    pub next_serial: u64,
 }
 
 impl State {
@@ -189,6 +194,12 @@ pub enum Tag {
     SearchMore { tab: Tab, generation: u64 },
     /// Tracks added to the queue from a result; if `play`, the first of them starts playing.
     Add { play: bool },
+    /// An album or a playlist, whole, added from within its own view; `play_at`, when given, is
+    /// which of the tracks added (by position among the ones that were, skipping the ones TIDAL
+    /// would not stream) to start playing.
+    AddFrom { play_at: Option<usize> },
+    /// The view pushed with this number: its tracks, or the next page of them.
+    View { serial: u64 },
 }
 
 /// What [`update`] decided.
@@ -245,6 +256,7 @@ pub fn update(state: &mut State, msg: Msg) -> Effects {
         Msg::Disconnected { reason, retry_in } => {
             state.connection = Connection::Disconnected { reason, retry_in };
             state.search.connection_lost();
+            state.search_views.connection_lost();
             Effects::redraw()
         }
         Msg::Refused { reason } => {
@@ -320,28 +332,73 @@ fn on_response(state: &mut State, tag: Tag, result: Result<Payload, String>) -> 
             }
             Effects::redraw()
         }
-        Tag::Add { play } => match result {
-            Ok(Payload::Added { ids, rejected, .. }) => {
-                state.notice = Some(added_notice(ids.len(), rejected.first()));
-                // The first of what was added starts playing, when that is what was asked.
-                match ids.first() {
-                    Some(first) if play => Effects {
-                        redraw: true,
-                        commands: vec![Cmd::Send(Request::Play { item: Some(*first) })],
-                    },
-                    _ => Effects::redraw(),
-                }
-            }
-            Ok(_) => {
-                state.last_error = Some("the daemon answered something unexpected".to_string());
-                Effects::redraw()
-            }
-            Err(reason) => {
-                state.last_error = Some(reason);
-                Effects::redraw()
-            }
-        },
+        Tag::Add { play } => on_added(state, result, play.then_some(0)),
+        Tag::AddFrom { play_at } => on_added(state, result, play_at),
+        Tag::View { serial } => on_view_response(state, serial, result),
     }
+}
+
+/// What an add answers with, wherever it came from: how many tracks went in, and which one (if
+/// any) to start playing, by its position among the ones that were added.
+fn on_added(state: &mut State, result: Result<Payload, String>, play_at: Option<usize>) -> Effects {
+    match result {
+        Ok(Payload::Added { ids, rejected, .. }) => {
+            state.notice = Some(added_notice(ids.len(), rejected.first()));
+            match play_at.and_then(|index| ids.get(index)).copied() {
+                Some(id) => Effects {
+                    redraw: true,
+                    commands: vec![Cmd::Send(Request::Play { item: Some(id) })],
+                },
+                None => Effects::redraw(),
+            }
+        }
+        Ok(_) => {
+            state.last_error = Some("the daemon answered something unexpected".to_string());
+            Effects::redraw()
+        }
+        Err(reason) => {
+            state.last_error = Some(reason);
+            Effects::redraw()
+        }
+    }
+}
+
+/// The answer to opening a view, or to asking it for more tracks: the same request either way, so
+/// what tells them apart is whether the view was still loading.
+fn on_view_response(state: &mut State, serial: u64, result: Result<Payload, String>) -> Effects {
+    let Some(browse::View::TrackList(view)) = state.search_views.find_mut(serial) else {
+        // Closed, or the answer to a view that is no longer open: nothing to show it in.
+        return Effects::default();
+    };
+    let opening = view.phase == browse::Phase::Loading;
+    match result {
+        Ok(Payload::Tracks { page, .. }) => {
+            if opening {
+                view.tracks = crate::list::Found::from_page(page);
+                view.phase = browse::Phase::Done;
+            } else {
+                view.tracks.append(Some(page));
+            }
+        }
+        Ok(_) => {
+            let reason = "the daemon answered something unexpected".to_string();
+            if opening {
+                view.phase = browse::Phase::Failed(reason);
+            } else {
+                view.tracks.loading = false;
+                state.last_error = Some(reason);
+            }
+        }
+        Err(reason) => {
+            if opening {
+                view.phase = browse::Phase::Failed(reason);
+            } else {
+                view.tracks.loading = false;
+                state.last_error = Some(format!("could not load more results: {reason}"));
+            }
+        }
+    }
+    Effects::redraw()
 }
 
 /// What to tell about tracks added to the queue: how many, and why one was not, if one was not.
@@ -612,6 +669,7 @@ fn apply(state: &mut State, action: Action) -> Effects {
         state.queue_cursor,
         state.search.tab,
         state.search.list_cursors(),
+        state.search_views.top_serial(),
     );
     match action {
         Action::Quit => return Effects::command(Cmd::Quit),
@@ -628,7 +686,14 @@ fn apply(state: &mut State, action: Action) -> Effects {
                 Focus::Main => Focus::Sidebar,
             }
         }
-        Action::FocusSidebar => state.focus = Focus::Sidebar,
+        Action::FocusSidebar => {
+            if !pop_view_if_browsing(state) {
+                state.focus = Focus::Sidebar;
+            }
+        }
+        Action::Back => {
+            pop_view_if_browsing(state);
+        }
         Action::FocusMain => state.focus = Focus::Main,
         Action::Section(index) => state.sidebar.select(index, Section::ALL.len()),
         Action::Down
@@ -661,6 +726,9 @@ fn apply(state: &mut State, action: Action) -> Effects {
             if state.focus == Focus::Sidebar {
                 state.focus = Focus::Main;
             } else if state.section() == Section::Search {
+                if !state.search_views.is_empty() {
+                    return act_in_view(state, action);
+                }
                 // Enter plays the result under the cursor; with none, it opens the line.
                 if state.search.selected().is_some() {
                     return act_on_result(state, action);
@@ -674,9 +742,16 @@ fn apply(state: &mut State, action: Action) -> Effects {
         Action::RemoveEntry | Action::MoveEntryDown | Action::MoveEntryUp | Action::ClearQueue => {
             return edit_queue(state, action);
         }
-        Action::AddToQueue | Action::AddNext => return act_on_result(state, action),
+        Action::AddToQueue | Action::AddNext => {
+            return if state.search_views.is_empty() {
+                act_on_result(state, action)
+            } else {
+                act_in_view(state, action)
+            };
+        }
         Action::StartSearch => {
-            // From anywhere: the search opens, and typing starts.
+            // From anywhere: any album or playlist open is left, and typing starts.
+            state.search_views = Stack::default();
             let index = Section::ALL
                 .iter()
                 .position(|section| *section == Section::Search)
@@ -687,7 +762,7 @@ fn apply(state: &mut State, action: Action) -> Effects {
             return Effects::redraw();
         }
         Action::TabNext | Action::TabPrevious => {
-            if state.section() != Section::Search {
+            if state.section() != Section::Search || !state.search_views.is_empty() {
                 return Effects::default();
             }
             let tab = state.search.tab;
@@ -710,6 +785,7 @@ fn apply(state: &mut State, action: Action) -> Effects {
         state.queue_cursor,
         state.search.tab,
         state.search.list_cursors(),
+        state.search_views.top_serial(),
     ) == before
     {
         Effects::default()
@@ -809,6 +885,26 @@ fn load_more_results(state: &mut State) -> Vec<Cmd> {
     if state.focus != Focus::Main || state.section() != Section::Search || state.search.editing {
         return Vec::new();
     }
+    if let Some(serial) = state.search_views.top_serial() {
+        let Some(browse::View::TrackList(view)) = state.search_views.top_mut() else {
+            return Vec::new();
+        };
+        if view.phase != browse::Phase::Done {
+            return Vec::new();
+        }
+        let of = view.of.clone();
+        return match view.tracks.next_offset() {
+            Some(offset) => vec![Cmd::Request {
+                tag: Tag::View { serial },
+                request: Request::Tracks {
+                    from: of,
+                    offset,
+                    limit: Some(crate::search::PAGE_SIZE),
+                },
+            }],
+            None => Vec::new(),
+        };
+    }
     let tab = state.search.tab;
     match state.search.next_page(tab) {
         Some(request) => vec![Cmd::Request {
@@ -836,6 +932,32 @@ fn act_on_result(state: &mut State, action: Action) -> Effects {
     let Some(selected) = state.search.selected() else {
         return Effects::default();
     };
+    // Enter opens an album or a playlist, to see its tracks, instead of playing it whole.
+    if action == Action::Activate {
+        match selected {
+            Selected::Album(album) => {
+                let album = album.clone();
+                return open_track_list(
+                    state,
+                    phonia_ipc::CatalogRef::Album {
+                        id: album.id.clone(),
+                    },
+                    Header::Album(album),
+                );
+            }
+            Selected::Playlist(playlist) => {
+                let playlist = playlist.clone();
+                return open_track_list(
+                    state,
+                    phonia_ipc::CatalogRef::Playlist {
+                        id: playlist.id.clone(),
+                    },
+                    Header::Playlist(playlist),
+                );
+            }
+            Selected::Track(_) | Selected::Artist(_) => {}
+        }
+    }
     let play = action == Action::Activate;
     // Playing goes after the track playing and starts the first added; `a` goes to the end.
     let at = if action == Action::AddToQueue {
@@ -904,15 +1026,25 @@ fn move_cursor(state: &mut State, action: Action) {
     let page = state.half_page();
     let queue_len = queue_len(state);
     let tab = state.search.tab;
-    let (len, cursor) = match (state.focus, state.section()) {
-        (Focus::Sidebar, _) => (Section::ALL.len(), &mut state.sidebar),
-        (Focus::Main, Section::Queue) => (queue_len, &mut state.queue_cursor),
-        (Focus::Main, Section::Search) => {
-            let (cursor, len) = state.search.list_of(tab);
-            (len, cursor)
+    let browsing = state.focus == Focus::Main
+        && state.section() == Section::Search
+        && !state.search_views.is_empty();
+    let (len, cursor) = if browsing {
+        let Some(browse::View::TrackList(view)) = state.search_views.top_mut() else {
+            return;
+        };
+        (view.tracks.items.len(), &mut view.tracks.cursor)
+    } else {
+        match (state.focus, state.section()) {
+            (Focus::Sidebar, _) => (Section::ALL.len(), &mut state.sidebar),
+            (Focus::Main, Section::Queue) => (queue_len, &mut state.queue_cursor),
+            (Focus::Main, Section::Search) => {
+                let (cursor, len) = state.search.list_of(tab);
+                (len, cursor)
+            }
+            // The library lists nothing yet.
+            (Focus::Main, Section::Library) => return,
         }
-        // The library lists nothing yet.
-        (Focus::Main, Section::Library) => return,
     };
     match action {
         Action::Down => cursor.down(len),
@@ -922,6 +1054,112 @@ fn move_cursor(state: &mut State, action: Action) {
         Action::HalfPageDown => cursor.page_down(len, page),
         Action::HalfPageUp => cursor.page_up(page),
         _ => {}
+    }
+}
+
+/// Closes the view on top, if the search is what has the focus and there is one to close.
+fn pop_view_if_browsing(state: &mut State) -> bool {
+    state.focus == Focus::Main && state.section() == Section::Search && state.search_views.pop()
+}
+
+/// Opens an album or a playlist: pushes it in a loading state (its header is already known from
+/// the result it came from) and asks for its first page of tracks.
+fn open_track_list(state: &mut State, of: phonia_ipc::CatalogRef, header: Header) -> Effects {
+    if state.connection != Connection::Connected {
+        state.last_error = Some("not connected to phoniad".to_string());
+        return Effects::redraw();
+    }
+    if !state.has(phonia_ipc::CAP_CATALOG) {
+        state.last_error =
+            Some("this phoniad cannot show albums or playlists: it needs protocol 1.6".to_string());
+        return Effects::redraw();
+    }
+    let serial = state.next_serial;
+    state.next_serial += 1;
+    state.search_views.push(
+        serial,
+        browse::View::TrackList(browse::TrackListView::new(of.clone(), header)),
+    );
+    Effects {
+        redraw: true,
+        commands: vec![Cmd::Request {
+            tag: Tag::View { serial },
+            request: Request::Tracks {
+                from: of,
+                offset: 0,
+                limit: Some(crate::search::PAGE_SIZE),
+            },
+        }],
+    }
+}
+
+/// Enter, `a` and `A` on the track under the cursor of an open album or playlist: Enter queues the
+/// whole thing right after the track playing and starts at this one (skipping, in the count, any
+/// track TIDAL will not stream, since those never reach the queue); `a`/`A` add just this track.
+fn act_in_view(state: &mut State, action: Action) -> Effects {
+    let Some(browse::View::TrackList(view)) = state.search_views.top() else {
+        return Effects::default();
+    };
+    if view.phase != browse::Phase::Done {
+        return Effects::default();
+    }
+    let index = view.tracks.cursor.selected();
+    let Some(track) = view.tracks.items.get(index) else {
+        return Effects::default();
+    };
+    if !track.streamable {
+        state.last_error = Some(format!("{} is not available where you are", track.title));
+        return Effects::redraw();
+    }
+    if state.connection != Connection::Connected {
+        state.last_error = Some("not connected to phoniad".to_string());
+        return Effects::redraw();
+    }
+    state.last_error = None;
+    let request = match action {
+        Action::Activate => {
+            let play_at = view.tracks.items[..index]
+                .iter()
+                .filter(|track| track.streamable)
+                .count();
+            return Effects {
+                redraw: true,
+                commands: vec![Cmd::Request {
+                    tag: Tag::AddFrom {
+                        play_at: Some(play_at),
+                    },
+                    request: Request::QueueAddFrom {
+                        from: view.of.clone(),
+                        at: phonia_ipc::AddAt::Next,
+                    },
+                }],
+            };
+        }
+        Action::AddToQueue | Action::AddNext => {
+            let source = match phonia_ipc::source::tidal(&track.id) {
+                Ok(source) => source,
+                Err(reason) => {
+                    state.last_error = Some(reason);
+                    return Effects::redraw();
+                }
+            };
+            Request::QueueAdd {
+                tracks: vec![phonia_ipc::NewTrack { source }],
+                at: if action == Action::AddToQueue {
+                    phonia_ipc::AddAt::End
+                } else {
+                    phonia_ipc::AddAt::Next
+                },
+            }
+        }
+        _ => return Effects::default(),
+    };
+    Effects {
+        redraw: true,
+        commands: vec![Cmd::Request {
+            tag: Tag::Add { play: false },
+            request,
+        }],
     }
 }
 
@@ -2316,32 +2554,49 @@ mod tests {
     }
 
     #[test]
-    fn an_album_and_a_playlist_are_added_whole_from_the_catalog() {
+    fn a_adds_an_album_or_a_playlist_whole_and_enter_opens_it_instead() {
         let mut state = with_results(vec![track_row(11)], 1);
         ch(&mut state, ']');
-        let (tag, request) = tagged(press(&mut state, KeyCode::Enter));
-        assert_eq!(tag, Tag::Add { play: true });
+        let (tag, request) = tagged(ch(&mut state, 'a'));
+        assert_eq!(tag, Tag::Add { play: false });
         assert_eq!(
             request,
             Request::QueueAddFrom {
                 from: phonia_ipc::CatalogRef::Album {
                     id: "33723912".into()
                 },
-                at: phonia_ipc::AddAt::Next
+                at: phonia_ipc::AddAt::End
             }
         );
         ch(&mut state, ']');
         ch(&mut state, ']');
-        let (_, request) = tagged(ch(&mut state, 'a'));
+        let (_, request) = tagged(ch(&mut state, 'A'));
         assert_eq!(
             request,
             Request::QueueAddFrom {
                 from: phonia_ipc::CatalogRef::Playlist {
                     id: "5545fb2d-fd50".into()
                 },
-                at: phonia_ipc::AddAt::End
+                at: phonia_ipc::AddAt::Next
             }
         );
+
+        // Enter, on the album, opens it instead of adding it.
+        ch(&mut state, '[');
+        ch(&mut state, '[');
+        let (tag, request) = tagged(press(&mut state, KeyCode::Enter));
+        assert_eq!(tag, Tag::View { serial: 0 });
+        assert_eq!(
+            request,
+            Request::Tracks {
+                from: phonia_ipc::CatalogRef::Album {
+                    id: "33723912".into()
+                },
+                offset: 0,
+                limit: Some(crate::search::PAGE_SIZE)
+            }
+        );
+        assert_eq!(state.search_views.top_serial(), Some(0));
     }
 
     #[test]
@@ -2646,5 +2901,274 @@ mod tests {
             ch(&mut state, 'j').commands.is_empty(),
             "no asking for ever"
         );
+    }
+
+    // --- Opening an album or a playlist, and acting inside it -------------------------------
+
+    fn open_album(state: &mut State) -> u64 {
+        // From the search results, "Issues" is the only album: open it.
+        let (tag, _) = tagged(press(state, KeyCode::Enter));
+        let Tag::View { serial } = tag else {
+            panic!("not a view tag")
+        };
+        serial
+    }
+
+    /// Three tracks of "Issues", the second not streamable, opened and loaded.
+    fn in_an_open_album(streamable_second: bool) -> (State, u64) {
+        let mut state = with_results(vec![track_row(11)], 1);
+        ch(&mut state, ']'); // Albums
+        let serial = open_album(&mut state);
+        let mut second = track_row(2);
+        second.streamable = streamable_second;
+        second.title = "Trash".into();
+        let mut tracks = vec![track_row(1), second, track_row(3)];
+        tracks[0].title = "Dead".into();
+        tracks[2].title = "4U".into();
+        for (index, track) in tracks.iter_mut().enumerate() {
+            track.track_number = Some(index as u32 + 1);
+        }
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::View { serial },
+                result: Ok(Payload::Tracks {
+                    from: phonia_ipc::CatalogRef::Album {
+                        id: "33723912".into(),
+                    },
+                    page: page_of(tracks, 3, 0).unwrap(),
+                }),
+            },
+        );
+        (state, serial)
+    }
+
+    #[test]
+    fn enter_on_an_album_opens_it_with_its_header_known_at_once() {
+        use crate::browse::{Header, View};
+        let mut state = with_results(vec![track_row(11)], 1);
+        ch(&mut state, ']');
+        let serial = open_album(&mut state);
+        assert_eq!(serial, 0);
+        let Some(View::TrackList(view)) = state.search_views.top() else {
+            panic!("no view open")
+        };
+        assert_eq!(view.title(), "Issues");
+        assert!(matches!(view.header(), Header::Album(_)));
+        assert_eq!(view.phase, crate::browse::Phase::Loading);
+    }
+
+    #[test]
+    fn the_tracks_of_the_album_fill_the_view_once_they_come() {
+        let (state, _) = in_an_open_album(true);
+        let Some(crate::browse::View::TrackList(view)) = state.search_views.top() else {
+            panic!("no view")
+        };
+        assert_eq!(view.phase, crate::browse::Phase::Done);
+        assert_eq!(view.tracks.items.len(), 3);
+        assert_eq!(view.tracks.items[0].title, "Dead");
+    }
+
+    #[test]
+    fn enter_on_a_track_in_the_album_queues_the_rest_and_plays_the_right_one() {
+        let (mut state, _) = in_an_open_album(false); // the 2nd track ("Trash") cannot be streamed
+        ch(&mut state, 'j');
+        ch(&mut state, 'j'); // the cursor is on the 3rd loaded track ("4U")
+        let (tag, request) = tagged(press(&mut state, KeyCode::Enter));
+        assert_eq!(
+            request,
+            Request::QueueAddFrom {
+                from: phonia_ipc::CatalogRef::Album {
+                    id: "33723912".into()
+                },
+                at: phonia_ipc::AddAt::Next
+            }
+        );
+        // Of the two tracks before this one, only the 1st ("Dead") could stream: play_at is 1,
+        // not 2, since the unstreamable one never reaches the queue.
+        assert_eq!(tag, Tag::AddFrom { play_at: Some(1) });
+
+        let added = Payload::Added {
+            ids: vec![phonia_ipc::ItemId(10), phonia_ipc::ItemId(11)],
+            rejected: vec![],
+            unresolved: vec![],
+        };
+        let effects = update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Ok(added),
+            },
+        );
+        assert_eq!(
+            effects.commands,
+            vec![Cmd::Send(Request::Play {
+                item: Some(phonia_ipc::ItemId(11))
+            })],
+            "the id at position 1 (0-based), not position 2"
+        );
+    }
+
+    #[test]
+    fn enter_on_a_track_that_cannot_be_streamed_is_refused() {
+        let (mut state, _) = in_an_open_album(false);
+        ch(&mut state, 'j'); // the unstreamable "Trash"
+        let effects = press(&mut state, KeyCode::Enter);
+        assert!(effects.commands.is_empty());
+        assert!(state.last_error.as_deref().unwrap().contains("Trash"));
+    }
+
+    #[test]
+    fn a_and_capital_a_add_just_the_track_under_the_cursor() {
+        let (mut state, _) = in_an_open_album(true);
+        ch(&mut state, 'j');
+        let (tag, request) = tagged(ch(&mut state, 'a'));
+        assert_eq!(tag, Tag::Add { play: false });
+        assert_eq!(
+            request,
+            Request::QueueAdd {
+                tracks: vec![phonia_ipc::NewTrack {
+                    source: "tidal:2".into()
+                }],
+                at: phonia_ipc::AddAt::End
+            }
+        );
+        let (_, request) = tagged(ch(&mut state, 'A'));
+        assert!(matches!(
+            request,
+            Request::QueueAdd {
+                at: phonia_ipc::AddAt::Next,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn h_backspace_and_starting_a_new_search_all_close_the_album() {
+        let (mut state, _) = in_an_open_album(true);
+        assert!(!state.search_views.is_empty());
+        ch(&mut state, 'h');
+        assert!(state.search_views.is_empty(), "h closes it");
+        assert_eq!(
+            state.focus,
+            Focus::Main,
+            "and stays on the results, not the sidebar"
+        );
+
+        let (mut state, _) = in_an_open_album(true);
+        press(&mut state, KeyCode::Backspace);
+        assert!(state.search_views.is_empty());
+
+        let (mut state, _) = in_an_open_album(true);
+        ch(&mut state, '/');
+        assert!(
+            state.search_views.is_empty(),
+            "starting a new search leaves the album open no more"
+        );
+    }
+
+    #[test]
+    fn h_on_the_results_themselves_still_moves_to_the_sidebar() {
+        let mut state = with_results(vec![track_row(11)], 1);
+        ch(&mut state, 'h');
+        assert_eq!(state.focus, Focus::Sidebar);
+    }
+
+    #[test]
+    fn moving_and_the_brackets_act_on_the_album_not_on_the_search_tabs() {
+        let (mut state, _) = in_an_open_album(true);
+        let tab_before = state.search.tab;
+        assert_eq!(
+            ch(&mut state, ']'),
+            Effects::default(),
+            "no tab switch while browsing"
+        );
+        assert_eq!(state.search.tab, tab_before);
+        ch(&mut state, 'G');
+        let Some(crate::browse::View::TrackList(view)) = state.search_views.top() else {
+            panic!("no view")
+        };
+        assert_eq!(view.tracks.cursor.selected(), 2);
+    }
+
+    #[test]
+    fn a_long_album_loads_more_tracks_as_the_cursor_nears_the_end() {
+        let mut state = with_results(vec![track_row(11)], 1);
+        ch(&mut state, ']');
+        let serial = open_album(&mut state);
+        let tracks: Vec<_> = (0..50).map(track_row).collect();
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::View { serial },
+                result: Ok(Payload::Tracks {
+                    from: phonia_ipc::CatalogRef::Album {
+                        id: "33723912".into(),
+                    },
+                    page: page_of(tracks, 120, 0).unwrap(),
+                }),
+            },
+        );
+        let (more_tag, request) = tagged(ch(&mut state, 'G'));
+        assert_eq!(more_tag, Tag::View { serial });
+        assert_eq!(
+            request,
+            Request::Tracks {
+                from: phonia_ipc::CatalogRef::Album {
+                    id: "33723912".into()
+                },
+                offset: 50,
+                limit: Some(crate::search::PAGE_SIZE)
+            }
+        );
+        let more: Vec<_> = (50..100).map(track_row).collect();
+        update(
+            &mut state,
+            Msg::Response {
+                tag: more_tag,
+                result: Ok(Payload::Tracks {
+                    from: phonia_ipc::CatalogRef::Album {
+                        id: "33723912".into(),
+                    },
+                    page: page_of(more, 120, 50).unwrap(),
+                }),
+            },
+        );
+        let Some(crate::browse::View::TrackList(view)) = state.search_views.top() else {
+            panic!("no view")
+        };
+        assert_eq!(view.tracks.items.len(), 100);
+    }
+
+    #[test]
+    fn losing_the_connection_fails_an_album_still_loading() {
+        let mut state = with_results(vec![track_row(11)], 1);
+        ch(&mut state, ']');
+        open_album(&mut state);
+        disconnected(&mut state, Duration::from_secs(1));
+        let Some(crate::browse::View::TrackList(view)) = state.search_views.top() else {
+            panic!("no view")
+        };
+        assert!(matches!(view.phase, crate::browse::Phase::Failed(_)));
+    }
+
+    #[test]
+    fn a_response_to_a_view_that_was_already_closed_is_dropped() {
+        let (mut state, serial) = in_an_open_album(true);
+        ch(&mut state, 'h');
+        let effects = update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::View { serial },
+                result: Ok(Payload::Tracks {
+                    from: phonia_ipc::CatalogRef::Album {
+                        id: "33723912".into(),
+                    },
+                    page: page_of(vec![track_row(9)], 1, 0).unwrap(),
+                }),
+            },
+        );
+        assert_eq!(effects, Effects::default());
+        assert!(state.search_views.is_empty());
     }
 }

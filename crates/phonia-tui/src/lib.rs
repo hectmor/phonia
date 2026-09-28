@@ -6,6 +6,7 @@
 //! tested with plain values and ratatui's `TestBackend`; only [`run`] talks to the terminal.
 
 pub mod app;
+pub mod browse;
 pub mod conn;
 pub mod cursor;
 pub mod input;

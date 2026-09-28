@@ -50,11 +50,16 @@ chain works with real hardware (a Fosi Audio DS2 during development).
   four lists, tracks, albums, artists and playlists, each with its count, that `[` and `]` step
   through, with `j`/`k` to move in the one shown; a track or an album shows its best quality. It
   needs a daemon that has a TIDAL login, and says so where the results would be when it has not.
-  On a result, `Enter` plays it (a track goes in right after the one playing and starts; an album
-  or a playlist goes in whole and its first track starts), `a` adds it to the end of the queue and
-  `A` right after the track playing; the bar says how many tracks went in. An artist has no
-  tracks to add until the artist view exists, and it says so. The lists load more results by
-  themselves as the cursor nears the end of what is loaded, 50 at a time. Library is still empty. Other keys are vim-like: `j`/`k` (or the arrows) move, `gg` and `G` go
+  On a track, `Enter` plays it (right after the one playing, and starts it); `a` adds it to the
+  end of the queue and `A` right after the track playing, and the bar says how many tracks went
+  in. On an album or a playlist, `Enter` opens it: its title, artists, year, quality and
+  copyright, then its tracks, numbered as on the album, with the ones TIDAL will not stream
+  dimmed; `a`/`A` there still add the whole thing. Inside it, `Enter` on a track queues the rest
+  right after the one playing and starts at that one (skipping, in the count, any track that
+  could not be added); `a`/`A` add just that track. `h`, `Left`, `Backspace` or starting a new
+  search closes it, back to the results. An artist has no tracks to add until the artist view
+  exists, and it says so. Every list, results and an open album alike, loads more by itself as the
+  cursor nears the end of what came, 50 at a time. Library is still empty. Other keys are vim-like: `j`/`k` (or the arrows) move, `gg` and `G` go
   to the ends, `Ctrl-d`/`Ctrl-u` move half a page, `h`/`l`/`Tab` change panel, `1`-`3` jump to a
   section, `?` shows the keys (and scrolls with `j`/`k` when the terminal is too short for it)
   and `q` (or `Ctrl-c`) quits. The help is drawn from the same table the keys are read from, so
