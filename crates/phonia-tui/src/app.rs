@@ -2,9 +2,11 @@
 
 use crate::cursor::Cursor;
 use crate::keymap::{self, Action, Key, Resolution};
+use crate::search::SearchState;
 use crossterm::event::KeyEvent;
 use phonia_ipc::{
-    CAP_VOLUME, Event, Queue, Repeat, Request, SeekTarget, ServerInfo, Status, Track, Version,
+    CAP_VOLUME, Event, Payload, Queue, Repeat, Request, SeekTarget, ServerInfo, Status, Track,
+    Version,
 };
 use std::time::Duration;
 
@@ -96,6 +98,7 @@ pub struct State {
     pub queue: Option<Queue>,
     /// Why the last request sent (a playback key) did not work, until the next one is tried.
     pub last_error: Option<String>,
+    pub search: SearchState,
 }
 
 impl State {
@@ -151,6 +154,11 @@ pub enum Msg {
     RequestFailed {
         reason: String,
     },
+    /// The answer to a [`Cmd::Request`]: what came back, or the daemon's reason it did not.
+    Response {
+        tag: Tag,
+        result: Result<Payload, String>,
+    },
 }
 
 /// Something the interface asks the outside to do.
@@ -161,6 +169,20 @@ pub enum Cmd {
     RetryNow,
     /// Send this request to the daemon; failure comes back as [`Msg::RequestFailed`].
     Send(Request),
+    /// Send this request and bring its answer back as a [`Msg::Response`] carrying `tag`, which
+    /// says what the answer is for.
+    Request {
+        tag: Tag,
+        request: Request,
+    },
+}
+
+/// What a request that wants its answer is for, carried out and back so the answer can be put
+/// where it belongs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tag {
+    /// A search; the answer counts only if it is for the current generation of the search.
+    Search { generation: u64 },
 }
 
 /// What [`update`] decided.
@@ -216,6 +238,7 @@ pub fn update(state: &mut State, msg: Msg) -> Effects {
         }
         Msg::Disconnected { reason, retry_in } => {
             state.connection = Connection::Disconnected { reason, retry_in };
+            state.search.connection_lost();
             Effects::redraw()
         }
         Msg::Refused { reason } => {
@@ -225,6 +248,57 @@ pub fn update(state: &mut State, msg: Msg) -> Effects {
         Msg::Daemon(event) => on_daemon_event(state, event),
         Msg::RequestFailed { reason } => {
             state.last_error = Some(reason);
+            Effects::redraw()
+        }
+        Msg::Response { tag, result } => on_response(state, tag, result),
+    }
+}
+
+/// Starts a search for `query`, if there is a daemon that can do it; if there is not, says why
+/// where the results would be. An empty query does nothing.
+pub fn submit_search(state: &mut State, query: &str) -> Effects {
+    let query = query.trim();
+    if query.is_empty() {
+        return Effects::default();
+    }
+    if state.connection != Connection::Connected {
+        state.search.fail("not connected to phoniad".to_string());
+        return Effects::redraw();
+    }
+    if !state.has(phonia_ipc::CAP_CATALOG) {
+        state.search.fail(
+            "this phoniad cannot search TIDAL: it needs protocol 1.6 and a TIDAL login (run \
+             `phonia login`, then restart it)"
+                .to_string(),
+        );
+        return Effects::redraw();
+    }
+    let request = state.search.begin(query.to_string());
+    Effects {
+        redraw: true,
+        commands: vec![Cmd::Request {
+            tag: Tag::Search {
+                generation: state.search.generation,
+            },
+            request,
+        }],
+    }
+}
+
+/// Puts an answer where its tag says. One for a search that is no longer the current one (a newer
+/// search was started, or the connection was lost meanwhile) is dropped.
+fn on_response(state: &mut State, tag: Tag, result: Result<Payload, String>) -> Effects {
+    match tag {
+        Tag::Search { generation } => {
+            if generation != state.search.generation {
+                return Effects::default();
+            }
+            match result {
+                Ok(payload) => {
+                    state.search.finish(payload);
+                }
+                Err(reason) => state.search.fail(reason),
+            }
             Effects::redraw()
         }
     }
@@ -1438,5 +1512,171 @@ mod tests {
             assert_eq!(ch(&mut state, key), Effects::default(), "{key}");
         }
         assert_eq!(press(&mut state, KeyCode::Enter), Effects::default());
+    }
+
+    // --- Searching: what leaves, and where the answer goes -----------------------------------
+
+    fn results_payload(total: u64) -> Payload {
+        Payload::SearchResults {
+            query: "korn".into(),
+            tracks: Some(phonia_ipc::Page {
+                items: vec![phonia_ipc::TrackSummary {
+                    id: "1".into(),
+                    title: "Song".into(),
+                    version: None,
+                    artists: vec![],
+                    album: None,
+                    duration_ms: None,
+                    explicit: false,
+                    track_number: None,
+                    quality: None,
+                    streamable: true,
+                }],
+                total,
+                offset: 0,
+            }),
+            albums: None,
+            artists: None,
+            playlists: None,
+        }
+    }
+
+    fn search_request(effects: Effects) -> (Tag, Request) {
+        match effects.commands.as_slice() {
+            [Cmd::Request { tag, request }] => (*tag, request.clone()),
+            other => panic!("expected one tagged request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_search_leaves_as_a_tagged_request_and_marks_the_search_as_waiting() {
+        use crate::search::Phase;
+        let mut state = State::default();
+        update(&mut state, connected_msg(&["catalog"]));
+        let effects = submit_search(&mut state, "  korn  ");
+        assert!(effects.redraw);
+        let (tag, request) = search_request(effects);
+        assert_eq!(tag, Tag::Search { generation: 1 });
+        assert_eq!(
+            request,
+            Request::Search {
+                query: "korn".into(),
+                kinds: vec![],
+                offset: 0,
+                limit: Some(50)
+            }
+        );
+        assert_eq!(state.search.phase, Phase::Searching);
+        assert_eq!(state.search.query, "korn");
+    }
+
+    #[test]
+    fn an_empty_search_does_nothing() {
+        let mut state = State::default();
+        update(&mut state, connected_msg(&["catalog"]));
+        assert_eq!(submit_search(&mut state, "   "), Effects::default());
+        assert_eq!(state.search.generation, 0);
+    }
+
+    #[test]
+    fn a_search_without_a_connection_or_a_catalog_says_why_and_sends_nothing() {
+        use crate::search::Phase;
+        // Not connected.
+        let mut state = State::default();
+        let effects = submit_search(&mut state, "korn");
+        assert!(effects.commands.is_empty() && effects.redraw);
+        assert!(matches!(&state.search.phase, Phase::Failed(why) if why.contains("not connected")));
+
+        // Connected to a daemon that cannot search.
+        let mut state = State::default();
+        update(&mut state, connected_msg(&["volume"]));
+        let effects = submit_search(&mut state, "korn");
+        assert!(effects.commands.is_empty() && effects.redraw);
+        assert!(matches!(&state.search.phase, Phase::Failed(why) if why.contains("cannot search")));
+    }
+
+    #[test]
+    fn the_answer_to_the_current_search_fills_the_results() {
+        use crate::search::Phase;
+        let mut state = State::default();
+        update(&mut state, connected_msg(&["catalog"]));
+        let (tag, _) = search_request(submit_search(&mut state, "korn"));
+        let effects = update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Ok(results_payload(123)),
+            },
+        );
+        assert!(effects.redraw);
+        assert_eq!(state.search.phase, Phase::Done);
+        assert_eq!(state.search.tracks.items.len(), 1);
+        assert_eq!(state.search.tracks.total, 123);
+    }
+
+    #[test]
+    fn a_refusal_becomes_the_failure_shown_where_the_results_would_be() {
+        use crate::search::Phase;
+        let mut state = State::default();
+        update(&mut state, connected_msg(&["catalog"]));
+        let (tag, _) = search_request(submit_search(&mut state, "korn"));
+        update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Err("not logged in to TIDAL: run `phonia login`".into()),
+            },
+        );
+        assert_eq!(
+            state.search.phase,
+            Phase::Failed("not logged in to TIDAL: run `phonia login`".into())
+        );
+    }
+
+    #[test]
+    fn the_answer_to_an_old_search_is_dropped() {
+        use crate::search::Phase;
+        let mut state = State::default();
+        update(&mut state, connected_msg(&["catalog"]));
+        let (old, _) = search_request(submit_search(&mut state, "korn"));
+        let (new, _) = search_request(submit_search(&mut state, "nu metal"));
+        assert_ne!(old, new);
+
+        let effects = update(
+            &mut state,
+            Msg::Response {
+                tag: old,
+                result: Ok(results_payload(5)),
+            },
+        );
+        assert_eq!(
+            effects,
+            Effects::default(),
+            "nothing to show: it is not the search asked for"
+        );
+        assert_eq!(state.search.phase, Phase::Searching);
+        assert!(state.search.tracks.items.is_empty());
+        assert_eq!(state.search.query, "nu metal");
+    }
+
+    #[test]
+    fn a_search_waiting_when_the_connection_is_lost_fails_and_its_late_answer_is_dropped() {
+        use crate::search::Phase;
+        let mut state = State::default();
+        update(&mut state, connected_msg(&["catalog"]));
+        let (tag, _) = search_request(submit_search(&mut state, "korn"));
+        disconnected(&mut state, Duration::from_secs(1));
+        assert!(matches!(state.search.phase, Phase::Failed(_)));
+
+        // The answer turns up after all (the request was still on its way): it is not taken.
+        update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Ok(results_payload(9)),
+            },
+        );
+        assert!(matches!(state.search.phase, Phase::Failed(_)));
+        assert!(state.search.tracks.items.is_empty());
     }
 }
