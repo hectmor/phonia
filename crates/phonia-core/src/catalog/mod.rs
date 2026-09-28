@@ -58,10 +58,20 @@ pub struct Track {
     pub duration: Option<Duration>,
     pub explicit: bool,
     pub track_number: Option<u32>,
+    /// Which disc of the album the track is on, when TIDAL says (an album of several discs).
+    pub volume_number: Option<u32>,
     /// The best tier TIDAL has the track in.
     pub quality: Option<Quality>,
     /// Whether it can be played at all (TIDAL lists tracks that are not available where you are).
     pub streamable: bool,
+}
+
+/// What kind of release an album is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlbumKind {
+    Album,
+    Ep,
+    Single,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +86,9 @@ pub struct Album {
     pub duration: Option<Duration>,
     pub explicit: bool,
     pub quality: Option<Quality>,
+    /// An album, an EP or a single, when TIDAL says.
+    pub kind: Option<AlbumKind>,
+    pub copyright: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +133,13 @@ pub struct SearchResults {
     pub albums: Option<Page<Album>>,
     pub artists: Option<Page<Artist>>,
     pub playlists: Option<Page<Playlist>>,
+}
+
+/// Which of an artist's releases to list: the albums, or the EPs and the singles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlbumFilter {
+    Albums,
+    EpsAndSingles,
 }
 
 /// Why the catalog could not answer.
@@ -186,4 +206,30 @@ pub trait Catalog: Send + Sync {
         offset: u32,
         limit: u32,
     ) -> BoxFuture<'static, Result<Page<Track>, CatalogError>>;
+
+    /// An album itself: its title, artists, release date, and so on, not its tracks.
+    fn album(&self, id: String) -> BoxFuture<'static, Result<Album, CatalogError>>;
+
+    /// An artist itself.
+    fn artist(&self, id: String) -> BoxFuture<'static, Result<Artist, CatalogError>>;
+
+    /// What TIDAL says about an artist, as plain text; `None` when it has nothing to say.
+    fn artist_bio(&self, id: String) -> BoxFuture<'static, Result<Option<String>, CatalogError>>;
+
+    /// An artist's most listened to tracks. At most [`MAX_ITEMS_LIMIT`] per page.
+    fn artist_top_tracks(
+        &self,
+        id: String,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Track>, CatalogError>>;
+
+    /// An artist's albums, or its EPs and singles. At most [`MAX_ITEMS_LIMIT`] per page.
+    fn artist_albums(
+        &self,
+        id: String,
+        filter: AlbumFilter,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Album>, CatalogError>>;
 }
