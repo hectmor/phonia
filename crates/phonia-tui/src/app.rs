@@ -2,7 +2,7 @@
 
 use crate::cursor::Cursor;
 use crate::keymap::{self, Action, Key, Resolution};
-use crate::search::SearchState;
+use crate::search::{Phase, SearchState, Selected, Tab};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use phonia_ipc::{
     CAP_VOLUME, Event, Payload, Queue, Repeat, Request, SeekTarget, ServerInfo, Status, Track,
@@ -98,6 +98,8 @@ pub struct State {
     pub queue: Option<Queue>,
     /// Why the last request sent (a playback key) did not work, until the next one is tried.
     pub last_error: Option<String>,
+    /// A line of good news ("Added 12 tracks"), shown in the bar until the next key.
+    pub notice: Option<String>,
     pub search: SearchState,
 }
 
@@ -183,6 +185,10 @@ pub enum Cmd {
 pub enum Tag {
     /// A search; the answer counts only if it is for the current generation of the search.
     Search { generation: u64 },
+    /// The next page of one list of the results of the current search.
+    SearchMore { tab: Tab, generation: u64 },
+    /// Tracks added to the queue from a result; if `play`, the first of them starts playing.
+    Add { play: bool },
 }
 
 /// What [`update`] decided.
@@ -301,6 +307,57 @@ fn on_response(state: &mut State, tag: Tag, result: Result<Payload, String>) -> 
             }
             Effects::redraw()
         }
+        Tag::SearchMore { tab, generation } => {
+            if generation != state.search.generation {
+                return Effects::default();
+            }
+            match result {
+                Ok(payload) => state.search.add_page(tab, payload),
+                Err(reason) => {
+                    state.search.page_failed(tab);
+                    state.last_error = Some(format!("could not load more results: {reason}"));
+                }
+            }
+            Effects::redraw()
+        }
+        Tag::Add { play } => match result {
+            Ok(Payload::Added { ids, rejected, .. }) => {
+                state.notice = Some(added_notice(ids.len(), rejected.first()));
+                // The first of what was added starts playing, when that is what was asked.
+                match ids.first() {
+                    Some(first) if play => Effects {
+                        redraw: true,
+                        commands: vec![Cmd::Send(Request::Play { item: Some(*first) })],
+                    },
+                    _ => Effects::redraw(),
+                }
+            }
+            Ok(_) => {
+                state.last_error = Some("the daemon answered something unexpected".to_string());
+                Effects::redraw()
+            }
+            Err(reason) => {
+                state.last_error = Some(reason);
+                Effects::redraw()
+            }
+        },
+    }
+}
+
+/// What to tell about tracks added to the queue: how many, and why one was not, if one was not.
+fn added_notice(added: usize, first_refused: Option<&phonia_ipc::Rejected>) -> String {
+    let tracks = |n: usize| {
+        if n == 1 {
+            "1 track".to_string()
+        } else {
+            format!("{n} tracks")
+        }
+    };
+    match (added, first_refused) {
+        (0, None) => "There was nothing to add".to_string(),
+        (0, Some(refused)) => format!("Not added: {}", refused.reason),
+        (n, None) => format!("Added {}", tracks(n)),
+        (n, Some(refused)) => format!("Added {} (not added: {})", tracks(n), refused.reason),
     }
 }
 
@@ -433,6 +490,14 @@ fn set_status(state: &mut State, change: impl FnOnce(&mut Status)) {
 }
 
 fn on_key(state: &mut State, event: KeyEvent) -> Effects {
+    // A notice is read once: the next key takes it away.
+    let had_notice = state.notice.take().is_some();
+    let mut effects = on_key_now(state, event);
+    effects.redraw |= had_notice;
+    effects
+}
+
+fn on_key_now(state: &mut State, event: KeyEvent) -> Effects {
     let key = Key::from_event(event);
     if state.help {
         return on_key_in_help(state, key);
@@ -571,7 +636,16 @@ fn apply(state: &mut State, action: Action) -> Effects {
         | Action::First
         | Action::Last
         | Action::HalfPageDown
-        | Action::HalfPageUp => move_cursor(state, action),
+        | Action::HalfPageUp => {
+            move_cursor(state, action);
+            let commands = load_more_results(state);
+            if !commands.is_empty() {
+                return Effects {
+                    redraw: true,
+                    commands,
+                };
+            }
+        }
         Action::TogglePause
         | Action::Next
         | Action::Previous
@@ -587,6 +661,10 @@ fn apply(state: &mut State, action: Action) -> Effects {
             if state.focus == Focus::Sidebar {
                 state.focus = Focus::Main;
             } else if state.section() == Section::Search {
+                // Enter plays the result under the cursor; with none, it opens the line.
+                if state.search.selected().is_some() {
+                    return act_on_result(state, action);
+                }
                 state.search.editing = true;
                 return Effects::redraw();
             } else {
@@ -596,6 +674,7 @@ fn apply(state: &mut State, action: Action) -> Effects {
         Action::RemoveEntry | Action::MoveEntryDown | Action::MoveEntryUp | Action::ClearQueue => {
             return edit_queue(state, action);
         }
+        Action::AddToQueue | Action::AddNext => return act_on_result(state, action),
         Action::StartSearch => {
             // From anywhere: the search opens, and typing starts.
             let index = Section::ALL
@@ -721,6 +800,102 @@ fn reconnect(state: &mut State) -> Effects {
             }
         }
         Connection::Connecting | Connection::Connected => Effects::default(),
+    }
+}
+
+/// Asks for the next page of the list of results being looked at, when the cursor has come near
+/// the end of what is loaded and there is more.
+fn load_more_results(state: &mut State) -> Vec<Cmd> {
+    if state.focus != Focus::Main || state.section() != Section::Search || state.search.editing {
+        return Vec::new();
+    }
+    let tab = state.search.tab;
+    match state.search.next_page(tab) {
+        Some(request) => vec![Cmd::Request {
+            tag: Tag::SearchMore {
+                tab,
+                generation: state.search.generation,
+            },
+            request,
+        }],
+        None => Vec::new(),
+    }
+}
+
+/// Enter, `a` and `A` on the result under the cursor: play it now, add it to the end of the
+/// queue, or add it after the track playing. A track, an album or a playlist can be added; an
+/// artist has no tracks to add until the artist view exists.
+fn act_on_result(state: &mut State, action: Action) -> Effects {
+    if state.section() != Section::Search
+        || state.focus != Focus::Main
+        || state.search.editing
+        || state.search.phase != Phase::Done
+    {
+        return Effects::default();
+    }
+    let Some(selected) = state.search.selected() else {
+        return Effects::default();
+    };
+    let play = action == Action::Activate;
+    // Playing goes after the track playing and starts the first added; `a` goes to the end.
+    let at = if action == Action::AddToQueue {
+        phonia_ipc::AddAt::End
+    } else {
+        phonia_ipc::AddAt::Next
+    };
+    let request = match selected {
+        Selected::Track(track) => {
+            if !track.streamable {
+                state.last_error = Some(format!("{} is not available where you are", track.title));
+                return Effects::redraw();
+            }
+            match phonia_ipc::source::tidal(&track.id) {
+                Ok(source) => Request::QueueAdd {
+                    tracks: vec![phonia_ipc::NewTrack { source }],
+                    at,
+                },
+                Err(reason) => {
+                    state.last_error = Some(reason);
+                    return Effects::redraw();
+                }
+            }
+        }
+        Selected::Album(album) => Request::QueueAddFrom {
+            from: phonia_ipc::CatalogRef::Album {
+                id: album.id.clone(),
+            },
+            at,
+        },
+        Selected::Playlist(playlist) => Request::QueueAddFrom {
+            from: phonia_ipc::CatalogRef::Playlist {
+                id: playlist.id.clone(),
+            },
+            at,
+        },
+        Selected::Artist(_) => {
+            state.notice = Some(
+                "An artist's tracks come with the artist view, which is not there yet".to_string(),
+            );
+            return Effects::redraw();
+        }
+    };
+    if state.connection != Connection::Connected {
+        state.last_error = Some("not connected to phoniad".to_string());
+        return Effects::redraw();
+    }
+    let needs_the_catalog = matches!(request, Request::QueueAddFrom { .. });
+    if needs_the_catalog && !state.has(phonia_ipc::CAP_CATALOG) {
+        state.last_error =
+            Some("this phoniad cannot add albums or playlists: it needs protocol 1.6".to_string());
+        return Effects::redraw();
+    }
+    state.last_error = None;
+    Effects {
+        redraw: true,
+        commands: vec![Cmd::Request {
+            tag: Tag::Add { play },
+            request,
+        }],
     }
 }
 
@@ -2008,5 +2183,463 @@ mod tests {
         assert!(!state.search.editing);
         assert!(press(&mut state, KeyCode::Enter).redraw);
         assert!(state.search.editing);
+    }
+
+    // --- What to do with a result, and more pages ---------------------------------------------
+
+    fn track_row(id: u64) -> phonia_ipc::TrackSummary {
+        phonia_ipc::TrackSummary {
+            id: id.to_string(),
+            title: format!("Song {id}"),
+            version: None,
+            artists: vec![],
+            album: None,
+            duration_ms: None,
+            explicit: false,
+            track_number: None,
+            quality: None,
+            streamable: true,
+        }
+    }
+
+    fn page_of<T>(items: Vec<T>, total: u64, offset: u64) -> Option<phonia_ipc::Page<T>> {
+        Some(phonia_ipc::Page {
+            items,
+            total,
+            offset,
+        })
+    }
+
+    /// The results of a search for "korn": `tracks` (of `total` in all), one album, one
+    /// playlist and one artist. The focus is on the list, with the daemon able to browse.
+    fn with_results(tracks: Vec<phonia_ipc::TrackSummary>, total: u64) -> State {
+        let mut state = State::default();
+        update(&mut state, connected_msg(&["catalog"]));
+        ch(&mut state, '/');
+        typed(&mut state, "korn");
+        let (tag, _) = search_request(press(&mut state, KeyCode::Enter));
+        update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Ok(Payload::SearchResults {
+                    query: "korn".into(),
+                    tracks: page_of(tracks, total, 0),
+                    albums: page_of(
+                        vec![phonia_ipc::AlbumSummary {
+                            id: "33723912".into(),
+                            title: "Issues".into(),
+                            version: None,
+                            artists: vec![],
+                            release_date: None,
+                            track_count: Some(16),
+                            duration_ms: None,
+                            explicit: false,
+                            quality: None,
+                        }],
+                        1,
+                        0,
+                    ),
+                    artists: page_of(
+                        vec![phonia_ipc::ArtistSummary {
+                            id: "780".into(),
+                            name: "Korn".into(),
+                        }],
+                        1,
+                        0,
+                    ),
+                    playlists: page_of(
+                        vec![phonia_ipc::PlaylistSummary {
+                            id: "5545fb2d-fd50".into(),
+                            title: "Korn Essentials".into(),
+                            creator: None,
+                            description: None,
+                            track_count: Some(25),
+                            duration_ms: None,
+                        }],
+                        1,
+                        0,
+                    ),
+                }),
+            },
+        );
+        state
+    }
+
+    fn tagged(effects: Effects) -> (Tag, Request) {
+        search_request(effects)
+    }
+
+    #[test]
+    fn enter_on_a_track_adds_it_after_the_one_playing_and_asks_to_play_it() {
+        let mut state = with_results(vec![track_row(11), track_row(12)], 2);
+        ch(&mut state, 'j');
+        let (tag, request) = tagged(press(&mut state, KeyCode::Enter));
+        assert_eq!(tag, Tag::Add { play: true });
+        assert_eq!(
+            request,
+            Request::QueueAdd {
+                tracks: vec![phonia_ipc::NewTrack {
+                    source: "tidal:12".into()
+                }],
+                at: phonia_ipc::AddAt::Next
+            }
+        );
+    }
+
+    #[test]
+    fn a_adds_to_the_end_and_capital_a_right_after_the_playing_track_without_playing() {
+        let mut state = with_results(vec![track_row(11)], 1);
+        let (tag, request) = tagged(ch(&mut state, 'a'));
+        assert_eq!(tag, Tag::Add { play: false });
+        assert!(matches!(
+            request,
+            Request::QueueAdd {
+                at: phonia_ipc::AddAt::End,
+                ..
+            }
+        ));
+        let (tag, request) = tagged(ch(&mut state, 'A'));
+        assert_eq!(tag, Tag::Add { play: false });
+        assert!(matches!(
+            request,
+            Request::QueueAdd {
+                at: phonia_ipc::AddAt::Next,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn an_album_and_a_playlist_are_added_whole_from_the_catalog() {
+        let mut state = with_results(vec![track_row(11)], 1);
+        ch(&mut state, ']');
+        let (tag, request) = tagged(press(&mut state, KeyCode::Enter));
+        assert_eq!(tag, Tag::Add { play: true });
+        assert_eq!(
+            request,
+            Request::QueueAddFrom {
+                from: phonia_ipc::CatalogRef::Album {
+                    id: "33723912".into()
+                },
+                at: phonia_ipc::AddAt::Next
+            }
+        );
+        ch(&mut state, ']');
+        ch(&mut state, ']');
+        let (_, request) = tagged(ch(&mut state, 'a'));
+        assert_eq!(
+            request,
+            Request::QueueAddFrom {
+                from: phonia_ipc::CatalogRef::Playlist {
+                    id: "5545fb2d-fd50".into()
+                },
+                at: phonia_ipc::AddAt::End
+            }
+        );
+    }
+
+    #[test]
+    fn an_artist_has_nothing_to_add_yet_and_says_so() {
+        let mut state = with_results(vec![track_row(11)], 1);
+        ch(&mut state, ']');
+        ch(&mut state, ']');
+        let effects = ch(&mut state, 'a');
+        assert!(effects.commands.is_empty() && effects.redraw);
+        assert!(state.notice.as_deref().unwrap().contains("artist view"));
+    }
+
+    #[test]
+    fn a_track_that_cannot_be_streamed_is_not_added_and_says_why() {
+        let mut blocked = track_row(11);
+        blocked.streamable = false;
+        let mut state = with_results(vec![blocked], 1);
+        let effects = press(&mut state, KeyCode::Enter);
+        assert!(effects.commands.is_empty());
+        assert!(state.last_error.as_deref().unwrap().contains("Song 11"));
+    }
+
+    #[test]
+    fn acting_on_a_result_without_a_connection_or_the_capability_explains_it() {
+        // Not connected.
+        let mut state = with_results(vec![track_row(11)], 1);
+        disconnected(&mut state, Duration::from_secs(1));
+        let effects = ch(&mut state, 'a');
+        assert!(effects.commands.is_empty());
+        assert!(
+            state
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("not connected")
+        );
+
+        // A daemon that can add tracks but not albums.
+        let mut state = with_results(vec![track_row(11)], 1);
+        update(&mut state, connected_msg(&["volume"]));
+        assert!(
+            !ch(&mut state, 'a').commands.is_empty(),
+            "a track needs no catalog"
+        );
+        ch(&mut state, ']');
+        let effects = ch(&mut state, 'a');
+        assert!(effects.commands.is_empty());
+        assert!(
+            state
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("albums or playlists")
+        );
+    }
+
+    #[test]
+    fn the_result_keys_do_nothing_unless_the_results_are_in_front_of_you() {
+        // Typing: `a` is a letter.
+        let mut state = with_results(vec![track_row(11)], 1);
+        ch(&mut state, '/');
+        assert!(ch(&mut state, 'a').commands.is_empty());
+        assert!(state.search.input.text().ends_with('a'));
+        press(&mut state, KeyCode::Esc);
+        // On the sidebar or in another section.
+        ch(&mut state, 'h');
+        assert_eq!(ch(&mut state, 'a'), Effects::default());
+        ch(&mut state, '1');
+        ch(&mut state, 'l');
+        assert_eq!(ch(&mut state, 'A'), Effects::default());
+        // No results at all.
+        let mut idle = State::default();
+        update(&mut idle, connected_msg(&["catalog"]));
+        ch(&mut idle, '2');
+        ch(&mut idle, 'l');
+        assert_eq!(ch(&mut idle, 'a'), Effects::default());
+    }
+
+    #[test]
+    fn the_answer_to_an_add_tells_how_many_and_plays_the_first_when_asked() {
+        let added = |n: u64, rejected: Vec<phonia_ipc::Rejected>| {
+            Ok(Payload::Added {
+                ids: (1..=n).map(phonia_ipc::ItemId).collect(),
+                rejected,
+                unresolved: vec![],
+            })
+        };
+        let mut state = State::default();
+        update(&mut state, connected_msg(&[]));
+
+        let effects = update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::Add { play: true },
+                result: added(12, vec![]),
+            },
+        );
+        assert_eq!(state.notice.as_deref(), Some("Added 12 tracks"));
+        assert_eq!(
+            effects.commands,
+            vec![Cmd::Send(Request::Play {
+                item: Some(phonia_ipc::ItemId(1))
+            })]
+        );
+
+        let effects = update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::Add { play: false },
+                result: added(1, vec![]),
+            },
+        );
+        assert_eq!(state.notice.as_deref(), Some("Added 1 track"));
+        assert!(effects.commands.is_empty(), "not asked to play");
+
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::Add { play: false },
+                result: added(
+                    3,
+                    vec![phonia_ipc::Rejected {
+                        source: "tidal:9".into(),
+                        reason: "Song 9 is listed by TIDAL but cannot be streamed here".into(),
+                    }],
+                ),
+            },
+        );
+        assert!(
+            state
+                .notice
+                .as_deref()
+                .unwrap()
+                .starts_with("Added 3 tracks (not added: Song 9")
+        );
+
+        let effects = update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::Add { play: true },
+                result: added(0, vec![]),
+            },
+        );
+        assert_eq!(state.notice.as_deref(), Some("There was nothing to add"));
+        assert!(effects.commands.is_empty(), "nothing to play");
+    }
+
+    #[test]
+    fn a_refused_add_becomes_an_error_and_a_notice_is_read_once() {
+        let mut state = State::default();
+        update(&mut state, connected_msg(&[]));
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::Add { play: false },
+                result: Err("TIDAL has no such item".into()),
+            },
+        );
+        assert_eq!(state.last_error.as_deref(), Some("TIDAL has no such item"));
+
+        state.notice = Some("Added 2 tracks".into());
+        let effects = ch(&mut state, 'x');
+        assert!(state.notice.is_none(), "the next key takes it away");
+        assert!(effects.redraw, "and the screen shows that");
+    }
+
+    fn tracks_payload(from: u64, count: u64, total: u64) -> Payload {
+        Payload::SearchResults {
+            query: "korn".into(),
+            tracks: page_of((from..from + count).map(track_row).collect(), total, from),
+            albums: None,
+            artists: None,
+            playlists: None,
+        }
+    }
+
+    fn more_request(effects: Effects) -> (Tag, Request) {
+        search_request(effects)
+    }
+
+    #[test]
+    fn coming_near_the_end_of_a_list_that_has_more_asks_for_the_next_page_once() {
+        let mut state = with_results((0..50).map(track_row).collect(), 123);
+        // Far from the end: nothing to ask.
+        for _ in 0..30 {
+            assert!(ch(&mut state, 'j').commands.is_empty());
+        }
+        // Within ten of the end of the fifty loaded.
+        let mut asked = None;
+        for _ in 0..12 {
+            let effects = ch(&mut state, 'j');
+            if !effects.commands.is_empty() {
+                assert!(asked.is_none(), "asked twice");
+                asked = Some(more_request(effects));
+            }
+        }
+        let (tag, request) = asked.expect("the next page was asked for");
+        assert!(matches!(
+            tag,
+            Tag::SearchMore {
+                tab: Tab::Tracks,
+                ..
+            }
+        ));
+        assert_eq!(
+            request,
+            Request::Search {
+                query: "korn".into(),
+                kinds: vec![phonia_ipc::CatalogKind::Tracks],
+                offset: 50,
+                limit: Some(50)
+            }
+        );
+        assert!(state.search.tracks.loading);
+    }
+
+    #[test]
+    fn a_page_that_comes_is_added_to_the_list_and_the_next_is_asked_for_in_its_turn() {
+        let mut state = with_results((0..50).map(track_row).collect(), 123);
+        let (tag, _) = more_request(ch(&mut state, 'G'));
+        update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Ok(tracks_payload(50, 50, 123)),
+            },
+        );
+        assert_eq!(state.search.tracks.items.len(), 100);
+        assert!(!state.search.tracks.loading);
+        assert_eq!(state.search.tracks.items[50].id, "50");
+        assert_eq!(state.search.tracks.total, 123);
+
+        let (_, request) = more_request(ch(&mut state, 'G'));
+        assert!(matches!(request, Request::Search { offset: 100, .. }));
+    }
+
+    #[test]
+    fn nothing_more_is_asked_once_everything_is_loaded() {
+        let mut state = with_results((0..5).map(track_row).collect(), 5);
+        ch(&mut state, 'G');
+        assert!(ch(&mut state, 'k').commands.is_empty());
+        assert!(!state.search.tracks.loading);
+    }
+
+    #[test]
+    fn a_late_page_of_an_old_search_is_dropped() {
+        let mut state = with_results((0..50).map(track_row).collect(), 123);
+        let (old, _) = more_request(ch(&mut state, 'G'));
+        // A new search starts before the page comes.
+        ch(&mut state, '/');
+        typed(&mut state, "!");
+        press(&mut state, KeyCode::Enter);
+        let effects = update(
+            &mut state,
+            Msg::Response {
+                tag: old,
+                result: Ok(tracks_payload(50, 50, 123)),
+            },
+        );
+        assert_eq!(effects, Effects::default());
+        assert!(state.search.tracks.items.is_empty());
+    }
+
+    #[test]
+    fn a_page_that_fails_can_be_asked_for_again_and_says_why() {
+        let mut state = with_results((0..50).map(track_row).collect(), 123);
+        let (tag, _) = more_request(ch(&mut state, 'G'));
+        update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Err("TIDAL says there were too many requests".into()),
+            },
+        );
+        assert!(!state.search.tracks.loading);
+        assert!(
+            state
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("could not load more")
+        );
+        assert!(
+            !ch(&mut state, 'j').commands.is_empty(),
+            "it can be asked for again"
+        );
+    }
+
+    #[test]
+    fn an_empty_page_ends_the_list_even_if_the_total_said_more() {
+        let mut state = with_results((0..50).map(track_row).collect(), 123);
+        let (tag, _) = more_request(ch(&mut state, 'G'));
+        update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Ok(tracks_payload(50, 0, 123)),
+            },
+        );
+        assert_eq!(state.search.tracks.total, 50);
+        assert!(
+            ch(&mut state, 'j').commands.is_empty(),
+            "no asking for ever"
+        );
     }
 }

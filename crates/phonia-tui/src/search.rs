@@ -13,6 +13,9 @@ use phonia_ipc::{
 /// How many results of each kind one search asks for.
 pub const PAGE_SIZE: u32 = 50;
 
+/// When the cursor is this close to the end of what is loaded, the next page is asked for.
+pub const PREFETCH: usize = 10;
+
 /// The four lists of results, one shown at a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tab {
@@ -48,6 +51,27 @@ impl Tab {
     }
 }
 
+impl Tab {
+    /// The kind of result this tab lists, as the protocol names it.
+    pub fn kind(self) -> phonia_ipc::CatalogKind {
+        match self {
+            Tab::Tracks => phonia_ipc::CatalogKind::Tracks,
+            Tab::Albums => phonia_ipc::CatalogKind::Albums,
+            Tab::Artists => phonia_ipc::CatalogKind::Artists,
+            Tab::Playlists => phonia_ipc::CatalogKind::Playlists,
+        }
+    }
+}
+
+/// The result under the cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Selected<'a> {
+    Track(&'a TrackSummary),
+    Album(&'a AlbumSummary),
+    Artist(&'a ArtistSummary),
+    Playlist(&'a PlaylistSummary),
+}
+
 /// Where the search stands.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Phase {
@@ -68,6 +92,8 @@ pub struct Found<T> {
     pub items: Vec<T>,
     pub total: u64,
     pub cursor: Cursor,
+    /// Whether the next page has been asked for and not come yet.
+    pub loading: bool,
 }
 
 impl<T> Default for Found<T> {
@@ -76,6 +102,7 @@ impl<T> Default for Found<T> {
             items: Vec::new(),
             total: 0,
             cursor: Cursor::default(),
+            loading: false,
         }
     }
 }
@@ -86,6 +113,32 @@ impl<T> Found<T> {
             items: page.items,
             total: page.total,
             cursor: Cursor::default(),
+            loading: false,
+        }
+    }
+
+    /// If the cursor is near the end of what is loaded and there is more, marks the next page as
+    /// asked for and says where it starts. Asking again while it is on its way does nothing.
+    fn next_offset(&mut self) -> Option<u32> {
+        let loaded = self.items.len();
+        let near_the_end = self.cursor.selected() + PREFETCH >= loaded;
+        if self.loading || !near_the_end || loaded as u64 >= self.total {
+            return None;
+        }
+        self.loading = true;
+        Some(loaded as u32)
+    }
+
+    /// Adds a page that came. One with nothing in it ends the list, even if the total said more,
+    /// so a listing that is short of its total cannot be asked for over and over.
+    fn append(&mut self, page: Option<Page<T>>) {
+        self.loading = false;
+        match page {
+            Some(page) if !page.items.is_empty() => {
+                self.items.extend(page.items);
+                self.total = self.total.max(page.total);
+            }
+            _ => self.total = self.items.len() as u64,
         }
     }
 }
@@ -170,6 +223,83 @@ impl SearchState {
 
     pub fn fail(&mut self, reason: String) {
         self.phase = Phase::Failed(reason);
+    }
+
+    /// The next page of the list shown, if the cursor is close to its end and there is more: the
+    /// request for it, with the list marked as waiting for it.
+    pub fn next_page(&mut self, tab: Tab) -> Option<Request> {
+        if self.phase != Phase::Done {
+            return None;
+        }
+        let offset = match tab {
+            Tab::Tracks => self.tracks.next_offset(),
+            Tab::Albums => self.albums.next_offset(),
+            Tab::Artists => self.artists.next_offset(),
+            Tab::Playlists => self.playlists.next_offset(),
+        }?;
+        Some(Request::Search {
+            query: self.query.clone(),
+            kinds: vec![tab.kind()],
+            offset,
+            limit: Some(PAGE_SIZE),
+        })
+    }
+
+    /// Adds the page that came for `tab`.
+    pub fn add_page(&mut self, tab: Tab, payload: Payload) {
+        let Payload::SearchResults {
+            tracks,
+            albums,
+            artists,
+            playlists,
+            ..
+        } = payload
+        else {
+            self.page_failed(tab);
+            return;
+        };
+        match tab {
+            Tab::Tracks => self.tracks.append(tracks),
+            Tab::Albums => self.albums.append(albums),
+            Tab::Artists => self.artists.append(artists),
+            Tab::Playlists => self.playlists.append(playlists),
+        }
+    }
+
+    /// The page asked for did not come: it can be asked for again.
+    pub fn page_failed(&mut self, tab: Tab) {
+        match tab {
+            Tab::Tracks => self.tracks.loading = false,
+            Tab::Albums => self.albums.loading = false,
+            Tab::Artists => self.artists.loading = false,
+            Tab::Playlists => self.playlists.loading = false,
+        }
+    }
+
+    /// The row under the cursor in the list shown, if there is one.
+    pub fn selected(&self) -> Option<Selected<'_>> {
+        match self.tab {
+            Tab::Tracks => self
+                .tracks
+                .items
+                .get(self.tracks.cursor.selected())
+                .map(Selected::Track),
+            Tab::Albums => self
+                .albums
+                .items
+                .get(self.albums.cursor.selected())
+                .map(Selected::Album),
+            Tab::Artists => self
+                .artists
+                .items
+                .get(self.artists.cursor.selected())
+                .map(Selected::Artist),
+            Tab::Playlists => self
+                .playlists
+                .items
+                .get(self.playlists.cursor.selected())
+                .map(Selected::Playlist),
+        }
     }
 
     /// The connection went away: a search still waiting will not be answered, and if it were, the
