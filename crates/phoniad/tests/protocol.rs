@@ -1767,3 +1767,250 @@ async fn too_many_searches_at_once_on_a_connection_are_refused_at_once() {
     assert_eq!(answered, 4);
     f.finish().await;
 }
+
+// --- Adding an album or a playlist (protocol 1.6) --------------------------------------------------
+
+fn tracks(count: u32) -> Vec<catalog::Track> {
+    (1..=count)
+        .map(|n| a_track(&(1000 + n).to_string(), &format!("Song {n}")))
+        .collect()
+}
+
+fn add_from(from: CatalogRef, at: AddAt) -> Request {
+    Request::QueueAddFrom { from, at }
+}
+
+fn album(id: &str) -> CatalogRef {
+    CatalogRef::Album { id: id.into() }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_album_is_added_with_the_titles_and_lengths_that_came_with_its_listing() {
+    let catalog = FakeCatalog::new().with_album("9", tracks(3));
+    let f = fixture_with_catalog("add-album", Some(Arc::new(catalog.clone()))).await;
+    let client = f.client().await;
+
+    let Payload::Added {
+        ids,
+        rejected,
+        unresolved,
+    } = client
+        .request(add_from(album("9"), AddAt::End))
+        .await
+        .unwrap()
+    else {
+        panic!("not an added answer");
+    };
+    assert_eq!(ids.len(), 3);
+    assert!(rejected.is_empty() && unresolved.is_empty());
+
+    let queue = client.queue().await.unwrap();
+    assert_eq!(
+        queue
+            .items
+            .iter()
+            .map(|item| item.source.as_str())
+            .collect::<Vec<_>>(),
+        ["tidal:1001", "tidal:1002", "tidal:1003"]
+    );
+    assert_eq!(queue.items[0].title.as_deref(), Some("Korn - Song 1"));
+    assert_eq!(queue.items[0].duration_ms, Some(271_000));
+    // One listing, and nothing asked about track by track (there is no TIDAL to ask here, which
+    // would have left the titles out).
+    assert_eq!(catalog.calls().len(), 1);
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_playlist_goes_where_at_says() {
+    let catalog = FakeCatalog::new().with_playlist("p-1", tracks(2));
+    let f = fixture_with_catalog("add-playlist", Some(Arc::new(catalog))).await;
+    let client = f.client().await;
+    client
+        .request(Request::QueueAdd {
+            tracks: vec![
+                NewTrack {
+                    source: f.wav("a.wav", 10),
+                },
+                NewTrack {
+                    source: f.wav("b.wav", 10),
+                },
+            ],
+            at: AddAt::End,
+        })
+        .await
+        .unwrap();
+
+    client
+        .request(add_from(
+            CatalogRef::Playlist { id: "p-1".into() },
+            AddAt::Index { index: 1 },
+        ))
+        .await
+        .unwrap();
+    let sources: Vec<String> = client
+        .queue()
+        .await
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|item| item.source)
+        .collect();
+    assert_eq!(sources.len(), 4);
+    assert!(sources[0].ends_with("a.wav") && sources[3].ends_with("b.wav"));
+    assert_eq!(
+        (sources[1].as_str(), sources[2].as_str()),
+        ("tidal:1001", "tidal:1002")
+    );
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_long_album_is_listed_page_by_page() {
+    let catalog = FakeCatalog::new().with_album("big", tracks(250));
+    let f = fixture_with_catalog("add-long", Some(Arc::new(catalog.clone()))).await;
+    let client = f.client().await;
+    let Payload::Added { ids, .. } = client
+        .request(add_from(album("big"), AddAt::End))
+        .await
+        .unwrap()
+    else {
+        panic!("not an added answer");
+    };
+    assert_eq!(ids.len(), 250);
+    let calls = catalog.calls();
+    let offsets: Vec<u32> = calls
+        .iter()
+        .map(|call| match call {
+            phonia_core::catalog::fake::Call::AlbumTracks { offset, limit, .. } => {
+                assert_eq!(*limit, 100);
+                *offset
+            }
+            other => panic!("unexpected call {other:?}"),
+        })
+        .collect();
+    assert_eq!(offsets, [0, 100, 200]);
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_album_with_too_many_tracks_is_refused_after_one_listing() {
+    let catalog = FakeCatalog::new().with_playlist("huge", tracks(1200));
+    let f = fixture_with_catalog("add-huge", Some(Arc::new(catalog.clone()))).await;
+    let client = f.client().await;
+    let error = client
+        .request(add_from(
+            CatalogRef::Playlist { id: "huge".into() },
+            AddAt::End,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(protocol_code(error), ErrorCode::BadRequest);
+    assert_eq!(catalog.calls().len(), 1, "the rest was not even listed");
+    assert!(client.queue().await.unwrap().items.is_empty());
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_track_tidal_lists_but_does_not_stream_is_refused_and_the_rest_is_added() {
+    let mut all = tracks(3);
+    all[1].streamable = false;
+    let catalog = FakeCatalog::new().with_album("9", all);
+    let f = fixture_with_catalog("add-unstreamable", Some(Arc::new(catalog))).await;
+    let client = f.client().await;
+    let Payload::Added { ids, rejected, .. } = client
+        .request(add_from(album("9"), AddAt::End))
+        .await
+        .unwrap()
+    else {
+        panic!("not an added answer");
+    };
+    assert_eq!(ids.len(), 2);
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0].source, "tidal:1002");
+    assert!(
+        rejected[0].reason.contains("Song 2"),
+        "{}",
+        rejected[0].reason
+    );
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_album_adds_nothing_and_says_so() {
+    let catalog = FakeCatalog::new().with_album("empty", vec![]);
+    let f = fixture_with_catalog("add-empty", Some(Arc::new(catalog))).await;
+    let client = f.client().await;
+    let Payload::Added { ids, .. } = client
+        .request(add_from(album("empty"), AddAt::End))
+        .await
+        .unwrap()
+    else {
+        panic!("not an added answer");
+    };
+    assert!(ids.is_empty());
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn adding_from_the_catalog_fails_with_the_catalogs_own_reasons() {
+    // An id TIDAL does not have.
+    let f = fixture_with_catalog("add-missing", Some(Arc::new(FakeCatalog::new()))).await;
+    let client = f.client().await;
+    let error = client
+        .request(add_from(album("nope"), AddAt::End))
+        .await
+        .unwrap_err();
+    assert_eq!(protocol_code(error), ErrorCode::NotFound);
+    // Something this version cannot add.
+    let error = client
+        .request(add_from(CatalogRef::Unknown, AddAt::End))
+        .await
+        .unwrap_err();
+    assert_eq!(protocol_code(error), ErrorCode::BadRequest);
+    f.finish().await;
+
+    // No login.
+    let catalog = FakeCatalog::new().failing(CatalogError::NotLoggedIn("no session".into()));
+    let f = fixture_with_catalog("add-nologin", Some(Arc::new(catalog))).await;
+    let client = f.client().await;
+    let error = client
+        .request(add_from(album("9"), AddAt::End))
+        .await
+        .unwrap_err();
+    assert_eq!(protocol_code(error), ErrorCode::NotLoggedIn);
+    f.finish().await;
+
+    // No catalog at all.
+    let f = fixture_with_catalog("add-nocatalog", None).await;
+    let client = f.client().await;
+    let error = client
+        .request(add_from(album("9"), AddAt::End))
+        .await
+        .unwrap_err();
+    assert_eq!(protocol_code(error), ErrorCode::Unsupported);
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn listing_an_album_does_not_hold_up_the_requests_behind_it() {
+    let catalog = FakeCatalog::new()
+        .with_album("9", tracks(2))
+        .delayed(Duration::from_millis(700));
+    let f = fixture_with_catalog("add-slow", Some(Arc::new(catalog))).await;
+    let mut raw = f.raw().await;
+    raw.hello().await;
+    raw.send(r#"{"id":2,"request":{"type":"queue_add_from","from":{"type":"album","id":"9"}}}"#)
+        .await;
+    raw.send(r#"{"id":3,"request":{"type":"status"}}"#).await;
+    let Some(ServerMessage::Response { id, .. }) = raw.recv().await else {
+        panic!("no response");
+    };
+    assert_eq!(id, RequestId(3), "the status comes first");
+    let Some(ServerMessage::Response { id, reply }) = raw.recv().await else {
+        panic!("no response");
+    };
+    assert_eq!(id, RequestId(2));
+    assert!(matches!(reply, Reply::Ok(Payload::Added { .. })));
+    f.finish().await;
+}

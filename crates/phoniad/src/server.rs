@@ -22,9 +22,10 @@ use tokio::task::{JoinHandle, JoinSet};
 const OUTBOX: usize = 256;
 /// A client that takes longer than this to accept a message is considered gone.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
-/// Searches one connection may have under way at once. Past that, a new one is refused at once
+/// Slow requests (searches, additions from the catalog) one connection may have under way at once.
+/// Past that, a new one is refused at once
 /// rather than left waiting, since waiting is exactly what is not allowed to block the connection.
-const SEARCHES_AT_ONCE: usize = 4;
+const SLOW_AT_ONCE: usize = 4;
 /// How long a closing connection is given to flush what it already queued.
 const FLUSH_GRACE: Duration = Duration::from_secs(2);
 
@@ -66,8 +67,8 @@ where
         outbox: outbox.clone(),
         handshaken: false,
         forwarder: None,
-        searches: JoinSet::new(),
-        search_slots: Arc::new(Semaphore::new(SEARCHES_AT_ONCE)),
+        slow: JoinSet::new(),
+        slow_slots: Arc::new(Semaphore::new(SLOW_AT_ONCE)),
     };
     if outbox
         .send(ServerMessage::Hello(daemon.hello()))
@@ -109,11 +110,12 @@ struct Connection {
     handshaken: bool,
     /// Forwards events to this client, once it has subscribed.
     forwarder: Option<JoinHandle<()>>,
-    /// The searches under way. A search takes a second or two, and the requests of this connection
-    /// are otherwise answered one after another, so it must not hold up the play and pause that
-    /// come behind it. Dropping the set (the connection ended) cancels them.
-    searches: JoinSet<()>,
-    search_slots: Arc<Semaphore>,
+    /// The slow requests under way (a search, or listing an album to add it). They take a second
+    /// or two, and the requests of this connection are otherwise answered one after another, so
+    /// they must not hold up the play and pause that come behind them. Dropping the set (the
+    /// connection ended) cancels them.
+    slow: JoinSet<()>,
+    slow_slots: Arc<Semaphore>,
 }
 
 impl Connection {
@@ -207,7 +209,9 @@ impl Connection {
                 }
                 self.respond(id, Reply::Ok(Payload::Ack)).await;
             }
-            request @ Request::Search { .. } => self.search_beside(id, request).await,
+            request @ (Request::Search { .. } | Request::QueueAddFrom { .. }) => {
+                self.run_beside(id, request).await
+            }
             request => {
                 let reply = self.daemon.handle(request).await;
                 self.respond(id, reply).await;
@@ -216,22 +220,22 @@ impl Connection {
         true
     }
 
-    /// Runs a search on its own, answering when it is done, so the connection carries on reading
+    /// Runs a slow request on its own, answering when it is done, so the connection carries on reading
     /// in the meantime. Answers are matched to requests by id, so they may arrive out of order.
-    async fn search_beside(&mut self, id: RequestId, request: Request) {
-        // Reaps the searches that finished, so the set does not grow for the life of the connection.
-        while self.searches.try_join_next().is_some() {}
-        let Ok(permit) = self.search_slots.clone().try_acquire_owned() else {
+    async fn run_beside(&mut self, id: RequestId, request: Request) {
+        // Reaps the requests that finished, so the set does not grow for the life of the connection.
+        while self.slow.try_join_next().is_some() {}
+        let Ok(permit) = self.slow_slots.clone().try_acquire_owned() else {
             let reply = error(
                 ErrorCode::RateLimited,
-                "too many searches are under way on this connection: wait for one to finish",
+                "too many searches and additions are under way on this connection: wait for one to finish",
             );
             self.respond(id, reply).await;
             return;
         };
         let daemon = self.daemon.clone();
         let outbox = self.outbox.clone();
-        self.searches.spawn(async move {
+        self.slow.spawn(async move {
             let reply = daemon.handle(request).await;
             drop(permit);
             let _ = outbox.send(ServerMessage::Response { id, reply }).await;

@@ -1,9 +1,9 @@
 //! The messages: what a client may ask, and what the daemon answers and announces.
 
 use crate::dto::{
-    AlbumSummary, ArtistSummary, CatalogKind, EndReason, ItemId, OutputInfo, Page, PlaylistSummary,
-    Quality, Queue, ReleaseReason, Repeat, Route, SinkReport, Spec, State, Status, StreamQuality,
-    TrackSummary,
+    AlbumSummary, ArtistSummary, CatalogKind, CatalogRef, EndReason, ItemId, OutputInfo, Page,
+    PlaylistSummary, Quality, Queue, ReleaseReason, Repeat, Route, SinkReport, Spec, State, Status,
+    StreamQuality, TrackSummary,
 };
 use serde::{Deserialize, Serialize};
 
@@ -168,6 +168,15 @@ pub enum Request {
         offset: u32,
         #[serde(default)]
         limit: Option<u32>,
+    },
+    /// Adds the tracks of an album or a playlist (since 1.6): the daemon lists them from TIDAL
+    /// itself, so their titles and lengths come with them, and answers like `queue_add`, with
+    /// [`Payload::Added`]. A track TIDAL lists but does not stream where the daemon is comes back
+    /// among the `rejected` ones. At most 1000 at once.
+    QueueAddFrom {
+        from: CatalogRef,
+        #[serde(default)]
+        at: AddAt,
     },
     /// Adds tracks, resolving their titles and lengths first.
     QueueAdd {

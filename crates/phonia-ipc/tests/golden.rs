@@ -735,6 +735,54 @@ fn search_requests_and_their_defaults() {
 }
 
 #[test]
+fn adding_an_album_or_a_playlist_to_the_queue() {
+    request(
+        1,
+        Request::QueueAddFrom {
+            from: CatalogRef::Album {
+                id: "33723912".into(),
+            },
+            at: AddAt::End,
+        },
+        r#"{"id":1,"request":{"type":"queue_add_from","from":{"type":"album","id":"33723912"},"at":{"type":"end"}}}"#,
+    );
+    request(
+        2,
+        Request::QueueAddFrom {
+            from: CatalogRef::Playlist {
+                id: "5545fb2d-fd50-48a0-be5b-33a1d2677e9c".into(),
+            },
+            at: AddAt::Next,
+        },
+        r#"{"id":2,"request":{"type":"queue_add_from","from":{"type":"playlist","id":"5545fb2d-fd50-48a0-be5b-33a1d2677e9c"},"at":{"type":"next"}}}"#,
+    );
+    // `at` may be left out: the end of the queue.
+    let minimal: ClientMessage = serde_json::from_str(
+        r#"{"id":3,"request":{"type":"queue_add_from","from":{"type":"album","id":"1"}}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        minimal.request,
+        Request::QueueAddFrom {
+            from: CatalogRef::Album { id: "1".into() },
+            at: AddAt::End
+        }
+    );
+    // Something a newer daemon can add parses as unknown, not as a broken message.
+    let future: ClientMessage = serde_json::from_str(
+        r#"{"id":4,"request":{"type":"queue_add_from","from":{"type":"mix","id":"x"}}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        future.request,
+        Request::QueueAddFrom {
+            from: CatalogRef::Unknown,
+            at: AddAt::End
+        }
+    );
+}
+
+#[test]
 fn search_results_carry_a_page_of_each_kind_asked_for() {
     response(
         3,

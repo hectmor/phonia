@@ -4,9 +4,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use phonia_ipc::{
     AddAt, CAP_CATALOG, CAP_OUTPUT_RELEASE, CAP_OUTPUT_SELECT, CAP_QUALITY, CAP_VOLUME,
-    CatalogKind, Client, ClientError, ClientInfo, Event, ItemId, NewTrack, Output, OutputInfo,
-    OutputMode, Payload, Quality, QualityRange, Queue, ReleaseReason, Repeat, Request, SeekTarget,
-    State, Status, Volume,
+    CatalogKind, CatalogRef, Client, ClientError, ClientInfo, Event, ItemId, NewTrack, Output,
+    OutputInfo, OutputMode, Payload, Quality, QualityRange, Queue, ReleaseReason, Repeat, Request,
+    SeekTarget, State, Status, Volume,
 };
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -121,7 +121,9 @@ pub enum OutputAction {
 #[derive(Subcommand)]
 pub enum QueueAction {
     List,
-    /// Adds tracks: `tidal:<id>` (or just the id), `file:/abs/path`, or a path to a file.
+    /// Adds tracks: `tidal:<id>` (or just the id), `file:/abs/path`, or a path to a file. Or a
+    /// whole album or playlist, on its own: `album:<id>`, `playlist:<uuid>` (`ctl search` prints
+    /// them).
     Add {
         #[arg(required = true)]
         sources: Vec<String>,
@@ -354,10 +356,6 @@ async fn queue(client: &Client, json: bool, action: QueueAction) -> Result<()> {
             })
         }
         QueueAction::Add { sources, next, at } => {
-            let tracks = sources
-                .iter()
-                .map(|source| resolve_source(source).map(|source| NewTrack { source }))
-                .collect::<Result<Vec<_>>>()?;
             let at = match (next, at) {
                 (true, _) => AddAt::Next,
                 (false, Some(position)) => AddAt::Index {
@@ -365,7 +363,30 @@ async fn queue(client: &Client, json: bool, action: QueueAction) -> Result<()> {
                 },
                 (false, None) => AddAt::End,
             };
-            let payload = client.request(Request::QueueAdd { tracks, at }).await?;
+            let request = match catalog_source(&sources)? {
+                Some(from) => {
+                    if !client
+                        .server()
+                        .capabilities
+                        .iter()
+                        .any(|capability| capability == CAP_CATALOG)
+                    {
+                        bail!(
+                            "this phoniad cannot add albums or playlists: it needs protocol 1.6 \
+                             and a TIDAL login (run `phonia login`, then restart it)"
+                        );
+                    }
+                    Request::QueueAddFrom { from, at }
+                }
+                None => {
+                    let tracks = sources
+                        .iter()
+                        .map(|source| resolve_source(source).map(|source| NewTrack { source }))
+                        .collect::<Result<Vec<_>>>()?;
+                    Request::QueueAdd { tracks, at }
+                }
+            };
+            let payload = client.request(request).await?;
             print_payload(json, &payload, || format_added(&payload))
         }
         QueueAction::Rm { entries } => {
@@ -668,6 +689,28 @@ fn resolve_source(text: &str) -> Result<String> {
     let path = std::path::absolute(Path::new(text))
         .with_context(|| format!("{text:?} is not a usable path"))?;
     phonia_ipc::source::file(&path).map_err(|reason| anyhow!(reason))
+}
+
+/// An album or a playlist named as `album:<id>` or `playlist:<uuid>`, if that is what `sources`
+/// is. It must be alone: each such addition is one request of its own, and mixing it with tracks
+/// would leave open where each goes.
+fn catalog_source(sources: &[String]) -> Result<Option<CatalogRef>> {
+    let named = |text: &str| -> Option<CatalogRef> {
+        if let Some(id) = text.strip_prefix("album:") {
+            Some(CatalogRef::Album { id: id.to_string() })
+        } else {
+            text.strip_prefix("playlist:")
+                .map(|id| CatalogRef::Playlist { id: id.to_string() })
+        }
+    };
+    let found: Vec<Option<CatalogRef>> = sources.iter().map(|text| named(text)).collect();
+    if found.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    match found.as_slice() {
+        [Some(from)] => Ok(Some(from.clone())),
+        _ => bail!("an album or a playlist has to be added on its own, without other sources"),
+    }
 }
 
 /// The entry at position `number` (from 1) of the queue.
@@ -1581,5 +1624,34 @@ mod tests {
              \nAlbums (0 of 0):\n  none\n\
              \nArtists (1 of 1):\n   1. Korn   artist 780"
         );
+    }
+
+    #[test]
+    fn an_album_or_a_playlist_is_told_from_tracks_and_must_be_alone() {
+        let sources = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            catalog_source(&sources(&["album:33723912"])).unwrap(),
+            Some(CatalogRef::Album {
+                id: "33723912".into()
+            })
+        );
+        assert_eq!(
+            catalog_source(&sources(&["playlist:5545fb2d-fd50"])).unwrap(),
+            Some(CatalogRef::Playlist {
+                id: "5545fb2d-fd50".into()
+            })
+        );
+        assert_eq!(
+            catalog_source(&sources(&["tidal:1", "12345", "/music/a.flac"])).unwrap(),
+            None,
+            "plain tracks are not a catalog addition"
+        );
+        for mixed in [
+            sources(&["album:1", "tidal:2"]),
+            sources(&["tidal:2", "album:1"]),
+            sources(&["album:1", "album:2"]),
+        ] {
+            assert!(catalog_source(&mixed).is_err(), "{mixed:?}");
+        }
     }
 }
