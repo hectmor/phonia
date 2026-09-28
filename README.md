@@ -169,6 +169,10 @@ gapless = true          # join a track to the next one of the same format with n
   disc is also numbered, so only more than one is worth a heading). `queue_add_from` also takes
   an artist's top tracks. Like a search, each of these runs beside the connection's other
   requests, and takes one of its four slots however many calls it makes to TIDAL.
+- `phonia ctl album <id>` and `phonia ctl artist <id>` print those views: an album's details, copyright and
+  tracks numbered as on the album (with a heading per disc when there is more than one), or an artist's bio,
+  top tracks, albums, and EPs and singles, each row ending with the id that `queue add` takes (`tidal:<id>`,
+  `album:<id>`). `--limit` sets the size of a page (at most 100).
 - `phonia config path` prints which file is used, and `phonia config show` prints every setting
   with where its value comes from (the file or the default). `--config <file>` (or the
   `PHONIA_CONFIG` environment variable) selects another file, also for `phoniad`.

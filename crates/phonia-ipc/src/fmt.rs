@@ -46,11 +46,26 @@ pub fn artists(artists: &[ArtistRef]) -> String {
         .join(", ")
 }
 
-/// The name with its version, `Falling Away from Me (Remastered)`.
+/// The name with its version, `Falling Away from Me (Remastered)`. TIDAL often writes the version
+/// into the title as well as giving it apart (`Requiem Mass (Deluxe Edition)` with the version
+/// `Deluxe Edition`), and then it is not said twice.
 fn titled(title: &str, version: Option<&str>) -> String {
     match version {
-        Some(version) if !version.is_empty() => format!("{title} ({version})"),
+        Some(version)
+            if !version.is_empty() && !title.to_lowercase().contains(&version.to_lowercase()) =>
+        {
+            format!("{title} ({version})")
+        }
         _ => title.to_string(),
+    }
+}
+
+/// `1 track`, `14 tracks`.
+fn count_of_tracks(count: u32) -> String {
+    if count == 1 {
+        "1 track".to_string()
+    } else {
+        format!("{count} tracks")
     }
 }
 
@@ -67,6 +82,25 @@ pub fn track(track: &TrackSummary) -> String {
     if let Some(album) = &track.album {
         parts.push(album.title.clone());
     }
+    if let Some(ms) = track.duration_ms {
+        parts.push(self::ms(ms));
+    }
+    if let Some(quality) = track.quality {
+        parts.push(quality.to_string());
+    }
+    if track.explicit {
+        parts.push("explicit".to_string());
+    }
+    if !track.streamable {
+        parts.push("not available".to_string());
+    }
+    parts.join(" - ")
+}
+
+/// `Here to Stay (Remastered) - 4:31 - hires`: a track inside a list where its album and artists
+/// are already known (the album it is on), so they are not repeated.
+pub fn track_short(track: &TrackSummary) -> String {
+    let mut parts = vec![titled(&track.title, track.version.as_deref())];
     if let Some(ms) = track.duration_ms {
         parts.push(self::ms(ms));
     }
@@ -101,7 +135,7 @@ pub fn album(album: &AlbumSummary) -> String {
         _ => {}
     }
     if let Some(count) = album.track_count {
-        parts.push(format!("{count} tracks"));
+        parts.push(count_of_tracks(count));
     }
     if let Some(quality) = album.quality {
         parts.push(quality.to_string());
@@ -123,7 +157,7 @@ pub fn playlist(playlist: &PlaylistSummary) -> String {
         parts.push(creator.clone());
     }
     if let Some(count) = playlist.track_count {
-        parts.push(format!("{count} tracks"));
+        parts.push(count_of_tracks(count));
     }
     parts.join(" - ")
 }
@@ -213,6 +247,45 @@ mod tests {
             streamable: false,
         };
         assert_eq!(track(&bare), "Untitled - not available");
+    }
+
+    #[test]
+    fn a_version_already_in_the_title_is_not_said_twice() {
+        assert_eq!(
+            titled("Requiem Mass (Deluxe Edition)", Some("Deluxe Edition")),
+            "Requiem Mass (Deluxe Edition)"
+        );
+        assert_eq!(
+            titled("Song (live)", Some("Live")),
+            "Song (live)",
+            "whatever the case"
+        );
+        assert_eq!(
+            titled("Falling Away from Me", Some("Remastered")),
+            "Falling Away from Me (Remastered)"
+        );
+    }
+
+    #[test]
+    fn one_track_is_not_one_tracks() {
+        assert_eq!(count_of_tracks(1), "1 track");
+        assert_eq!(count_of_tracks(0), "0 tracks");
+        assert_eq!(count_of_tracks(14), "14 tracks");
+    }
+
+    #[test]
+    fn a_track_in_a_list_leaves_out_the_artists_and_the_album() {
+        assert_eq!(
+            track_short(&a_track()),
+            "Here to Stay (Remastered) - 4:31 - hires - explicit"
+        );
+        let mut plain = a_track();
+        plain.version = None;
+        plain.duration_ms = None;
+        plain.quality = None;
+        plain.explicit = false;
+        plain.streamable = false;
+        assert_eq!(track_short(&plain), "Here to Stay - not available");
     }
 
     #[test]

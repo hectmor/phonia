@@ -73,6 +73,22 @@ pub enum CtlCommand {
         #[arg(long, default_value_t = 0)]
         offset: u32,
     },
+    /// Shows an album: its details and its tracks (the first 50, or `--limit`, at most 100).
+    /// Tracks print the `tidal:<id>` that `queue add` takes; `queue add album:<id>` adds it whole.
+    Album {
+        /// The album's id, as `search` prints it.
+        id: String,
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Shows an artist: its bio, its most listened to tracks, its albums, and its EPs and
+    /// singles (the first 50 of each, or `--limit`, at most 100).
+    Artist {
+        /// The artist's id, as `search` prints it.
+        id: String,
+        #[arg(long)]
+        limit: Option<u32>,
+    },
     /// Mutes (`on`), unmutes (`off`) or flips (`toggle`, the default) a shared output; the level is kept.
     Mute {
         mode: Option<MuteMode>,
@@ -263,6 +279,8 @@ pub async fn run(args: CtlArgs, config_flag: Option<&Path>) -> Result<()> {
             limit,
             offset,
         } => search(&client, json, query.join(" "), kinds, limit, offset).await,
+        CtlCommand::Album { id, limit } => album(&client, json, id, limit).await,
+        CtlCommand::Artist { id, limit } => artist(&client, json, id, limit).await,
         CtlCommand::Mute { mode } => mute(&client, json, mode.unwrap_or(MuteMode::Toggle)).await,
         CtlCommand::Output { action } => output(&client, json, action).await,
         CtlCommand::Queue { action } => queue(&client, json, action).await,
@@ -522,6 +540,142 @@ async fn search(
         })
         .await?;
     print_payload(json, &payload, || format_search(&payload))
+}
+
+/// Fails, saying what to do, if the daemon cannot browse TIDAL.
+fn require_catalog(client: &Client, what: &str) -> Result<()> {
+    if client
+        .server()
+        .capabilities
+        .iter()
+        .any(|capability| capability == CAP_CATALOG)
+    {
+        return Ok(());
+    }
+    bail!(
+        "this phoniad cannot show {what}: it needs protocol 1.6 and a TIDAL login \
+         (run `phonia login`, then restart it)"
+    )
+}
+
+async fn album(client: &Client, json: bool, id: String, limit: Option<u32>) -> Result<()> {
+    require_catalog(client, "albums")?;
+    // An album fits in one page far more often than not: ask for the most there is.
+    let payload = client
+        .request(Request::Album {
+            id,
+            limit: Some(limit.unwrap_or(100)),
+        })
+        .await?;
+    print_payload(json, &payload, || format_album(&payload))
+}
+
+async fn artist(client: &Client, json: bool, id: String, limit: Option<u32>) -> Result<()> {
+    require_catalog(client, "artists")?;
+    let payload = client.request(Request::Artist { id, limit }).await?;
+    print_payload(json, &payload, || format_artist(&payload))
+}
+
+/// The album's line, then who it is by, its copyright, and its tracks, numbered as on the album,
+/// with a heading for each disc when there is more than one.
+fn format_album(payload: &Payload) -> String {
+    let Payload::Album { album, tracks } = payload else {
+        return "unexpected answer".to_string();
+    };
+    let mut text = format!("{}   album {}", phonia_ipc::fmt::album(album), album.id);
+    if let Some(ms) = album.duration_ms {
+        text.push_str(&format!("\nLength: {}", phonia_ipc::fmt::ms(ms)));
+    }
+    if let Some(copyright) = &album.copyright {
+        text.push_str(&format!("\n{copyright}"));
+    }
+    let discs: std::collections::BTreeSet<u32> = tracks
+        .items
+        .iter()
+        .filter_map(|t| t.volume_number)
+        .collect();
+    let mut disc = None;
+    for (index, track) in tracks.items.iter().enumerate() {
+        if discs.len() > 1 && track.volume_number != disc {
+            disc = track.volume_number;
+            if let Some(number) = disc {
+                text.push_str(&format!("\n\nDisc {number}:"));
+            }
+        } else if index == 0 {
+            text.push('\n');
+        }
+        let number = track
+            .track_number
+            .map_or_else(|| tracks.offset as usize + index + 1, |n| n as usize);
+        text.push_str(&format!(
+            "\n {number:>3}. {}   tidal:{}",
+            phonia_ipc::fmt::track_short(track),
+            track.id
+        ));
+    }
+    if tracks.total > tracks.items.len() as u64 {
+        text.push_str(&format!(
+            "\n\nShowing {} of {} tracks (`queue add album:{}` adds them all).",
+            tracks.items.len(),
+            tracks.total,
+            album.id
+        ));
+    }
+    text
+}
+
+/// The artist, a few lines of its bio, and a section for each list.
+fn format_artist(payload: &Payload) -> String {
+    let Payload::Artist {
+        artist,
+        bio,
+        top_tracks,
+        albums,
+        singles,
+    } = payload
+    else {
+        return "unexpected answer".to_string();
+    };
+    let mut text = format!("{}   artist {}", artist.name, artist.id);
+    if let Some(bio) = bio {
+        // A bio is long: the first paragraph, cut where a sentence ends if it is still long.
+        let first = bio.split("\n\n").next().unwrap_or(bio).trim();
+        let cut: String = first.chars().take(400).collect();
+        let cut = if cut.len() < first.len() {
+            format!("{}...", cut.trim_end())
+        } else {
+            cut
+        };
+        text.push_str(&format!("\n\n{cut}"));
+    }
+    fn section<T>(
+        text: &mut String,
+        title: &str,
+        page: &phonia_ipc::Page<T>,
+        row: impl Fn(&T) -> String,
+    ) {
+        text.push_str(&format!(
+            "\n\n{title} ({} of {}):",
+            page.items.len(),
+            page.total
+        ));
+        if page.items.is_empty() {
+            text.push_str("\n  none");
+        }
+        for (index, item) in page.items.iter().enumerate() {
+            text.push_str(&format!("\n {:>3}. {}", index + 1, row(item)));
+        }
+    }
+    section(&mut text, "Top tracks", top_tracks, |track| {
+        format!("{}   tidal:{}", phonia_ipc::fmt::track(track), track.id)
+    });
+    section(&mut text, "Albums", albums, |album| {
+        format!("{}   album {}", phonia_ipc::fmt::album(album), album.id)
+    });
+    section(&mut text, "EPs and singles", singles, |album| {
+        format!("{}   album {}", phonia_ipc::fmt::album(album), album.id)
+    });
+    text
 }
 
 /// One section per kind that was asked for, each row numbered from the start of the list and
@@ -1654,5 +1808,172 @@ mod tests {
         ] {
             assert!(catalog_source(&mixed).is_err(), "{mixed:?}");
         }
+    }
+
+    fn album_track(id: &str, title: &str, number: u32, disc: u32) -> phonia_ipc::TrackSummary {
+        phonia_ipc::TrackSummary {
+            id: id.into(),
+            title: title.into(),
+            version: None,
+            artists: vec![],
+            album: None,
+            duration_ms: Some(75_000),
+            explicit: false,
+            track_number: Some(number),
+            volume_number: Some(disc),
+            quality: Some(Quality::Hires),
+            streamable: true,
+        }
+    }
+
+    fn an_album(tracks: Vec<phonia_ipc::TrackSummary>, total: u64) -> Payload {
+        Payload::Album {
+            album: phonia_ipc::AlbumSummary {
+                id: "9".into(),
+                title: "Issues".into(),
+                version: None,
+                artists: vec![phonia_ipc::ArtistRef {
+                    id: "780".into(),
+                    name: "Korn".into(),
+                }],
+                release_date: Some("1999-11-16".into()),
+                track_count: Some(total as u32),
+                duration_ms: Some(3_200_000),
+                explicit: false,
+                quality: Some(Quality::Hires),
+                kind: Some(phonia_ipc::AlbumKind::Album),
+                copyright: Some("(P) 1999 Sony".into()),
+            },
+            tracks: phonia_ipc::Page {
+                items: tracks,
+                total,
+                offset: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn an_album_prints_its_details_and_its_tracks_as_numbered_on_the_album() {
+        let text = format_album(&an_album(
+            vec![
+                album_track("1", "Dead", 1, 1),
+                album_track("2", "Trash", 2, 1),
+            ],
+            2,
+        ));
+        assert_eq!(
+            text,
+            "Korn - Issues - 1999 - 2 tracks - hires   album 9\n\
+             Length: 53:20\n\
+             (P) 1999 Sony\n\
+             \n   1. Dead - 1:15 - hires   tidal:1\n   2. Trash - 1:15 - hires   tidal:2"
+        );
+        assert!(!text.contains("Disc"), "one disc needs no heading");
+    }
+
+    #[test]
+    fn an_album_of_several_discs_has_a_heading_for_each() {
+        let text = format_album(&an_album(
+            vec![
+                album_track("1", "One", 1, 1),
+                album_track("2", "Two", 2, 1),
+                album_track("3", "Three", 1, 2),
+            ],
+            3,
+        ));
+        assert!(text.contains("\n\nDisc 1:\n   1. One"), "{text}");
+        assert!(text.contains("\n\nDisc 2:\n   1. Three"), "{text}");
+    }
+
+    #[test]
+    fn a_long_album_says_how_many_tracks_it_has_beyond_the_page_and_how_to_add_them_all() {
+        let text = format_album(&an_album(vec![album_track("1", "One", 1, 1)], 120));
+        assert!(
+            text.ends_with("Showing 1 of 120 tracks (`queue add album:9` adds them all)."),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_artist_prints_a_short_bio_and_a_section_for_each_list() {
+        use phonia_ipc::{AlbumKind, AlbumSummary, ArtistSummary, Page};
+        let single = AlbumSummary {
+            id: "11".into(),
+            title: "Freak".into(),
+            version: None,
+            artists: vec![],
+            release_date: Some("1999-01-01".into()),
+            track_count: Some(1),
+            duration_ms: None,
+            explicit: false,
+            quality: None,
+            kind: Some(AlbumKind::Single),
+            copyright: None,
+        };
+        let payload = Payload::Artist {
+            artist: ArtistSummary {
+                id: "780".into(),
+                name: "Korn".into(),
+            },
+            bio: Some(format!("{}\n\nA second paragraph.", "x".repeat(500))),
+            top_tracks: Page {
+                items: vec![album_track("1", "Blind", 1, 1)],
+                total: 300,
+                offset: 0,
+            },
+            albums: Page {
+                items: vec![],
+                total: 0,
+                offset: 0,
+            },
+            singles: Page {
+                items: vec![single],
+                total: 30,
+                offset: 0,
+            },
+        };
+        let text = format_artist(&payload);
+        assert!(text.starts_with("Korn   artist 780\n\nxxx"), "{text}");
+        assert!(
+            text.contains("...\n\nTop tracks (1 of 300):"),
+            "the bio is cut: {text}"
+        );
+        assert!(
+            !text.contains("second paragraph"),
+            "only the first paragraph: {text}"
+        );
+        assert!(text.contains("Albums (0 of 0):\n  none"), "{text}");
+        assert!(
+            text.contains(
+                "EPs and singles (1 of 30):\n   1. Freak - 1999 - single - 1 track   album 11"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_artist_without_a_bio_goes_straight_to_its_lists() {
+        use phonia_ipc::{ArtistSummary, Page};
+        fn empty<T>() -> Page<T> {
+            Page {
+                items: vec![],
+                total: 0,
+                offset: 0,
+            }
+        }
+        let text = format_artist(&Payload::Artist {
+            artist: ArtistSummary {
+                id: "1".into(),
+                name: "Nobody".into(),
+            },
+            bio: None,
+            top_tracks: empty(),
+            albums: empty(),
+            singles: empty(),
+        });
+        assert!(
+            text.starts_with("Nobody   artist 1\n\nTop tracks (0 of 0):"),
+            "{text}"
+        );
     }
 }
