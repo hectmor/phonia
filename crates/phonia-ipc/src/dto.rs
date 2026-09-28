@@ -382,3 +382,18 @@ pub struct Page<T> {
     pub total: u64,
     pub offset: u64,
 }
+
+/// Something in the catalog that stands for a list of tracks, to be added to the queue as a whole.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CatalogRef {
+    Album {
+        id: String,
+    },
+    Playlist {
+        id: String,
+    },
+    /// Something a newer daemon can add and this version does not know.
+    #[serde(other)]
+    Unknown,
+}

@@ -142,6 +142,13 @@ gapless = true          # join a track to the next one of the same format with n
   `rate_limited` at once) instead of holding up the play and pause behind it. Failures come with
   their own error codes: `not_logged_in`, `unavailable` (TIDAL or the network) and
   `rate_limited`.
+- **Adding a whole album or playlist** (`phonia ctl queue add album:<id>` or
+  `playlist:<uuid>`, on its own, with `--next` or `--at` as for tracks; `ctl search` prints the ids;
+  the request `queue_add_from` of protocol 1.6): the daemon lists the tracks from TIDAL itself, a
+  hundred at a time, so their titles and lengths come with them instead of being asked about one by
+  one, and answers like `queue_add`. At most 1000 tracks at once; a track TIDAL lists but does not
+  stream where you are is refused and the rest is added. Like a search it runs beside the
+  connection's other requests.
 - `phonia config path` prints which file is used, and `phonia config show` prints every setting
   with where its value comes from (the file or the default). `--config <file>` (or the
   `PHONIA_CONFIG` environment variable) selects another file, also for `phoniad`.
@@ -208,6 +215,7 @@ phonia ctl output                            # the outputs; `output set <n>` pla
 phonia ctl volume 60 | +5 | -5   /   phonia ctl mute   # shared outputs only
 phonia ctl quality                           # the tiers asked for and what the playing track got; `quality lossless` sets the best
 phonia ctl search nu metal --kind albums     # search TIDAL; tracks print the `tidal:<id>` that `queue add` takes
+phonia ctl queue add album:33723912          # a whole album (or `playlist:<uuid>`), from what `search` printed
 phonia ctl release                           # pause and hand the DAC back, so another program can use it
 phonia ctl seek 90                           # 1:30; `+10` / `-10` are relative
 phonia ctl shuffle on   /   phonia ctl repeat all

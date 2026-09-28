@@ -8,7 +8,7 @@ use crate::outputs::{Outputs, VolumeError};
 use anyhow::Result;
 use futures_util::StreamExt;
 use futures_util::stream;
-use phonia_core::catalog::{Catalog, MAX_SEARCH_LIMIT};
+use phonia_core::catalog::{self as tidal_catalog, Catalog, MAX_ITEMS_LIMIT, MAX_SEARCH_LIMIT};
 use phonia_core::control::Controller;
 use phonia_core::engine::{self, Command, Engine, TrackOpener};
 use phonia_core::openers::{DescribeError, DispatchOpener, QualityLimits, Source};
@@ -26,6 +26,15 @@ use tokio::sync::{broadcast, mpsc, watch};
 pub async fn wait_for_shutdown(signal: &mut watch::Receiver<bool>) {
     let _ = signal.wait_for(|stopping| *stopping).await;
 }
+
+/// A track on its way into the queue: what it is, its title and length if known, and why they
+/// are not known, if they are not.
+type Accepted = (
+    Source,
+    Option<String>,
+    Option<std::time::Duration>,
+    Option<String>,
+);
 
 /// How many results of each kind a search returns when the client does not say.
 const DEFAULT_SEARCH_LIMIT: u32 = 50;
@@ -258,6 +267,7 @@ impl Daemon {
             Request::Status => Reply::Ok(Payload::Status(self.state().0)),
             Request::Queue => Reply::Ok(Payload::Queue(self.state().1)),
             Request::QueueAdd { tracks, at } => self.queue_add(tracks, at).await,
+            Request::QueueAddFrom { from, at } => self.queue_add_from(from, at).await,
             Request::Search {
                 query,
                 kinds,
@@ -519,8 +529,7 @@ impl Daemon {
             .collect()
             .await;
 
-        let (mut accepted, mut unresolved_reasons, mut rejected) =
-            (Vec::new(), Vec::new(), Vec::new());
+        let (mut accepted, mut rejected) = (Vec::new(), Vec::new());
         for outcome in outcomes {
             match outcome {
                 Outcome::Ready(source, info) => {
@@ -535,6 +544,19 @@ impl Daemon {
             }
         }
 
+        self.add_to_queue(accepted, rejected, at).await
+    }
+
+    /// Puts tracks in the queue where `at` says, and answers with what was added. Each has its
+    /// title and length if they are known, and the reason they were not, if that is why they lack
+    /// them.
+    async fn add_to_queue(
+        &self,
+        accepted: Vec<Accepted>,
+        rejected: Vec<ipc::Rejected>,
+        at: AddAt,
+    ) -> Reply {
+        let mut unresolved_reasons = Vec::new();
         let _serial = self.control_lock.lock().await;
         let tracks: Vec<QueueTrack> = accepted
             .iter()
@@ -564,6 +586,80 @@ impl Daemon {
             rejected,
             unresolved: unresolved_reasons,
         })
+    }
+
+    /// Adds the tracks of an album or a playlist, listing them from TIDAL page by page. Their
+    /// titles and lengths come with the listing, so none of them needs asking about one by one.
+    async fn queue_add_from(&self, from: ipc::CatalogRef, at: AddAt) -> Reply {
+        let Some(catalog) = &self.catalog else {
+            return self::error(
+                ErrorCode::Unsupported,
+                "this daemon has no TIDAL catalog to add from",
+            );
+        };
+        let listing = |offset: u32| match &from {
+            ipc::CatalogRef::Album { id } => {
+                Some(catalog.album_tracks(id.clone(), offset, MAX_ITEMS_LIMIT))
+            }
+            ipc::CatalogRef::Playlist { id } => {
+                Some(catalog.playlist_tracks(id.clone(), offset, MAX_ITEMS_LIMIT))
+            }
+            ipc::CatalogRef::Unknown => None,
+        };
+
+        let mut tracks: Vec<tidal_catalog::Track> = Vec::new();
+        loop {
+            let Some(request) = listing(tracks.len() as u32) else {
+                return self::error(
+                    ErrorCode::BadRequest,
+                    "this daemon does not know how to add that",
+                );
+            };
+            let page = match request.await {
+                Ok(page) => page,
+                Err(failure) => {
+                    let (code, message) = convert::catalog_error(&failure);
+                    return self::error(code, &message);
+                }
+            };
+            // Asked before the rest is fetched: no point listing what will not fit.
+            if page.total > MAX_ADD as u64 {
+                return self::error(
+                    ErrorCode::BadRequest,
+                    &format!(
+                        "that has {} tracks and at most {MAX_ADD} can be added at once",
+                        page.total
+                    ),
+                );
+            }
+            let got = page.items.len();
+            tracks.extend(page.items);
+            // An empty page ends it too, so a listing that lies about its total cannot loop.
+            if got == 0 || tracks.len() as u64 >= page.total {
+                break;
+            }
+        }
+
+        let (mut accepted, mut rejected) = (Vec::new(), Vec::new());
+        for track in &tracks {
+            let source = Source::Tidal(track.id.clone());
+            if track.streamable {
+                let name = match track.artists.first() {
+                    Some(artist) => format!("{} - {}", artist.name, track.title),
+                    None => track.title.clone(),
+                };
+                accepted.push((source, Some(name), track.duration, None));
+            } else {
+                rejected.push(ipc::Rejected {
+                    source: source.to_wire(),
+                    reason: format!(
+                        "{} is listed by TIDAL but cannot be streamed here",
+                        track.title
+                    ),
+                });
+            }
+        }
+        self.add_to_queue(accepted, rejected, at).await
     }
 }
 
