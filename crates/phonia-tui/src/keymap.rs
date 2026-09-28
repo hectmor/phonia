@@ -48,6 +48,10 @@ pub enum Action {
     /// The next or previous list of search results.
     TabNext,
     TabPrevious,
+    /// Adds the result under the cursor to the end of the queue.
+    AddToQueue,
+    /// Adds the result under the cursor right after the track that is playing.
+    AddNext,
 }
 
 /// A key press, with the modifiers that matter.
@@ -333,6 +337,20 @@ pub const BINDINGS: &[Binding] = &[
         "[",
         Action::TabPrevious,
         "previous list of results",
+        Group::Search,
+    ),
+    bind(
+        &[c('a')],
+        "a",
+        Action::AddToQueue,
+        "add the result to the end of the queue",
+        Group::Search,
+    ),
+    bind(
+        &[c('A')],
+        "A",
+        Action::AddNext,
+        "add the result after the track playing",
         Group::Search,
     ),
     bind(

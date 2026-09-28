@@ -166,6 +166,9 @@ fn connected_line<'a>(state: &State, theme: &Theme) -> Line<'a> {
     if let Some(reason) = &state.last_error {
         return Line::styled(format!("Could not do that: {reason}"), theme.error);
     }
+    if let Some(notice) = &state.notice {
+        return Line::styled(notice.clone(), theme.accent);
+    }
     let Some(status) = &state.status else {
         return Line::styled("Connected", theme.text);
     };
@@ -990,5 +993,25 @@ mod tests {
         for (w, h) in [(0, 0), (1, 1), (16, 4), (20, 5), (40, 8)] {
             let _ = screen(&state, w, h);
         }
+    }
+
+    #[test]
+    fn a_notice_shows_in_the_bar_and_an_error_takes_its_place() {
+        let mut state = connected();
+        state.notice = Some("Added 12 tracks".into());
+        let text = screen(&state, 100, 12);
+        assert!(text.contains("Added 12 tracks"), "{text}");
+        assert!(
+            !text.contains("Nothing playing"),
+            "the notice replaces the status line:\n{text}"
+        );
+
+        state.last_error = Some("TIDAL has no such item".into());
+        let text = screen(&state, 100, 12);
+        assert!(
+            text.contains("Could not do that: TIDAL has no such item"),
+            "{text}"
+        );
+        assert!(!text.contains("Added 12 tracks"), "{text}");
     }
 }
