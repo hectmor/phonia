@@ -171,6 +171,23 @@ fn worth_a_lower_tier(error: &anyhow::Error) -> bool {
     }
 }
 
+/// The access token and the country code of a logged-in client: what any request to TIDAL's API
+/// needs to say who is asking and from where.
+pub(crate) fn credentials(client: &TidalClient) -> Result<(String, String)> {
+    let access_token = client
+        .session
+        .auth
+        .access_token
+        .clone()
+        .ok_or_else(|| anyhow!("no access token; run `phonia login` first"))?;
+    let country_code = client
+        .user_info
+        .as_ref()
+        .map(|u| u.country_code.clone())
+        .ok_or_else(|| anyhow!("no user info loaded; run `phonia login` first"))?;
+    Ok((access_token, country_code))
+}
+
 /// Fetches and decodes the `playbackinfopostpaywall` response for `track_id`, asking for `best`
 /// and, if TIDAL refuses that tier, for each lower one down to `min`.
 ///
@@ -185,17 +202,7 @@ pub async fn fetch_playback_info(
     best: Quality,
     min: Quality,
 ) -> Result<PlaybackInfo> {
-    let access_token = client
-        .session
-        .auth
-        .access_token
-        .clone()
-        .ok_or_else(|| anyhow!("no access token; run `phonia login` first"))?;
-    let country_code = client
-        .user_info
-        .as_ref()
-        .map(|u| u.country_code.clone())
-        .ok_or_else(|| anyhow!("no user info loaded; run `phonia login` first"))?;
+    let (access_token, country_code) = credentials(client)?;
     let account = Account {
         base: tidlers::urls::API_V1_LOCATION,
         access_token: &access_token,
