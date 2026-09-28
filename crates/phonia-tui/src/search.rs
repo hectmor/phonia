@@ -5,6 +5,7 @@
 //! never overwrite the results of a newer one, or appear after the connection was lost.
 
 use crate::cursor::Cursor;
+use crate::input::TextInput;
 use phonia_ipc::{
     AlbumSummary, ArtistSummary, Page, Payload, PlaylistSummary, Request, TrackSummary,
 };
@@ -101,9 +102,33 @@ pub struct SearchState {
     pub albums: Found<AlbumSummary>,
     pub artists: Found<ArtistSummary>,
     pub playlists: Found<PlaylistSummary>,
+    /// The line being typed (kept when typing stops, so it can be edited again).
+    pub input: TextInput,
+    /// Whether keys go to the line above instead of being commands.
+    pub editing: bool,
 }
 
 impl SearchState {
+    /// Where the cursor of each list is, to tell whether a key moved one.
+    pub fn list_cursors(&self) -> [Cursor; 4] {
+        [
+            self.tracks.cursor,
+            self.albums.cursor,
+            self.artists.cursor,
+            self.playlists.cursor,
+        ]
+    }
+
+    /// The cursor of a tab's list and how many rows the list has.
+    pub fn list_of(&mut self, tab: Tab) -> (&mut Cursor, usize) {
+        match tab {
+            Tab::Tracks => (&mut self.tracks.cursor, self.tracks.items.len()),
+            Tab::Albums => (&mut self.albums.cursor, self.albums.items.len()),
+            Tab::Artists => (&mut self.artists.cursor, self.artists.items.len()),
+            Tab::Playlists => (&mut self.playlists.cursor, self.playlists.items.len()),
+        }
+    }
+
     /// Starts a search for `query`: the old results go, and the request to send comes back.
     pub fn begin(&mut self, query: String) -> Request {
         self.generation += 1;

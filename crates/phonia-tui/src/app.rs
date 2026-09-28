@@ -3,7 +3,7 @@
 use crate::cursor::Cursor;
 use crate::keymap::{self, Action, Key, Resolution};
 use crate::search::SearchState;
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use phonia_ipc::{
     CAP_VOLUME, Event, Payload, Queue, Repeat, Request, SeekTarget, ServerInfo, Status, Track,
     Version,
@@ -212,7 +212,7 @@ impl Effects {
 /// Applies one message to the state.
 pub fn update(state: &mut State, msg: Msg) -> Effects {
     match msg {
-        Msg::Key(key) => on_key(state, Key::from_event(key)),
+        Msg::Key(event) => on_key(state, event),
         Msg::Resize(columns, rows) => {
             state.size = (columns, rows);
             Effects::redraw()
@@ -432,9 +432,14 @@ fn set_status(state: &mut State, change: impl FnOnce(&mut Status)) {
     }
 }
 
-fn on_key(state: &mut State, key: Key) -> Effects {
+fn on_key(state: &mut State, event: KeyEvent) -> Effects {
+    let key = Key::from_event(event);
     if state.help {
         return on_key_in_help(state, key);
+    }
+    // While a search is being typed every key is text or editing, not a command.
+    if state.search.editing {
+        return on_key_typing(state, event);
     }
     match keymap::resolve(&state.pending, key) {
         Resolution::Pending => {
@@ -450,6 +455,41 @@ fn on_key(state: &mut State, key: Key) -> Effects {
             apply(state, action)
         }
     }
+}
+
+/// Keys while the line of the search is being typed. A printable key is a character (so `q` and
+/// `j` are letters here), and what edits the line is listed in [`keymap::TYPING`].
+fn on_key_typing(state: &mut State, event: KeyEvent) -> Effects {
+    let control = event.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = event.modifiers.contains(KeyModifiers::ALT);
+    let input = &mut state.search.input;
+    match event.code {
+        KeyCode::Char('c') if control => return Effects::command(Cmd::Quit),
+        KeyCode::Esc => state.search.editing = false,
+        KeyCode::Enter => {
+            state.search.editing = false;
+            let query = state.search.input.text().to_string();
+            // Empty, it only stops the typing; otherwise the results are what comes next.
+            state.focus = Focus::Main;
+            let mut effects = submit_search(state, &query);
+            effects.redraw = true;
+            return effects;
+        }
+        KeyCode::Left => input.left(),
+        KeyCode::Right => input.right(),
+        KeyCode::Home => input.home(),
+        KeyCode::End => input.end(),
+        KeyCode::Char('a') if control => input.home(),
+        KeyCode::Char('e') if control => input.end(),
+        KeyCode::Char('w') if control => input.delete_word_back(),
+        KeyCode::Char('u') if control => input.delete_to_start(),
+        KeyCode::Backspace => input.backspace(),
+        KeyCode::Delete => input.delete(),
+        // A character, unless it is a chord with Control or Alt that this line has no use for.
+        KeyCode::Char(c) if !control && !alt => input.insert(c),
+        _ => return Effects::default(),
+    }
+    Effects::redraw()
 }
 
 /// The help covers the screen and answers only to what closes it, to the movement keys, which
@@ -500,7 +540,14 @@ fn scroll_help(state: &mut State, action: Action) -> Effects {
 }
 
 fn apply(state: &mut State, action: Action) -> Effects {
-    let before = (state.focus, state.help, state.sidebar, state.queue_cursor);
+    let before = (
+        state.focus,
+        state.help,
+        state.sidebar,
+        state.queue_cursor,
+        state.search.tab,
+        state.search.list_cursors(),
+    );
     match action {
         Action::Quit => return Effects::command(Cmd::Quit),
         Action::Reconnect => return reconnect(state),
@@ -539,6 +586,9 @@ fn apply(state: &mut State, action: Action) -> Effects {
             // In the sidebar, Enter opens the section; in the queue, it plays the entry.
             if state.focus == Focus::Sidebar {
                 state.focus = Focus::Main;
+            } else if state.section() == Section::Search {
+                state.search.editing = true;
+                return Effects::redraw();
             } else {
                 return edit_queue(state, action);
             }
@@ -546,8 +596,43 @@ fn apply(state: &mut State, action: Action) -> Effects {
         Action::RemoveEntry | Action::MoveEntryDown | Action::MoveEntryUp | Action::ClearQueue => {
             return edit_queue(state, action);
         }
+        Action::StartSearch => {
+            // From anywhere: the search opens, and typing starts.
+            let index = Section::ALL
+                .iter()
+                .position(|section| *section == Section::Search)
+                .unwrap_or(0);
+            state.sidebar.select(index, Section::ALL.len());
+            state.focus = Focus::Main;
+            state.search.editing = true;
+            return Effects::redraw();
+        }
+        Action::TabNext | Action::TabPrevious => {
+            if state.section() != Section::Search {
+                return Effects::default();
+            }
+            let tab = state.search.tab;
+            state.search.tab = if action == Action::TabNext {
+                tab.next()
+            } else {
+                tab.previous()
+            };
+            return if state.search.tab == tab {
+                Effects::default()
+            } else {
+                Effects::redraw()
+            };
+        }
     }
-    if (state.focus, state.help, state.sidebar, state.queue_cursor) == before {
+    if (
+        state.focus,
+        state.help,
+        state.sidebar,
+        state.queue_cursor,
+        state.search.tab,
+        state.search.list_cursors(),
+    ) == before
+    {
         Effects::default()
     } else {
         Effects::redraw()
@@ -642,11 +727,17 @@ fn reconnect(state: &mut State) -> Effects {
 /// Moves the cursor of the panel that has the focus. The main panel lists nothing yet.
 fn move_cursor(state: &mut State, action: Action) {
     let page = state.half_page();
+    let queue_len = queue_len(state);
+    let tab = state.search.tab;
     let (len, cursor) = match (state.focus, state.section()) {
         (Focus::Sidebar, _) => (Section::ALL.len(), &mut state.sidebar),
-        (Focus::Main, Section::Queue) => (queue_len(state), &mut state.queue_cursor),
-        // The other sections list nothing yet.
-        (Focus::Main, _) => return,
+        (Focus::Main, Section::Queue) => (queue_len, &mut state.queue_cursor),
+        (Focus::Main, Section::Search) => {
+            let (cursor, len) = state.search.list_of(tab);
+            (len, cursor)
+        }
+        // The library lists nothing yet.
+        (Focus::Main, Section::Library) => return,
     };
     match action {
         Action::Down => cursor.down(len),
@@ -1678,5 +1769,244 @@ mod tests {
         );
         assert!(matches!(state.search.phase, Phase::Failed(_)));
         assert!(state.search.tracks.items.is_empty());
+    }
+
+    // --- Typing a search ---------------------------------------------------------------------
+
+    fn typed(state: &mut State, text: &str) {
+        for c in text.chars() {
+            ch(state, c);
+        }
+    }
+
+    fn connected_to_a_catalog() -> State {
+        let mut state = State::default();
+        update(&mut state, connected_msg(&["catalog"]));
+        state
+    }
+
+    #[test]
+    fn slash_opens_the_search_and_starts_typing_from_anywhere() {
+        let mut state = connected_to_a_catalog();
+        assert_eq!(state.section(), Section::Queue);
+        assert_eq!(state.focus, Focus::Sidebar);
+        assert!(ch(&mut state, '/').redraw);
+        assert_eq!(state.section(), Section::Search);
+        assert_eq!(state.focus, Focus::Main);
+        assert!(state.search.editing);
+    }
+
+    #[test]
+    fn while_typing_every_key_is_text_not_a_command() {
+        let mut state = connected_to_a_catalog();
+        ch(&mut state, '/');
+        // `q` would quit and `j` would move: here they are letters.
+        let effects = ch(&mut state, 'q');
+        assert!(effects.commands.is_empty());
+        typed(&mut state, "j nu?/");
+        assert_eq!(state.search.input.text(), "qj nu?/");
+        assert!(state.search.editing);
+        assert_eq!(state.section(), Section::Search, "nothing moved");
+        assert!(!state.quit);
+    }
+
+    #[test]
+    fn escape_stops_typing_and_keeps_the_text_to_edit_again() {
+        let mut state = connected_to_a_catalog();
+        ch(&mut state, '/');
+        typed(&mut state, "korn");
+        assert!(press(&mut state, KeyCode::Esc).redraw);
+        assert!(!state.search.editing);
+        assert_eq!(state.search.input.text(), "korn");
+
+        // The commands work again, and `/` resumes where it was.
+        ch(&mut state, '/');
+        typed(&mut state, "!");
+        assert_eq!(state.search.input.text(), "korn!");
+    }
+
+    #[test]
+    fn enter_searches_and_leaves_typing_for_the_results() {
+        use crate::search::Phase;
+        let mut state = connected_to_a_catalog();
+        ch(&mut state, '/');
+        typed(&mut state, "  nu metal ");
+        let effects = press(&mut state, KeyCode::Enter);
+        assert!(effects.redraw);
+        assert!(!state.search.editing);
+        assert_eq!(state.focus, Focus::Main);
+        let (tag, request) = search_request(effects);
+        assert_eq!(tag, Tag::Search { generation: 1 });
+        assert!(matches!(request, Request::Search { ref query, .. } if query == "nu metal"));
+        assert_eq!(state.search.phase, Phase::Searching);
+    }
+
+    #[test]
+    fn enter_on_an_empty_line_only_stops_typing() {
+        use crate::search::Phase;
+        let mut state = connected_to_a_catalog();
+        ch(&mut state, '/');
+        let effects = press(&mut state, KeyCode::Enter);
+        assert!(effects.commands.is_empty());
+        assert!(!state.search.editing);
+        assert_eq!(state.search.phase, Phase::Idle);
+    }
+
+    #[test]
+    fn enter_without_a_connection_says_so_on_the_results() {
+        use crate::search::Phase;
+        let mut state = State::default();
+        ch(&mut state, '/');
+        typed(&mut state, "korn");
+        let effects = press(&mut state, KeyCode::Enter);
+        assert!(effects.commands.is_empty());
+        assert!(matches!(state.search.phase, Phase::Failed(_)));
+    }
+
+    #[test]
+    fn control_c_still_quits_while_typing_and_other_chords_are_not_text() {
+        let mut state = connected_to_a_catalog();
+        ch(&mut state, '/');
+        typed(&mut state, "ab");
+        // A chord this line has no use for is not typed.
+        ctrl(&mut state, 'x');
+        update(
+            &mut state,
+            Msg::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT)),
+        );
+        assert_eq!(state.search.input.text(), "ab");
+        assert_eq!(ctrl(&mut state, 'c').commands, vec![Cmd::Quit]);
+    }
+
+    #[test]
+    fn the_line_can_be_edited_with_the_usual_keys() {
+        let mut state = connected_to_a_catalog();
+        ch(&mut state, '/');
+        typed(&mut state, "korn untouchables");
+
+        ctrl(&mut state, 'w');
+        assert_eq!(state.search.input.text(), "korn ");
+        press(&mut state, KeyCode::Backspace);
+        assert_eq!(state.search.input.text(), "korn");
+        press(&mut state, KeyCode::Home);
+        typed(&mut state, "K");
+        press(&mut state, KeyCode::Delete);
+        assert_eq!(state.search.input.text(), "Korn");
+        press(&mut state, KeyCode::Right);
+        typed(&mut state, "_");
+        assert_eq!(state.search.input.text(), "Ko_rn");
+        press(&mut state, KeyCode::End);
+        press(&mut state, KeyCode::Left);
+        typed(&mut state, "-");
+        assert_eq!(state.search.input.text(), "Ko_r-n");
+        ctrl(&mut state, 'a');
+        ctrl(&mut state, 'u');
+        assert_eq!(
+            state.search.input.text(),
+            "Ko_r-n",
+            "nothing before the start"
+        );
+        ctrl(&mut state, 'e');
+        ctrl(&mut state, 'u');
+        assert_eq!(state.search.input.text(), "");
+    }
+
+    #[test]
+    fn the_result_lists_are_switched_with_the_brackets_only_in_the_search() {
+        use crate::search::Tab;
+        let mut state = connected_to_a_catalog();
+        assert_eq!(ch(&mut state, ']'), Effects::default(), "not in the search");
+        assert_eq!(state.search.tab, Tab::Tracks);
+
+        ch(&mut state, '/');
+        press(&mut state, KeyCode::Esc);
+        assert!(ch(&mut state, ']').redraw);
+        assert_eq!(state.search.tab, Tab::Albums);
+        ch(&mut state, ']');
+        ch(&mut state, ']');
+        assert_eq!(state.search.tab, Tab::Playlists);
+        assert!(!ch(&mut state, ']').redraw, "stops at the last");
+        ch(&mut state, '[');
+        assert_eq!(state.search.tab, Tab::Artists);
+    }
+
+    #[test]
+    fn the_movement_keys_walk_the_list_of_the_current_tab() {
+        use crate::search::Tab;
+        let mut state = connected_to_a_catalog();
+        let (tag, _) = search_request({
+            ch(&mut state, '/');
+            typed(&mut state, "korn");
+            press(&mut state, KeyCode::Enter)
+        });
+        let track = |id: &str| phonia_ipc::TrackSummary {
+            id: id.into(),
+            title: format!("Song {id}"),
+            version: None,
+            artists: vec![],
+            album: None,
+            duration_ms: None,
+            explicit: false,
+            track_number: None,
+            quality: None,
+            streamable: true,
+        };
+        update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Ok(Payload::SearchResults {
+                    query: "korn".into(),
+                    tracks: Some(phonia_ipc::Page {
+                        items: vec![track("1"), track("2"), track("3")],
+                        total: 3,
+                        offset: 0,
+                    }),
+                    albums: Some(phonia_ipc::Page {
+                        items: vec![],
+                        total: 0,
+                        offset: 0,
+                    }),
+                    artists: None,
+                    playlists: None,
+                }),
+            },
+        );
+        ch(&mut state, 'j');
+        ch(&mut state, 'j');
+        assert_eq!(state.search.tracks.cursor.selected(), 2);
+        ch(&mut state, 'j');
+        assert_eq!(
+            state.search.tracks.cursor.selected(),
+            2,
+            "stops at the last row"
+        );
+        ch(&mut state, 'g');
+        ch(&mut state, 'g');
+        assert_eq!(state.search.tracks.cursor.selected(), 0);
+        ch(&mut state, 'G');
+        assert_eq!(state.search.tracks.cursor.selected(), 2);
+
+        // Another tab has its own cursor, and an empty one has nowhere to go.
+        ch(&mut state, ']');
+        assert_eq!(state.search.tab, Tab::Albums);
+        assert_eq!(ch(&mut state, 'j'), Effects::default());
+        ch(&mut state, '[');
+        assert_eq!(
+            state.search.tracks.cursor.selected(),
+            2,
+            "the first tab kept its place"
+        );
+    }
+
+    #[test]
+    fn enter_in_the_search_list_opens_the_line_for_typing() {
+        let mut state = connected_to_a_catalog();
+        ch(&mut state, '2');
+        ch(&mut state, 'l');
+        assert_eq!(state.section(), Section::Search);
+        assert!(!state.search.editing);
+        assert!(press(&mut state, KeyCode::Enter).redraw);
+        assert!(state.search.editing);
     }
 }

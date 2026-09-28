@@ -43,8 +43,15 @@ chain works with real hardware (a Fosi Audio DS2 during development).
   one. Volume needs a shared output; on an exclusive card the bar says why instead of pretending.
   It connects by itself, and if the daemon is not there yet, or goes away, it keeps trying (after
   0.25 s, then twice as long each time up to 5 s) and shows a countdown; `R` tries at once. It
-  stops trying only when what answers is not a compatible phonia daemon, and says why. Search and
-  Library are still empty. Other keys are vim-like: `j`/`k` (or the arrows) move, `gg` and `G` go
+  stops trying only when what answers is not a compatible phonia daemon, and says why. `/`, from
+  anywhere, opens the search and starts typing the query: while typing every key is text, so `q`
+  and `j` are letters (`Enter` searches, `Esc` stops typing keeping the text, and the line edits
+  with `Left`/`Right`, `Home`/`End`, `Backspace`/`Delete`, `Ctrl-w` and `Ctrl-u`). Results come in
+  four lists, tracks, albums, artists and playlists, each with its count, that `[` and `]` step
+  through, with `j`/`k` to move in the one shown; a track or an album shows its best quality. It
+  needs a daemon that has a TIDAL login, and says so where the results would be when it has not.
+  What to do with a result (play it, add it to the queue) is not there yet, and Library is still
+  empty. Other keys are vim-like: `j`/`k` (or the arrows) move, `gg` and `G` go
   to the ends, `Ctrl-d`/`Ctrl-u` move half a page, `h`/`l`/`Tab` change panel, `1`-`3` jump to a
   section, `?` shows the keys (and scrolls with `j`/`k` when the terminal is too short for it)
   and `q` (or `Ctrl-c`) quits. The help is drawn from the same table the keys are read from, so

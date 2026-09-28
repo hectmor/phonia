@@ -43,6 +43,11 @@ pub enum Action {
     MoveEntryDown,
     MoveEntryUp,
     ClearQueue,
+    /// Opens the search and starts typing the query.
+    StartSearch,
+    /// The next or previous list of search results.
+    TabNext,
+    TabPrevious,
 }
 
 /// A key press, with the modifiers that matter.
@@ -85,6 +90,7 @@ pub enum Group {
     Panels,
     Playback,
     Queue,
+    Search,
 }
 
 impl Group {
@@ -95,6 +101,7 @@ impl Group {
             Group::Panels => "Panels",
             Group::Playback => "Playback",
             Group::Queue => "Queue",
+            Group::Search => "Search",
         }
     }
 }
@@ -308,6 +315,27 @@ pub const BINDINGS: &[Binding] = &[
         Group::Playback,
     ),
     bind(
+        &[c('/')],
+        "/",
+        Action::StartSearch,
+        "search TIDAL",
+        Group::Search,
+    ),
+    bind(
+        &[c(']')],
+        "]",
+        Action::TabNext,
+        "next list of results",
+        Group::Search,
+    ),
+    bind(
+        &[c('[')],
+        "[",
+        Action::TabPrevious,
+        "previous list of results",
+        Group::Search,
+    ),
+    bind(
         &[c('d')],
         "d",
         Action::RemoveEntry,
@@ -342,6 +370,20 @@ pub const BINDINGS: &[Binding] = &[
         "repeat: off, all, one",
         Group::Playback,
     ),
+];
+
+/// The keys that work while a search is being typed. They are not bindings (a printable key
+/// there is just a character), so they are listed here, for the help to show them.
+pub const TYPING: &[(&str, &str)] = &[
+    ("Enter", "search"),
+    ("Esc", "stop typing, keeping the text"),
+    ("Left / Right", "move the cursor"),
+    ("Home / Ctrl-a", "start of the line"),
+    ("End / Ctrl-e", "end of the line"),
+    ("Backspace / Delete", "delete a character"),
+    ("Ctrl-w", "delete the word before the cursor"),
+    ("Ctrl-u", "delete everything before the cursor"),
+    ("Ctrl-c", "quit"),
 ];
 
 /// What a key press turned into.
