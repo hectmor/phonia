@@ -209,9 +209,12 @@ impl Connection {
                 }
                 self.respond(id, Reply::Ok(Payload::Ack)).await;
             }
-            request @ (Request::Search { .. } | Request::QueueAddFrom { .. }) => {
-                self.run_beside(id, request).await
-            }
+            request @ (Request::Search { .. }
+            | Request::QueueAddFrom { .. }
+            | Request::Album { .. }
+            | Request::Artist { .. }
+            | Request::Tracks { .. }
+            | Request::Albums { .. }) => self.run_beside(id, request).await,
             request => {
                 let reply = self.daemon.handle(request).await;
                 self.respond(id, reply).await;

@@ -1795,6 +1795,7 @@ mod tests {
                     duration_ms: None,
                     explicit: false,
                     track_number: None,
+                    volume_number: None,
                     quality: None,
                     streamable: true,
                 }],
@@ -2123,6 +2124,7 @@ mod tests {
             duration_ms: None,
             explicit: false,
             track_number: None,
+            volume_number: None,
             quality: None,
             streamable: true,
         };
@@ -2197,6 +2199,7 @@ mod tests {
             duration_ms: None,
             explicit: false,
             track_number: None,
+            volume_number: None,
             quality: None,
             streamable: true,
         }
@@ -2236,6 +2239,8 @@ mod tests {
                             duration_ms: None,
                             explicit: false,
                             quality: None,
+                            kind: None,
+                            copyright: None,
                         }],
                         1,
                         0,

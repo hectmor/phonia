@@ -1596,6 +1596,7 @@ mod tests {
                     duration_ms: Some(271_000),
                     explicit: false,
                     track_number: Some(2),
+                    volume_number: None,
                     quality: Some(Quality::Hires),
                     streamable: true,
                 }],

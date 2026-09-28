@@ -1,7 +1,7 @@
 //! Turning wire values into short text, shared by every client that prints them.
 
 use crate::dto::{
-    AlbumSummary, ArtistRef, ArtistSummary, PlaylistSummary, StreamQuality, TrackSummary,
+    AlbumKind, AlbumSummary, ArtistRef, ArtistSummary, PlaylistSummary, StreamQuality, TrackSummary,
 };
 
 /// `1:30`, or `1:02:05` from an hour on.
@@ -95,6 +95,11 @@ pub fn album(album: &AlbumSummary) -> String {
     if let Some(year) = album.release_date.as_deref().and_then(|date| date.get(..4)) {
         parts.push(year.to_string());
     }
+    match album.kind {
+        Some(AlbumKind::Ep) => parts.push("EP".to_string()),
+        Some(AlbumKind::Single) => parts.push("single".to_string()),
+        _ => {}
+    }
     if let Some(count) = album.track_count {
         parts.push(format!("{count} tracks"));
     }
@@ -182,6 +187,7 @@ mod tests {
             duration_ms: Some(271_000),
             explicit: true,
             track_number: Some(2),
+            volume_number: None,
             quality: Some(Quality::Hires),
             streamable: true,
         }
@@ -202,6 +208,7 @@ mod tests {
             duration_ms: None,
             explicit: false,
             track_number: None,
+            volume_number: None,
             quality: None,
             streamable: false,
         };
@@ -223,11 +230,24 @@ mod tests {
             duration_ms: None,
             explicit: false,
             quality: Some(Quality::Lossless),
+            kind: Some(AlbumKind::Album),
+            copyright: None,
         };
         assert_eq!(
             super::album(&album),
             "Korn - Untouchables - 2002 - 14 tracks - lossless"
         );
+        // An EP or a single says so; an album does not need to.
+        let ep = AlbumSummary {
+            kind: Some(AlbumKind::Ep),
+            ..album.clone()
+        };
+        assert!(super::album(&ep).contains("2002 - EP - 14 tracks"));
+        let single = AlbumSummary {
+            kind: Some(AlbumKind::Single),
+            ..album
+        };
+        assert!(super::album(&single).contains("- single -"));
     }
 
     #[test]

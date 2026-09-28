@@ -324,12 +324,27 @@ pub struct TrackSummary {
     pub explicit: bool,
     #[serde(default)]
     pub track_number: Option<u32>,
+    /// Which disc of the album the track is on, when there is more than one.
+    #[serde(default)]
+    pub volume_number: Option<u32>,
     /// The best tier TIDAL has the track in.
     #[serde(default)]
     pub quality: Option<Quality>,
     /// Whether it can be played where the daemon is.
     #[serde(default = "yes")]
     pub streamable: bool,
+}
+
+/// What kind of release an album is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlbumKind {
+    Album,
+    Ep,
+    Single,
+    /// A kind a newer daemon has and this version does not know.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -351,6 +366,11 @@ pub struct AlbumSummary {
     pub explicit: bool,
     #[serde(default)]
     pub quality: Option<Quality>,
+    /// An album, an EP or a single (since 1.6, with the album and artist views).
+    #[serde(default)]
+    pub kind: Option<AlbumKind>,
+    #[serde(default)]
+    pub copyright: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -393,7 +413,24 @@ pub enum CatalogRef {
     Playlist {
         id: String,
     },
+    /// An artist's most listened to tracks.
+    ArtistTopTracks {
+        id: String,
+    },
     /// Something a newer daemon can add and this version does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// A list of albums that can be asked for page by page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AlbumListRef {
+    /// An artist's albums.
+    ArtistAlbums { id: String },
+    /// An artist's EPs and singles.
+    ArtistSingles { id: String },
+    /// A list a newer daemon has and this version does not know.
     #[serde(other)]
     Unknown,
 }

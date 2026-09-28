@@ -159,6 +159,7 @@ pub fn track_summary(track: &tidal_catalog::Track) -> ipc::TrackSummary {
         duration_ms: track.duration.map(ms),
         explicit: track.explicit,
         track_number: track.track_number,
+        volume_number: track.volume_number,
         quality: track.quality.map(quality),
         streamable: track.streamable,
     }
@@ -175,6 +176,12 @@ pub fn album_summary(album: &tidal_catalog::Album) -> ipc::AlbumSummary {
         duration_ms: album.duration.map(ms),
         explicit: album.explicit,
         quality: album.quality.map(quality),
+        kind: album.kind.map(|kind| match kind {
+            tidal_catalog::AlbumKind::Album => ipc::AlbumKind::Album,
+            tidal_catalog::AlbumKind::Ep => ipc::AlbumKind::Ep,
+            tidal_catalog::AlbumKind::Single => ipc::AlbumKind::Single,
+        }),
+        copyright: album.copyright.clone(),
     }
 }
 

@@ -2017,3 +2017,334 @@ async fn listing_an_album_does_not_hold_up_the_requests_behind_it() {
     assert!(matches!(reply, Reply::Ok(Payload::Added { .. })));
     f.finish().await;
 }
+
+// --- Albums and artists (protocol 1.6) -------------------------------------------------------------
+
+fn korn() -> catalog::Artist {
+    catalog::Artist {
+        id: "780".into(),
+        name: "Korn".into(),
+    }
+}
+
+fn album_named(id: &str, title: &str, kind: catalog::AlbumKind) -> catalog::Album {
+    catalog::Album {
+        id: id.into(),
+        title: title.into(),
+        version: None,
+        artists: vec![catalog::ArtistRef {
+            id: "780".into(),
+            name: "Korn".into(),
+        }],
+        release_date: Some("1999-11-16".into()),
+        track_count: Some(16),
+        duration: Some(Duration::from_secs(3200)),
+        explicit: true,
+        quality: Some(phonia_core::config::Quality::Hires),
+        kind: Some(kind),
+        copyright: Some("(P) 1999".into()),
+    }
+}
+
+/// An album of three tracks and an artist with a bio, 120 top tracks, two albums and a single.
+fn browsable() -> FakeCatalog {
+    FakeCatalog::new()
+        .with_album_details(album_named("9", "Issues", catalog::AlbumKind::Album))
+        .with_album("9", tracks(3))
+        .with_artist(
+            korn(),
+            Some("A nu metal band."),
+            tracks(120),
+            vec![
+                album_named("9", "Issues", catalog::AlbumKind::Album),
+                album_named("10", "Untouchables", catalog::AlbumKind::Album),
+            ],
+            vec![album_named("11", "Freak", catalog::AlbumKind::Single)],
+        )
+}
+
+fn ask_album(id: &str, limit: Option<u32>) -> Request {
+    Request::Album {
+        id: id.into(),
+        limit,
+    }
+}
+
+fn ask_artist(id: &str, limit: Option<u32>) -> Request {
+    Request::Artist {
+        id: id.into(),
+        limit,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_album_comes_with_its_details_and_the_first_page_of_its_tracks() {
+    let catalog = browsable();
+    let f = fixture_with_catalog("album", Some(Arc::new(catalog.clone()))).await;
+    let client = f.client().await;
+    let Payload::Album { album, tracks } = client.request(ask_album("9", None)).await.unwrap()
+    else {
+        panic!("not an album");
+    };
+    assert_eq!(album.title, "Issues");
+    assert_eq!(album.kind, Some(AlbumKind::Album));
+    assert_eq!(album.copyright.as_deref(), Some("(P) 1999"));
+    assert_eq!((tracks.items.len(), tracks.total), (3, 3));
+    assert_eq!(tracks.items[0].id, "1001");
+
+    // Both were asked for, the tracks with the biggest page.
+    let calls = catalog.calls();
+    assert!(calls.contains(&phonia_core::catalog::fake::Call::Album { id: "9".into() }));
+    assert!(
+        calls.contains(&phonia_core::catalog::fake::Call::AlbumTracks {
+            id: "9".into(),
+            offset: 0,
+            limit: 100
+        })
+    );
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_artist_comes_whole_in_one_answer_with_a_page_of_each_list() {
+    let catalog = browsable();
+    let f = fixture_with_catalog("artist", Some(Arc::new(catalog.clone()))).await;
+    let client = f.client().await;
+    let Payload::Artist {
+        artist,
+        bio,
+        top_tracks,
+        albums,
+        singles,
+    } = client.request(ask_artist("780", None)).await.unwrap()
+    else {
+        panic!("not an artist");
+    };
+    assert_eq!(artist.name, "Korn");
+    assert_eq!(bio.as_deref(), Some("A nu metal band."));
+    assert_eq!(
+        (top_tracks.items.len(), top_tracks.total),
+        (50, 120),
+        "the default page is 50"
+    );
+    assert_eq!(albums.items.len(), 2);
+    assert_eq!(singles.items[0].kind, Some(AlbumKind::Single));
+    assert_eq!(catalog.calls().len(), 5, "five asks, one answer");
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_artist_with_no_bio_is_still_shown() {
+    let catalog = FakeCatalog::new().with_artist(korn(), None, tracks(2), vec![], vec![]);
+    let f = fixture_with_catalog("artist-nobio", Some(Arc::new(catalog))).await;
+    let client = f.client().await;
+    let Payload::Artist {
+        bio, top_tracks, ..
+    } = client.request(ask_artist("780", Some(10))).await.unwrap()
+    else {
+        panic!("not an artist");
+    };
+    assert_eq!(bio, None);
+    assert_eq!(top_tracks.items.len(), 2);
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_page_of_tracks_is_asked_for_by_the_list_it_is_of() {
+    let catalog = browsable().with_playlist("p-1", tracks(4));
+    let f = fixture_with_catalog("tracks", Some(Arc::new(catalog.clone()))).await;
+    let client = f.client().await;
+    let ask = |from: CatalogRef, offset: u32, limit: Option<u32>| Request::Tracks {
+        from,
+        offset,
+        limit,
+    };
+
+    let Payload::Tracks { from, page } = client
+        .request(ask(
+            CatalogRef::ArtistTopTracks { id: "780".into() },
+            100,
+            None,
+        ))
+        .await
+        .unwrap()
+    else {
+        panic!("not tracks");
+    };
+    assert_eq!(from, CatalogRef::ArtistTopTracks { id: "780".into() });
+    assert_eq!((page.items.len(), page.total, page.offset), (20, 120, 100));
+
+    let Payload::Tracks { page, .. } = client
+        .request(ask(CatalogRef::Album { id: "9".into() }, 1, Some(1)))
+        .await
+        .unwrap()
+    else {
+        panic!("not tracks");
+    };
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].id, "1002");
+
+    let Payload::Tracks { page, .. } = client
+        .request(ask(CatalogRef::Playlist { id: "p-1".into() }, 0, None))
+        .await
+        .unwrap()
+    else {
+        panic!("not tracks");
+    };
+    assert_eq!(page.total, 4);
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_page_of_albums_is_the_albums_or_the_singles_of_an_artist() {
+    let catalog = browsable();
+    let f = fixture_with_catalog("albums", Some(Arc::new(catalog.clone()))).await;
+    let client = f.client().await;
+    let ask = |from: AlbumListRef| Request::Albums {
+        from,
+        offset: 0,
+        limit: None,
+    };
+    let Payload::Albums { page, .. } = client
+        .request(ask(AlbumListRef::ArtistAlbums { id: "780".into() }))
+        .await
+        .unwrap()
+    else {
+        panic!("not albums");
+    };
+    assert_eq!(page.total, 2);
+    let Payload::Albums { from, page } = client
+        .request(ask(AlbumListRef::ArtistSingles { id: "780".into() }))
+        .await
+        .unwrap()
+    else {
+        panic!("not albums");
+    };
+    assert_eq!(from, AlbumListRef::ArtistSingles { id: "780".into() });
+    assert_eq!(page.items[0].title, "Freak");
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn requests_that_make_no_sense_are_refused_before_they_reach_tidal() {
+    let catalog = browsable();
+    let f = fixture_with_catalog("browse-invalid", Some(Arc::new(catalog.clone()))).await;
+    let client = f.client().await;
+    for request in [
+        ask_album("9", Some(0)),
+        ask_album("9", Some(101)),
+        ask_artist("780", Some(0)),
+        ask_artist("780", Some(500)),
+        Request::Tracks {
+            from: CatalogRef::Unknown,
+            offset: 0,
+            limit: None,
+        },
+        Request::Tracks {
+            from: CatalogRef::Album { id: "9".into() },
+            offset: 0,
+            limit: Some(101),
+        },
+        Request::Albums {
+            from: AlbumListRef::Unknown,
+            offset: 0,
+            limit: None,
+        },
+    ] {
+        let error = client.request(request.clone()).await.unwrap_err();
+        assert_eq!(protocol_code(error), ErrorCode::BadRequest, "{request:?}");
+    }
+    assert!(catalog.calls().is_empty(), "none of them went to TIDAL");
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unknown_album_or_artist_is_not_found_and_other_failures_keep_their_codes() {
+    let f = fixture_with_catalog("browse-missing", Some(Arc::new(FakeCatalog::new()))).await;
+    let client = f.client().await;
+    for request in [ask_album("nope", None), ask_artist("nope", None)] {
+        let error = client.request(request).await.unwrap_err();
+        assert_eq!(protocol_code(error), ErrorCode::NotFound);
+    }
+    f.finish().await;
+
+    let catalog = FakeCatalog::new().failing(CatalogError::RateLimited);
+    let f = fixture_with_catalog("browse-limited", Some(Arc::new(catalog))).await;
+    let client = f.client().await;
+    let error = client.request(ask_artist("780", None)).await.unwrap_err();
+    assert_eq!(protocol_code(error), ErrorCode::RateLimited);
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn without_a_catalog_none_of_them_can_be_answered() {
+    let f = fixture_with_catalog("browse-nocatalog", None).await;
+    let client = f.client().await;
+    for request in [
+        ask_album("9", None),
+        ask_artist("780", None),
+        Request::Tracks {
+            from: CatalogRef::Album { id: "9".into() },
+            offset: 0,
+            limit: None,
+        },
+        Request::Albums {
+            from: AlbumListRef::ArtistAlbums { id: "780".into() },
+            offset: 0,
+            limit: None,
+        },
+    ] {
+        let error = client.request(request).await.unwrap_err();
+        assert_eq!(protocol_code(error), ErrorCode::Unsupported);
+    }
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_artists_top_tracks_can_be_added_to_the_queue_whole() {
+    let catalog = browsable();
+    let f = fixture_with_catalog("add-top", Some(Arc::new(catalog.clone()))).await;
+    let client = f.client().await;
+    let Payload::Added { ids, .. } = client
+        .request(add_from(
+            CatalogRef::ArtistTopTracks { id: "780".into() },
+            AddAt::End,
+        ))
+        .await
+        .unwrap()
+    else {
+        panic!("not an added answer");
+    };
+    assert_eq!(ids.len(), 120);
+    let offsets: Vec<u32> = catalog
+        .calls()
+        .iter()
+        .filter_map(|call| match call {
+            phonia_core::catalog::fake::Call::ArtistTopTracks { offset, .. } => Some(*offset),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(offsets, [0, 100], "listed a hundred at a time");
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn asking_for_an_artist_does_not_hold_up_the_requests_behind_it() {
+    let catalog = browsable().delayed(Duration::from_millis(700));
+    let f = fixture_with_catalog("artist-slow", Some(Arc::new(catalog))).await;
+    let mut raw = f.raw().await;
+    raw.hello().await;
+    raw.send(r#"{"id":2,"request":{"type":"artist","id":"780"}}"#)
+        .await;
+    raw.send(r#"{"id":3,"request":{"type":"status"}}"#).await;
+    let Some(ServerMessage::Response { id, .. }) = raw.recv().await else {
+        panic!("no response");
+    };
+    assert_eq!(id, RequestId(3), "the status comes first");
+    let Some(ServerMessage::Response { id, reply }) = raw.recv().await else {
+        panic!("no response");
+    };
+    assert_eq!(id, RequestId(2));
+    assert!(matches!(reply, Reply::Ok(Payload::Artist { .. })));
+    f.finish().await;
+}
