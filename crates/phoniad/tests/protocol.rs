@@ -1504,6 +1504,7 @@ fn a_track(id: &str, title: &str) -> catalog::Track {
         duration: Some(Duration::from_secs(271)),
         explicit: false,
         track_number: Some(2),
+        volume_number: None,
         quality: Some(phonia_core::config::Quality::Hires),
         streamable: true,
     }
@@ -1527,6 +1528,8 @@ fn a_catalog() -> FakeCatalog {
                 duration: None,
                 explicit: false,
                 quality: None,
+                kind: None,
+                copyright: None,
             }],
             total: 1,
             offset: 0,

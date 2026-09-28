@@ -8,8 +8,8 @@
 //! read is left out of its page rather than failing the page.
 
 use super::{
-    Album, AlbumRef, Artist, ArtistRef, Catalog, CatalogError, Kind, MAX_ITEMS_LIMIT,
-    MAX_SEARCH_LIMIT, Page, Playlist, SearchResults, Track,
+    Album, AlbumFilter, AlbumKind, AlbumRef, Artist, ArtistRef, Catalog, CatalogError, Kind,
+    MAX_ITEMS_LIMIT, MAX_SEARCH_LIMIT, Page, Playlist, SearchResults, Track,
 };
 use crate::config::Quality;
 use crate::session::TidalSession;
@@ -157,6 +157,16 @@ fn search_query(
     ]
 }
 
+/// The query of an artist's albums: the paging, and `filter` when it is the EPs and singles that
+/// are wanted (without it TIDAL lists the albums).
+fn albums_query(filter: AlbumFilter, offset: u32, limit: u32) -> Vec<(&'static str, String)> {
+    let mut query = items_query(offset, limit);
+    if filter == AlbumFilter::EpsAndSingles {
+        query.push(("filter", "EPSANDSINGLES".to_string()));
+    }
+    query
+}
+
 fn items_query(offset: u32, limit: u32) -> Vec<(&'static str, String)> {
     vec![
         ("limit", limit.clamp(1, MAX_ITEMS_LIMIT).to_string()),
@@ -221,6 +231,73 @@ impl Catalog for TidalCatalog {
             parse_track_items(&body)
         })
     }
+
+    fn album(&self, id: String) -> BoxFuture<'static, Result<Album, CatalogError>> {
+        let catalog = self.clone();
+        Box::pin(async move {
+            check_id(&id)?;
+            let body = catalog.get(&format!("/albums/{id}"), Vec::new()).await?;
+            let raw: RawAlbum = serde_json::from_str(&body).map_err(unreadable)?;
+            Ok(Album::from(raw))
+        })
+    }
+
+    fn artist(&self, id: String) -> BoxFuture<'static, Result<Artist, CatalogError>> {
+        let catalog = self.clone();
+        Box::pin(async move {
+            check_id(&id)?;
+            let body = catalog.get(&format!("/artists/{id}"), Vec::new()).await?;
+            let raw: RawArtist = serde_json::from_str(&body).map_err(unreadable)?;
+            Ok(Artist::from(raw))
+        })
+    }
+
+    fn artist_bio(&self, id: String) -> BoxFuture<'static, Result<Option<String>, CatalogError>> {
+        let catalog = self.clone();
+        Box::pin(async move {
+            check_id(&id)?;
+            bio_from(catalog.get(&format!("/artists/{id}/bio"), Vec::new()).await)
+        })
+    }
+
+    fn artist_top_tracks(
+        &self,
+        id: String,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Track>, CatalogError>> {
+        let catalog = self.clone();
+        Box::pin(async move {
+            check_id(&id)?;
+            let body = catalog
+                .get(
+                    &format!("/artists/{id}/toptracks"),
+                    items_query(offset, limit),
+                )
+                .await?;
+            parse_track_items(&body)
+        })
+    }
+
+    fn artist_albums(
+        &self,
+        id: String,
+        filter: AlbumFilter,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Album>, CatalogError>> {
+        let catalog = self.clone();
+        Box::pin(async move {
+            check_id(&id)?;
+            let body = catalog
+                .get(
+                    &format!("/artists/{id}/albums"),
+                    albums_query(filter, offset, limit),
+                )
+                .await?;
+            parse_album_items(&body)
+        })
+    }
 }
 
 // --- Reading TIDAL's answers -------------------------------------------------------------------
@@ -277,6 +354,8 @@ struct RawTrack {
     explicit: Option<bool>,
     #[serde(default, rename = "trackNumber")]
     track_number: Option<u32>,
+    #[serde(default, rename = "volumeNumber")]
+    volume_number: Option<u32>,
     #[serde(default, rename = "audioQuality")]
     audio_quality: Option<String>,
     #[serde(default, rename = "mediaMetadata")]
@@ -312,6 +391,10 @@ struct RawAlbum {
     audio_quality: Option<String>,
     #[serde(default, rename = "mediaMetadata")]
     media_metadata: Option<RawMediaMetadata>,
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    copyright: Option<String>,
     #[serde(default)]
     artists: Vec<RawArtist>,
     #[serde(default)]
@@ -406,6 +489,7 @@ impl From<RawTrack> for Track {
             duration: secs(raw.duration),
             explicit: raw.explicit.unwrap_or(false),
             track_number: raw.track_number,
+            volume_number: raw.volume_number,
             quality: tier(raw.audio_quality.as_deref(), raw.media_metadata.as_ref()),
             streamable: raw.allow_streaming.unwrap_or(true) && raw.stream_ready.unwrap_or(true),
         }
@@ -424,7 +508,19 @@ impl From<RawAlbum> for Album {
             duration: secs(raw.duration),
             explicit: raw.explicit.unwrap_or(false),
             quality: tier(raw.audio_quality.as_deref(), raw.media_metadata.as_ref()),
+            kind: raw.kind.as_deref().and_then(album_kind),
+            copyright: raw.copyright.filter(|text| !text.is_empty()),
         }
+    }
+}
+
+/// What TIDAL's `type` of an album says, if it is one this knows.
+fn album_kind(text: &str) -> Option<AlbumKind> {
+    match text {
+        "ALBUM" => Some(AlbumKind::Album),
+        "EP" => Some(AlbumKind::Ep),
+        "SINGLE" => Some(AlbumKind::Single),
+        _ => None,
     }
 }
 
@@ -510,6 +606,93 @@ fn only_kinds(mut results: SearchResults, kinds: &[Kind]) -> SearchResults {
         results.playlists = None;
     }
     results
+}
+
+/// The bio out of the answer to asking for it. An artist with nothing written about it is a 404
+/// on TIDAL's side, which is no error here: it has no bio.
+fn bio_from(answer: Result<String, CatalogError>) -> Result<Option<String>, CatalogError> {
+    match answer {
+        Ok(body) => Ok(parse_bio(&body)),
+        Err(CatalogError::NotFound) => Ok(None),
+        Err(other) => Err(other),
+    }
+}
+
+/// A page of albums, as an artist's albums are listed.
+fn parse_album_items(body: &str) -> Result<Page<Album>, CatalogError> {
+    let page: RawPage = serde_json::from_str(body).map_err(unreadable)?;
+    Ok(read_items::<RawAlbum, Album>(page))
+}
+
+/// TIDAL's `bio` of an artist: its text, or failing that its summary, cleaned of TIDAL's markup.
+/// `None` when there is nothing left to say.
+fn parse_bio(body: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct RawBio {
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        summary: Option<String>,
+    }
+    let raw: RawBio = serde_json::from_str(body).ok()?;
+    let text = [raw.text, raw.summary]
+        .into_iter()
+        .flatten()
+        .map(|text| clean_bio(&text))
+        .find(|text| !text.is_empty())?;
+    Some(text)
+}
+
+/// Turns TIDAL's bio markup into plain text: `[wimpLink ...]name[/wimpLink]` keeps just the name,
+/// line breaks become newlines, other tags go, and the few HTML entities it uses are decoded.
+fn clean_bio(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(['[', '<']) {
+        out.push_str(&rest[..start]);
+        let tag_end = match rest[start..].chars().next() {
+            Some('[') => rest[start..].find(']'),
+            _ => rest[start..].find('>'),
+        };
+        let Some(end) = tag_end.map(|offset| start + offset) else {
+            // No closing bracket: it was just text.
+            out.push_str(&rest[start..start + 1]);
+            rest = &rest[start + 1..];
+            continue;
+        };
+        let tag = &rest[start + 1..end];
+        let lower = tag.to_ascii_lowercase();
+        let is_break = lower == "br" || lower == "br/" || lower == "br /";
+        let is_markup = rest[start..].starts_with('<')
+            || lower.starts_with("wimplink")
+            || lower.starts_with("/wimplink");
+        if is_break {
+            out.push('\n');
+            rest = &rest[end + 1..];
+        } else if is_markup {
+            rest = &rest[end + 1..];
+        } else {
+            // A bracket that is not TIDAL's markup: text.
+            out.push_str(&rest[start..start + 1]);
+            rest = &rest[start + 1..];
+        }
+    }
+    out.push_str(rest);
+    let decoded = out
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">");
+    // Collapse the runs of blank lines the breaks leave.
+    let mut lines: Vec<&str> = Vec::new();
+    for line in decoded.lines().map(str::trim) {
+        if line.is_empty() && lines.last().is_none_or(|last| last.is_empty()) {
+            continue;
+        }
+        lines.push(line);
+    }
+    lines.join("\n").trim().to_string()
 }
 
 /// The listing of an album's or a playlist's items: each is `{"item": {track}, "type": "track"}`,
@@ -644,6 +827,138 @@ mod tests {
             only_kinds(answer.clone(), &[]),
             answer,
             "no kinds means all of them"
+        );
+    }
+
+    #[test]
+    fn an_album_carries_its_kind_its_copyright_and_its_hires_tag() {
+        let raw: RawAlbum = serde_json::from_str(
+            r#"{"id":33723912,"title":"Issues","type":"EP","copyright":"(P) 1999 Immortal",
+                "numberOfTracks":16,"releaseDate":"1999-11-16","audioQuality":"LOSSLESS",
+                "mediaMetadata":{"tags":["LOSSLESS","HIRES_LOSSLESS"]},
+                "artists":[{"id":780,"name":"Korn"}]}"#,
+        )
+        .unwrap();
+        let album = Album::from(raw);
+        assert_eq!(album.kind, Some(AlbumKind::Ep));
+        assert_eq!(album.copyright.as_deref(), Some("(P) 1999 Immortal"));
+        assert_eq!(album.quality, Some(Quality::Hires));
+        assert_eq!(album.artists[0].name, "Korn");
+    }
+
+    #[test]
+    fn the_kinds_of_release_tidal_names_are_known_and_others_are_not_guessed() {
+        assert_eq!(album_kind("ALBUM"), Some(AlbumKind::Album));
+        assert_eq!(album_kind("EP"), Some(AlbumKind::Ep));
+        assert_eq!(album_kind("SINGLE"), Some(AlbumKind::Single));
+        assert_eq!(album_kind("COMPILATION"), None);
+        let raw: RawAlbum = serde_json::from_str(r#"{"id":1,"copyright":""}"#).unwrap();
+        let album = Album::from(raw);
+        assert_eq!(album.kind, None);
+        assert_eq!(album.copyright, None, "an empty copyright is none");
+    }
+
+    #[test]
+    fn a_track_says_which_disc_it_is_on() {
+        let results = parse_search(
+            r#"{"tracks":{"items":[{"id":1,"trackNumber":3,"volumeNumber":2},{"id":2}]}}"#,
+        )
+        .unwrap();
+        let tracks = results.tracks.unwrap().items;
+        assert_eq!(tracks[0].volume_number, Some(2));
+        assert_eq!(tracks[1].volume_number, None);
+    }
+
+    #[test]
+    fn an_artist_is_read_from_its_own_answer() {
+        let raw: RawArtist =
+            serde_json::from_str(r#"{"id":780,"name":"Korn","picture":"x","popularity":80}"#)
+                .unwrap();
+        assert_eq!(
+            Artist::from(raw),
+            Artist {
+                id: "780".into(),
+                name: "Korn".into()
+            }
+        );
+    }
+
+    #[test]
+    fn the_albums_of_an_artist_are_read_with_their_kinds_and_a_bad_one_is_left_out() {
+        let page = parse_album_items(
+            r#"{"limit":50,"offset":0,"totalNumberOfItems":3,"items":[
+                {"id":1,"title":"Korn","type":"ALBUM"},
+                {"title":"no id"},
+                {"id":3,"title":"Freak On a Leash","type":"SINGLE"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(page.total, 3);
+        assert_eq!(
+            page.items.iter().map(|a| a.kind).collect::<Vec<_>>(),
+            [Some(AlbumKind::Album), Some(AlbumKind::Single)]
+        );
+    }
+
+    #[test]
+    fn the_eps_and_singles_are_asked_for_with_a_filter_and_the_albums_without_one() {
+        let albums = albums_query(AlbumFilter::Albums, 0, 50);
+        assert!(albums.iter().all(|(key, _)| *key != "filter"), "{albums:?}");
+        let singles = albums_query(AlbumFilter::EpsAndSingles, 50, 25);
+        assert!(
+            singles.contains(&("filter", "EPSANDSINGLES".to_string())),
+            "{singles:?}"
+        );
+        assert!(singles.contains(&("offset", "50".to_string())));
+        assert!(singles.contains(&("limit", "25".to_string())));
+    }
+
+    #[test]
+    fn a_bio_loses_tidals_markup_and_keeps_the_text() {
+        let text = clean_bio(
+            "Korn is an [wimpLink artistId=\"123\"]American[/wimpLink] band.<br/><br/>Formed in \
+             1993.<br>Members &amp; more &quot;here&quot;",
+        );
+        assert_eq!(
+            text,
+            "Korn is an American band.\n\nFormed in 1993.\nMembers & more \"here\""
+        );
+    }
+
+    #[test]
+    fn brackets_that_are_not_markup_and_other_tags_are_handled() {
+        assert_eq!(clean_bio("[Live] tour <b>2005</b>"), "[Live] tour 2005");
+        assert_eq!(clean_bio("a < b and [unclosed"), "a < b and [unclosed");
+        assert_eq!(clean_bio("  \n <br/> \n "), "", "nothing left is nothing");
+        // Runs of breaks collapse to one blank line.
+        assert_eq!(clean_bio("a<br/><br/><br/><br/>b"), "a\n\nb");
+    }
+
+    #[test]
+    fn the_bio_is_the_text_or_else_the_summary_and_nothing_when_there_is_none() {
+        assert_eq!(
+            parse_bio(r#"{"source":"TiVo","text":"Full text","summary":"Short"}"#).as_deref(),
+            Some("Full text")
+        );
+        assert_eq!(
+            parse_bio(r#"{"text":"<br/>","summary":"Short"}"#).as_deref(),
+            Some("Short"),
+            "an empty text falls back to the summary"
+        );
+        assert_eq!(parse_bio(r#"{"text":"","summary":""}"#), None);
+        assert_eq!(parse_bio("not json"), None);
+    }
+
+    #[test]
+    fn an_artist_without_a_bio_is_a_404_that_means_no_bio_and_other_errors_stay_errors() {
+        assert_eq!(bio_from(Err(CatalogError::NotFound)), Ok(None));
+        assert_eq!(
+            bio_from(Ok(r#"{"text":"Hello"}"#.to_string())),
+            Ok(Some("Hello".to_string()))
+        );
+        assert_eq!(
+            bio_from(Err(CatalogError::RateLimited)),
+            Err(CatalogError::RateLimited)
         );
     }
 
@@ -990,6 +1305,87 @@ mod tests {
         assert!(!listing.items.is_empty());
         assert_eq!(
             catalog.album_tracks("1".into(), 0, 10).await.unwrap_err(),
+            CatalogError::NotFound
+        );
+    }
+
+    /// The album and artist calls against the real TIDAL, printing the raw facts the parsing
+    /// relies on: the release kinds, whether the default albums list leaves out EPs and singles,
+    /// and what the bio looks like. Run with `--ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "needs a TIDAL login and network"]
+    async fn a_real_album_and_artist_view() {
+        use crate::auth::{Interaction, open_store};
+        use crate::config::SessionStoreKind;
+        use crate::openers::TidalOpener;
+
+        let store = open_store(SessionStoreKind::default(), Interaction::Allow).unwrap();
+        let opener =
+            TidalOpener::from_store(tidal::build_http_client().unwrap(), store, Quality::Hires);
+        let catalog = opener.catalog();
+
+        let album = catalog.album("33723912".into()).await.unwrap();
+        println!("album: {album:?}");
+        assert_eq!(album.title, "Issues");
+
+        let korn = catalog.artist("780".into()).await.unwrap();
+        println!("artist: {korn:?}");
+        assert_eq!(korn.name, "Korn");
+
+        let bio = catalog.artist_bio("780".into()).await.unwrap();
+        println!(
+            "bio: {:?}",
+            bio.as_ref()
+                .map(|text| text.chars().take(300).collect::<String>())
+        );
+        if let Some(text) = &bio {
+            assert!(
+                !text.contains("[wimpLink") && !text.contains("<br"),
+                "markup left in the bio: {text}"
+            );
+        }
+
+        let top = catalog.artist_top_tracks("780".into(), 0, 5).await.unwrap();
+        println!(
+            "top tracks: {} of {}: {:?}",
+            top.items.len(),
+            top.total,
+            top.items.iter().map(|t| &t.title).collect::<Vec<_>>()
+        );
+        assert!(!top.items.is_empty());
+
+        let albums = catalog
+            .artist_albums("780".into(), AlbumFilter::Albums, 0, 100)
+            .await
+            .unwrap();
+        let singles = catalog
+            .artist_albums("780".into(), AlbumFilter::EpsAndSingles, 0, 100)
+            .await
+            .unwrap();
+        let kinds = |page: &Page<Album>| {
+            let mut seen: Vec<String> =
+                page.items.iter().map(|a| format!("{:?}", a.kind)).collect();
+            seen.sort();
+            seen.dedup();
+            seen
+        };
+        println!(
+            "albums: {} of {}, kinds {:?}",
+            albums.items.len(),
+            albums.total,
+            kinds(&albums)
+        );
+        println!(
+            "eps and singles: {} of {}, kinds {:?}",
+            singles.items.len(),
+            singles.total,
+            kinds(&singles)
+        );
+        assert!(!albums.items.is_empty());
+
+        // An artist that has no bio must not be an error, and a bad id is not found.
+        assert_eq!(
+            catalog.artist("1".into()).await.map(|_| ()).unwrap_err(),
             CatalogError::NotFound
         );
     }
