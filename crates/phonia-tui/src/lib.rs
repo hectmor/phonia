@@ -9,6 +9,7 @@ pub mod app;
 pub mod conn;
 pub mod cursor;
 pub mod keymap;
+pub mod search;
 pub mod theme;
 pub mod view;
 
@@ -76,7 +77,10 @@ async fn event_loop(terminal: &mut ratatui::DefaultTerminal, socket: PathBuf) ->
                 // The connection task is gone if the daemon is unreachable; nothing to do then,
                 // since the interface itself already refuses to send in that case.
                 Cmd::Send(request) => {
-                    let _ = requests.send(request);
+                    let _ = requests.send((None, request));
+                }
+                Cmd::Request { tag, request } => {
+                    let _ = requests.send((Some(tag), request));
                 }
             }
         }

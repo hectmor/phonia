@@ -9,7 +9,7 @@
 //! How to connect is a parameter ([`Connector`]), so the tests run it against a scripted daemon
 //! over an in-memory pipe.
 
-use crate::app::Msg;
+use crate::app::{Msg, Tag};
 use futures_util::future::BoxFuture;
 use phonia_ipc::{Client, ClientError, Request};
 use std::sync::Arc;
@@ -20,6 +20,9 @@ use tokio::sync::{Notify, mpsc};
 const FIRST_DELAY: Duration = Duration::from_millis(250);
 /// The longest wait between attempts.
 pub const MAX_DELAY: Duration = Duration::from_secs(5);
+
+/// A request on its way to the daemon, with the tag that brings its answer back, if it wants one.
+pub type Outgoing = (Option<Tag>, Request);
 
 /// Opens a connection to the daemon.
 pub type Connector = Arc<dyn Fn() -> BoxFuture<'static, Result<Client, ClientError>> + Send + Sync>;
@@ -70,7 +73,7 @@ pub fn spawn(
     connector: Connector,
     messages: mpsc::UnboundedSender<Msg>,
     retry: Arc<Notify>,
-    requests: mpsc::UnboundedReceiver<Request>,
+    requests: mpsc::UnboundedReceiver<Outgoing>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(run(connector, messages, retry, requests))
 }
@@ -79,7 +82,7 @@ async fn run(
     connector: Connector,
     messages: mpsc::UnboundedSender<Msg>,
     retry: Arc<Notify>,
-    mut requests: mpsc::UnboundedReceiver<Request>,
+    mut requests: mpsc::UnboundedReceiver<Outgoing>,
 ) {
     let mut backoff = Backoff::new();
     loop {
@@ -123,7 +126,7 @@ async fn run(
 async fn attempt(
     connector: &Connector,
     messages: &mpsc::UnboundedSender<Msg>,
-    requests: &mut mpsc::UnboundedReceiver<Request>,
+    requests: &mut mpsc::UnboundedReceiver<Outgoing>,
 ) -> Attempt {
     let client = match connector().await {
         Ok(client) => client,
@@ -167,16 +170,25 @@ async fn attempt(
                 }
                 None => break,
             },
-            Some(request) = requests.recv() => {
+            Some((tag, request)) = requests.recv() => {
                 // Sent in its own task: a slow answer must not hold up events or a shutdown.
                 let client = client.clone();
                 let messages = messages.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = client.request(request).await {
-                        let _ = messages.send(Msg::RequestFailed {
+                    let outcome = client.request(request).await;
+                    let message = match (tag, outcome) {
+                        (Some(tag), Ok(payload)) => Msg::Response { tag, result: Ok(payload) },
+                        (Some(tag), Err(error)) => Msg::Response {
+                            tag,
+                            result: Err(error.to_string()),
+                        },
+                        // Nobody asked for the answer, only to be told if it did not work.
+                        (None, Ok(_)) => return,
+                        (None, Err(error)) => Msg::RequestFailed {
                             reason: error.to_string(),
-                        });
-                    }
+                        },
+                    };
+                    let _ = messages.send(message);
                 });
             }
             _ = client.closed() => break,
@@ -266,17 +278,22 @@ mod tests {
                 let Ok(message) = serde_json::from_slice::<ClientMessage>(&bytes) else {
                     continue;
                 };
-                let payload = match message.request {
-                    Request::Subscribe => Payload::Snapshot {
+                // A search is refused, so that a failing request can be tested; the rest works.
+                let answer = match message.request {
+                    Request::Subscribe => Reply::Ok(Payload::Snapshot {
                         seq: 10,
                         status: status(),
                         queue: queue(),
-                    },
-                    _ => Payload::Ack,
+                    }),
+                    Request::Search { .. } => Reply::Err(phonia_ipc::ProtocolError {
+                        code: phonia_ipc::ErrorCode::Unavailable,
+                        message: "boom".to_string(),
+                    }),
+                    _ => Reply::Ok(Payload::Ack),
                 };
                 let reply = ServerMessage::Response {
                     id: message.id,
-                    reply: Reply::Ok(payload),
+                    reply: answer,
                 };
                 write_frame(&mut writer, &serde_json::to_vec(&reply).unwrap())
                     .await
@@ -333,7 +350,7 @@ mod tests {
         (connector, calls)
     }
 
-    fn requests() -> mpsc::UnboundedReceiver<Request> {
+    fn requests() -> mpsc::UnboundedReceiver<Outgoing> {
         mpsc::unbounded_channel().1
     }
 
@@ -506,12 +523,82 @@ mod tests {
         spawn(connector, tx, Arc::new(Notify::new()), req_rx);
 
         assert!(matches!(next(&mut rx).await, Msg::Connected { .. }));
-        req_tx.send(Request::TogglePause).unwrap();
+        req_tx.send((None, Request::TogglePause)).unwrap();
         // The fake daemon Acks it; a success sends nothing back to the interface.
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
             rx.try_recv().is_err(),
             "no message for a request that worked"
+        );
+    }
+
+    fn a_search() -> Request {
+        Request::Search {
+            query: "korn".into(),
+            kinds: vec![],
+            offset: 0,
+            limit: None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_request_that_wants_its_answer_gets_it_back_with_its_tag() {
+        let (_keep, hang_up) = tokio::sync::oneshot::channel();
+        let daemon = fake_daemon(1, vec![], hang_up);
+        let (connector, _) = connector(vec![Ok(daemon)]);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (req_tx, req_rx) = mpsc::unbounded_channel();
+        spawn(connector, tx, Arc::new(Notify::new()), req_rx);
+        assert!(matches!(next(&mut rx).await, Msg::Connected { .. }));
+
+        let tag = Tag::Search { generation: 7 };
+        req_tx.send((Some(tag), Request::TogglePause)).unwrap();
+        assert_eq!(
+            next(&mut rx).await,
+            Msg::Response {
+                tag,
+                result: Ok(Payload::Ack)
+            }
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_tagged_request_the_daemon_refuses_comes_back_with_its_reason_and_its_tag() {
+        let (_keep, hang_up) = tokio::sync::oneshot::channel();
+        let daemon = fake_daemon(1, vec![], hang_up);
+        let (connector, _) = connector(vec![Ok(daemon)]);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (req_tx, req_rx) = mpsc::unbounded_channel();
+        spawn(connector, tx, Arc::new(Notify::new()), req_rx);
+        assert!(matches!(next(&mut rx).await, Msg::Connected { .. }));
+
+        let tag = Tag::Search { generation: 3 };
+        req_tx.send((Some(tag), a_search())).unwrap();
+        assert_eq!(
+            next(&mut rx).await,
+            Msg::Response {
+                tag,
+                result: Err("boom".to_string())
+            }
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_untagged_request_that_fails_is_reported_as_a_failure_not_as_an_answer() {
+        let (_keep, hang_up) = tokio::sync::oneshot::channel();
+        let daemon = fake_daemon(1, vec![], hang_up);
+        let (connector, _) = connector(vec![Ok(daemon)]);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (req_tx, req_rx) = mpsc::unbounded_channel();
+        spawn(connector, tx, Arc::new(Notify::new()), req_rx);
+        assert!(matches!(next(&mut rx).await, Msg::Connected { .. }));
+
+        req_tx.send((None, a_search())).unwrap();
+        assert_eq!(
+            next(&mut rx).await,
+            Msg::RequestFailed {
+                reason: "boom".to_string()
+            }
         );
     }
 
