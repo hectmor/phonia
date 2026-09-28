@@ -79,6 +79,8 @@ pub struct State {
     pub focus: Focus,
     /// The selected row of the sidebar, which is also the section shown.
     pub sidebar: Cursor,
+    /// The selected entry of the queue, in queue order.
+    pub queue_cursor: Cursor,
     pub help: bool,
     /// How many lines the help is scrolled down, when it is longer than the screen.
     pub help_scroll: usize,
@@ -209,6 +211,7 @@ pub fn update(state: &mut State, msg: Msg) -> Effects {
             });
             state.status = Some(status);
             state.queue = Some(queue);
+            clamp_queue_cursor(state);
             Effects::redraw()
         }
         Msg::Disconnected { reason, retry_in } => {
@@ -252,10 +255,12 @@ fn on_daemon_event(state: &mut State, event: Event) -> Effects {
         Event::Resync { status, queue, .. } => {
             state.status = Some(status);
             state.queue = Some(queue);
+            clamp_queue_cursor(state);
             Effects::redraw()
         }
         Event::QueueChanged { queue } => {
             state.queue = Some(queue);
+            clamp_queue_cursor(state);
             Effects::redraw()
         }
         Event::StateChanged { state: new_state } => {
@@ -328,6 +333,22 @@ fn on_daemon_event(state: &mut State, event: Event) -> Effects {
         // know are ignored.
         _ => Effects::default(),
     }
+}
+
+/// Keeps the cursor on the queue when the queue got shorter under it.
+fn clamp_queue_cursor(state: &mut State) {
+    let len = queue_len(state);
+    state.queue_cursor.clamp(len);
+}
+
+fn queue_len(state: &State) -> usize {
+    state.queue.as_ref().map_or(0, |queue| queue.items.len())
+}
+
+/// Whether the keys that act on a queue entry mean something now: the queue is on screen and has
+/// the focus.
+fn in_queue(state: &State) -> bool {
+    state.focus == Focus::Main && state.section() == Section::Queue
 }
 
 /// Applies a change to the held status, if there is one (there always should be, once connected).
@@ -405,7 +426,7 @@ fn scroll_help(state: &mut State, action: Action) -> Effects {
 }
 
 fn apply(state: &mut State, action: Action) -> Effects {
-    let before = (state.focus, state.help, state.sidebar);
+    let before = (state.focus, state.help, state.sidebar, state.queue_cursor);
     match action {
         Action::Quit => return Effects::command(Cmd::Quit),
         Action::Reconnect => return reconnect(state),
@@ -440,8 +461,19 @@ fn apply(state: &mut State, action: Action) -> Effects {
         | Action::ToggleMute
         | Action::ToggleShuffle
         | Action::CycleRepeat => return send_playback(state, action),
+        Action::Activate => {
+            // In the sidebar, Enter opens the section; in the queue, it plays the entry.
+            if state.focus == Focus::Sidebar {
+                state.focus = Focus::Main;
+            } else {
+                return edit_queue(state, action);
+            }
+        }
+        Action::RemoveEntry | Action::MoveEntryDown | Action::MoveEntryUp | Action::ClearQueue => {
+            return edit_queue(state, action);
+        }
     }
-    if (state.focus, state.help, state.sidebar) == before {
+    if (state.focus, state.help, state.sidebar, state.queue_cursor) == before {
         Effects::default()
     } else {
         Effects::redraw()
@@ -535,19 +567,67 @@ fn reconnect(state: &mut State) -> Effects {
 
 /// Moves the cursor of the panel that has the focus. The main panel lists nothing yet.
 fn move_cursor(state: &mut State, action: Action) {
-    if state.focus != Focus::Sidebar {
-        return;
-    }
-    let len = Section::ALL.len();
     let page = state.half_page();
+    let (len, cursor) = match (state.focus, state.section()) {
+        (Focus::Sidebar, _) => (Section::ALL.len(), &mut state.sidebar),
+        (Focus::Main, Section::Queue) => (queue_len(state), &mut state.queue_cursor),
+        // The other sections list nothing yet.
+        (Focus::Main, _) => return,
+    };
     match action {
-        Action::Down => state.sidebar.down(len),
-        Action::Up => state.sidebar.up(),
-        Action::First => state.sidebar.first(),
-        Action::Last => state.sidebar.last(len),
-        Action::HalfPageDown => state.sidebar.page_down(len, page),
-        Action::HalfPageUp => state.sidebar.page_up(page),
+        Action::Down => cursor.down(len),
+        Action::Up => cursor.up(),
+        Action::First => cursor.first(),
+        Action::Last => cursor.last(len),
+        Action::HalfPageDown => cursor.page_down(len, page),
+        Action::HalfPageUp => cursor.page_up(page),
         _ => {}
+    }
+}
+
+/// The queue's edits and Enter, on the selected entry: sent while connected and looking at the
+/// queue, and refused silently otherwise, like the playback keys.
+fn edit_queue(state: &mut State, action: Action) -> Effects {
+    if state.connection != Connection::Connected || !in_queue(state) {
+        return Effects::default();
+    }
+    let Some(queue) = &state.queue else {
+        return Effects::default();
+    };
+    let index = state.queue_cursor.selected();
+    let len = queue.items.len();
+    let selected = queue.items.get(index).map(|item| item.id);
+    let request = match action {
+        Action::Activate => selected.map(|item| Request::Play { item: Some(item) }),
+        Action::RemoveEntry => selected.map(|id| Request::QueueRemove { ids: vec![id] }),
+        Action::ClearQueue => (len > 0).then_some(Request::QueueClear),
+        // The entry moves one place, and the cursor goes with it.
+        Action::MoveEntryDown if index + 1 < len => {
+            selected.map(|id| Request::QueueMove { id, to: index + 1 })
+        }
+        Action::MoveEntryUp if index > 0 => {
+            selected.map(|id| Request::QueueMove { id, to: index - 1 })
+        }
+        _ => None,
+    };
+    let Some(request) = request else {
+        return Effects::default();
+    };
+    let had_error = state.last_error.take().is_some();
+    match action {
+        Action::MoveEntryDown => state.queue_cursor.select(index + 1, len),
+        Action::MoveEntryUp => state.queue_cursor.select(index - 1, len),
+        Action::ClearQueue => state.queue_cursor.first(),
+        _ => {}
+    }
+    Effects {
+        // The cursor moving with an entry is a change to show; sending alone is not.
+        redraw: had_error
+            || matches!(
+                action,
+                Action::MoveEntryDown | Action::MoveEntryUp | Action::ClearQueue
+            ),
+        commands: vec![Cmd::Send(request)],
     }
 }
 
@@ -1195,5 +1275,168 @@ mod tests {
         ch(&mut state, '?');
         ch(&mut state, '?');
         assert_eq!(state.help_scroll, 0, "opened again, it starts at the top");
+    }
+
+    /// Connected, with a queue of `count` entries (ids 1..=count) and the focus on the queue.
+    fn in_the_queue(count: u64) -> State {
+        use phonia_ipc::{ItemId, QueueItem};
+        let mut state = State::default();
+        update(&mut state, connected_msg(&[]));
+        let items: Vec<QueueItem> = (1..=count)
+            .map(|n| QueueItem {
+                id: ItemId(n),
+                source: format!("file:/t{n}.flac"),
+                title: None,
+                duration_ms: None,
+            })
+            .collect();
+        let mut queue = queue();
+        queue.order = items.iter().map(|item| item.id).collect();
+        queue.items = items;
+        update(&mut state, Msg::Daemon(Event::QueueChanged { queue }));
+        ch(&mut state, 'l');
+        state
+    }
+
+    fn id(n: u64) -> phonia_ipc::ItemId {
+        phonia_ipc::ItemId(n)
+    }
+
+    #[test]
+    fn the_movement_keys_move_the_queue_cursor_when_the_queue_has_the_focus() {
+        let mut state = in_the_queue(5);
+        ch(&mut state, 'j');
+        ch(&mut state, 'j');
+        assert_eq!(state.queue_cursor.selected(), 2);
+        assert_eq!(state.section(), Section::Queue, "the sidebar did not move");
+        ch(&mut state, 'G');
+        assert_eq!(state.queue_cursor.selected(), 4);
+        ch(&mut state, 'g');
+        ch(&mut state, 'g');
+        assert_eq!(state.queue_cursor.selected(), 0);
+        ch(&mut state, 'k');
+        assert_eq!(state.queue_cursor.selected(), 0, "stops at the top");
+    }
+
+    #[test]
+    fn enter_opens_the_section_from_the_sidebar_and_plays_the_entry_in_the_queue() {
+        let mut state = in_the_queue(3);
+        ch(&mut state, 'h');
+        assert_eq!(state.focus, Focus::Sidebar);
+        let effects = press(&mut state, KeyCode::Enter);
+        assert_eq!(state.focus, Focus::Main);
+        assert!(
+            effects.commands.is_empty(),
+            "opening the section plays nothing"
+        );
+
+        ch(&mut state, 'j');
+        assert_eq!(
+            sent(press(&mut state, KeyCode::Enter)),
+            Request::Play { item: Some(id(2)) }
+        );
+    }
+
+    #[test]
+    fn d_removes_the_selected_entry_and_the_cursor_stays_on_the_list() {
+        let mut state = in_the_queue(3);
+        ch(&mut state, 'G');
+        assert_eq!(
+            sent(ch(&mut state, 'd')),
+            Request::QueueRemove { ids: vec![id(3)] }
+        );
+        // The daemon answers with the shorter queue; the cursor is brought back inside it.
+        let mut shorter = state.queue.clone().unwrap();
+        shorter.items.pop();
+        shorter.order.pop();
+        update(
+            &mut state,
+            Msg::Daemon(Event::QueueChanged { queue: shorter }),
+        );
+        assert_eq!(state.queue_cursor.selected(), 1);
+    }
+
+    #[test]
+    fn capital_j_and_k_move_the_entry_and_the_cursor_goes_with_it() {
+        let mut state = in_the_queue(4);
+        ch(&mut state, 'j');
+        assert_eq!(
+            sent(ch(&mut state, 'J')),
+            Request::QueueMove { id: id(2), to: 2 }
+        );
+        assert_eq!(state.queue_cursor.selected(), 2);
+        assert_eq!(
+            sent(ch(&mut state, 'K')),
+            Request::QueueMove { id: id(3), to: 1 }
+        );
+        assert_eq!(state.queue_cursor.selected(), 1);
+    }
+
+    #[test]
+    fn an_entry_cannot_be_moved_past_the_ends() {
+        let mut state = in_the_queue(3);
+        assert_eq!(ch(&mut state, 'K'), Effects::default(), "already first");
+        ch(&mut state, 'G');
+        assert_eq!(ch(&mut state, 'J'), Effects::default(), "already last");
+        assert_eq!(state.queue_cursor.selected(), 2);
+    }
+
+    #[test]
+    fn clearing_the_queue_takes_two_presses_of_c() {
+        let mut state = in_the_queue(3);
+        ch(&mut state, 'j');
+        assert_eq!(ch(&mut state, 'c'), Effects::default(), "half a binding");
+        assert_eq!(sent(ch(&mut state, 'c')), Request::QueueClear);
+        assert_eq!(state.queue_cursor.selected(), 0);
+
+        // Anything in between cancels it: a stray c is never enough.
+        let mut state = in_the_queue(3);
+        ch(&mut state, 'c');
+        ch(&mut state, 'x');
+        assert_eq!(ch(&mut state, 'c'), Effects::default());
+    }
+
+    #[test]
+    fn the_queue_keys_do_nothing_elsewhere() {
+        // In the sidebar.
+        let mut state = in_the_queue(3);
+        ch(&mut state, 'h');
+        for key in ['d', 'J', 'K'] {
+            assert_eq!(ch(&mut state, key), Effects::default(), "sidebar, {key}");
+        }
+        ch(&mut state, 'c');
+        assert_eq!(ch(&mut state, 'c'), Effects::default(), "sidebar, cc");
+
+        // In another section.
+        let mut state = in_the_queue(3);
+        ch(&mut state, '2');
+        for key in ['d', 'J', 'K'] {
+            assert_eq!(ch(&mut state, key), Effects::default(), "search, {key}");
+        }
+
+        // On an empty queue.
+        let mut state = in_the_queue(0);
+        for key in ['d', 'J', 'K'] {
+            assert_eq!(ch(&mut state, key), Effects::default(), "empty, {key}");
+        }
+        assert_eq!(press(&mut state, KeyCode::Enter), Effects::default());
+        ch(&mut state, 'c');
+        assert_eq!(ch(&mut state, 'c'), Effects::default(), "nothing to clear");
+    }
+
+    #[test]
+    fn without_a_connection_the_queue_keys_do_nothing() {
+        let mut state = in_the_queue(3);
+        update(
+            &mut state,
+            Msg::Disconnected {
+                reason: "gone".into(),
+                retry_in: Duration::from_secs(1),
+            },
+        );
+        for key in ['d', 'J', 'K'] {
+            assert_eq!(ch(&mut state, key), Effects::default(), "{key}");
+        }
+        assert_eq!(press(&mut state, KeyCode::Enter), Effects::default());
     }
 }

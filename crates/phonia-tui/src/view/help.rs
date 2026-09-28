@@ -53,6 +53,7 @@ fn lines(theme: &Theme) -> Vec<Line<'static>> {
         Group::Movement,
         Group::Panels,
         Group::Playback,
+        Group::Queue,
     ] {
         if !lines.is_empty() {
             lines.push(Line::raw(""));

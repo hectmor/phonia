@@ -82,24 +82,56 @@ fn draw_sidebar(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
 
 fn draw_main(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
     let focused = state.focus == Focus::Main;
-    let block = panel(state.section().title(), focused, theme);
-    let lines = match (state.section(), &state.queue) {
-        (Section::Queue, Some(queue)) => queue_lines(queue, theme),
-        (Section::Queue, None) => vec![Line::styled("Not connected yet.", theme.dim)],
-        _ => vec![Line::styled("Nothing to show yet.", theme.dim)],
+    let (title, lines) = match (state.section(), &state.queue) {
+        (Section::Queue, Some(queue)) => {
+            let title = format!("Queue ({})", queue.items.len());
+            // The border takes a row above and one below.
+            let rows = usize::from(area.height.saturating_sub(2));
+            let cursor = focused.then(|| state.queue_cursor.selected());
+            (title, queue_lines(queue, cursor, rows, theme))
+        }
+        (Section::Queue, None) => (
+            "Queue".to_string(),
+            vec![Line::styled("Not connected yet.", theme.dim)],
+        ),
+        (section, _) => (
+            section.title().to_string(),
+            vec![Line::styled("Nothing to show yet.", theme.dim)],
+        ),
     };
-    frame.render_widget(Paragraph::new(lines).block(block), area);
+    frame.render_widget(
+        Paragraph::new(lines).block(panel(&title, focused, theme)),
+        area,
+    );
 }
 
-fn queue_lines<'a>(queue: &phonia_ipc::Queue, theme: &Theme) -> Vec<Line<'a>> {
+/// The first row to show so that `cursor` is on screen among `rows`: the top of the list until the
+/// cursor would fall off the bottom, then just enough scrolled for it to be the last row.
+pub fn first_visible(cursor: usize, rows: usize) -> usize {
+    if rows == 0 {
+        return 0;
+    }
+    (cursor + 1).saturating_sub(rows)
+}
+
+/// The queue in queue order, as many rows as fit, with the entry playing marked and, when the
+/// list has the focus, the one under the cursor highlighted.
+fn queue_lines<'a>(
+    queue: &phonia_ipc::Queue,
+    cursor: Option<usize>,
+    rows: usize,
+    theme: &Theme,
+) -> Vec<Line<'a>> {
     if queue.items.is_empty() {
         return vec![Line::styled("The queue is empty.", theme.dim)];
     }
+    let start = first_visible(cursor.unwrap_or(0), rows);
     queue
-        .order
+        .items
         .iter()
-        .filter_map(|id| queue.items.iter().find(|item| item.id == *id))
         .enumerate()
+        .skip(start)
+        .take(rows.max(1))
         .map(|(index, item)| {
             let current = queue.current == Some(item.id);
             let marker = if current { ">" } else { " " };
@@ -108,7 +140,13 @@ fn queue_lines<'a>(queue: &phonia_ipc::Queue, theme: &Theme) -> Vec<Line<'a>> {
                 .duration_ms
                 .map(|ms| format!("  [{}]", phonia_ipc::fmt::ms(ms)))
                 .unwrap_or_default();
-            let style = if current { theme.accent } else { theme.text };
+            let style = if cursor == Some(index) {
+                theme.selected
+            } else if current {
+                theme.accent
+            } else {
+                theme.text
+            };
             Line::styled(format!("{marker} {:>2}. {name}{length}", index + 1), style)
         })
         .collect()
@@ -433,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn the_queue_is_listed_in_play_order_with_the_current_one_marked() {
+    fn the_queue_is_listed_in_queue_order_even_when_shuffled_with_the_current_one_marked() {
         use phonia_ipc::{ItemId, Queue, QueueItem, Repeat};
         let mut state = connected();
         update(
@@ -463,13 +501,16 @@ mod tests {
             }),
         );
         let text = screen(&state, 90, 12);
-        let a = text.find("tidal:9").unwrap();
-        let b = text.find("A  [1:05]").unwrap();
+        // `order` is reversed, as if shuffled; the list is in queue order, which is what
+        // `QueueMove` and `ctl queue list` use.
+        let first = text.find("A  [1:05]").unwrap();
+        let second = text.find("tidal:9").unwrap();
+        assert!(first < second, "A is entry 1: {text}");
+        assert!(text.contains(">  2. tidal:9"), "{text}");
         assert!(
-            a < b,
-            "tidal:9 (order[0]) should be listed before A: {text}"
+            text.contains("Queue (2)"),
+            "the title counts the entries: {text}"
         );
-        assert!(text.contains(">  1. tidal:9"), "{text}");
     }
 
     #[test]
@@ -612,6 +653,89 @@ mod tests {
         ] {
             assert!(text.contains(wanted), "{wanted:?} missing:\n{text}");
         }
+    }
+
+    fn long_queue(count: u64) -> State {
+        use phonia_ipc::{ItemId, Queue, QueueItem, Repeat};
+        let mut state = connected();
+        let items: Vec<QueueItem> = (1..=count)
+            .map(|n| QueueItem {
+                id: ItemId(n),
+                source: format!("file:/t{n}.flac"),
+                title: Some(format!("Track {n}")),
+                duration_ms: None,
+            })
+            .collect();
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::QueueChanged {
+                queue: Queue {
+                    version: 2,
+                    order: items.iter().map(|item| item.id).collect(),
+                    items,
+                    current: None,
+                    shuffle: false,
+                    repeat: Repeat::Off,
+                },
+            }),
+        );
+        state
+    }
+
+    #[test]
+    fn the_first_visible_row_keeps_the_cursor_on_screen() {
+        assert_eq!(first_visible(0, 10), 0);
+        assert_eq!(first_visible(9, 10), 0, "the last row that fits");
+        assert_eq!(first_visible(10, 10), 1);
+        assert_eq!(first_visible(25, 10), 16);
+        assert_eq!(first_visible(5, 0), 0, "no rows: nothing to scroll");
+    }
+
+    #[test]
+    fn a_long_queue_scrolls_to_the_cursor() {
+        let mut state = long_queue(40);
+        press(&mut state, 'l');
+        // 12 rows of terminal leave 6 for the list (borders and the bar take the rest).
+        let top = screen(&state, 80, 12);
+        assert!(top.contains(" 1. Track 1 "), "{top}");
+        assert!(!top.contains("Track 30"), "{top}");
+
+        for _ in 0..30 {
+            press(&mut state, 'j');
+        }
+        let scrolled = screen(&state, 80, 12);
+        assert!(
+            scrolled.contains("Track 31"),
+            "the cursor row is on screen:\n{scrolled}"
+        );
+        assert!(!scrolled.contains("Track 1 "), "{scrolled}");
+    }
+
+    #[test]
+    fn the_cursor_row_is_highlighted_only_while_the_list_has_the_focus() {
+        let mut state = long_queue(3);
+        let theme = Theme::new(false);
+        let has_reverse_row = |state: &State| {
+            let mut terminal = Terminal::new(TestBackend::new(60, 14)).unwrap();
+            terminal.draw(|frame| draw(state, &theme, frame)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..14).any(|y| {
+                (14..40).any(|x| {
+                    buffer[(x, y)]
+                        .modifier
+                        .contains(ratatui::style::Modifier::REVERSED)
+                })
+            })
+        };
+        assert!(
+            !has_reverse_row(&state),
+            "focus is on the sidebar: no cursor row"
+        );
+        press(&mut state, 'l');
+        assert!(
+            has_reverse_row(&state),
+            "focus is on the list: the cursor row shows"
+        );
     }
 
     #[test]
