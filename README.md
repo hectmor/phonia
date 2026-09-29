@@ -451,14 +451,14 @@ sink = "bluez_output.AA_BB_CC_DD_EE_FF.1"   # from `phonia devices`; or "default
   no volume**: the audio reaches the DAC unscaled, which is the point, so `volume` there says to use
   the DAC's own control or to switch to a shared output.
 
-## Phase 0 status
+## Project status
 
-- `cargo build` and `cargo test` pass cleanly; `cargo clippy` has no warnings.
-- Since then: DASH segments are streamed on demand, playback runs through an engine with pause,
-  seek, next/previous and a heard-position report (issue #10), and tracks are played from an
-  in-memory queue with shuffle and repeat (issue #11).
-- What's still out of scope (coming in later phases): TUI, `%0Nd` in DASH segment templates,
-  manifest encryption support.
+Phase-by-phase status (what's done, what's in progress, what's next) lives in
+[`ROADMAP.md`](ROADMAP.md), kept current as work lands, rather than here,
+where it would go stale the moment this file wasn't the thing being edited
+alongside a merge (which is exactly what happened to this section before it
+was replaced by a pointer). [`docs/DECISIONS.md`](docs/DECISIONS.md) is the
+companion record of *why* things were built the way they were.
 
 ## Tech stack
 
@@ -620,6 +620,53 @@ plain `cargo test`:
   `TIDAL_TRACK=<id>` picks another track.
 - The tests that open a sound card (`output::alsa`) are ignored too, and are run by hand with the
   DAC connected. **Do not run `cargo test --workspace -- --include-ignored`**: it runs those.
+
+## Working process
+
+This project is meant to be picked up from the repository alone — by its owner on a different
+machine, or by a model other than whichever one wrote a given part of it — without depending on
+any single assistant's own memory of past sessions. That is what this section, `ROADMAP.md` and
+`docs/DECISIONS.md` are for together: the roadmap is the current *what*, the decisions log is the
+*why*, and this section is the *how*, so an audit can start here and check the other two against
+the issue tracker and the git history.
+
+**The people and the process.** One person (@hectmor) directs the project and makes every product
+and architectural call; an AI pair does the planning and the implementing. A harder design
+question (a new subsystem, a protocol change, a UI decision with real trade-offs) is planned first
+by a more capable model, presented as a short written plan with the open decisions called out
+explicitly, and only implemented once the person has approved it; a well-scoped, already-decided
+piece of work goes straight to implementation. Nothing is committed, pushed, or opened as a pull
+request without the person's explicit go-ahead in that session — approval for one piece of work
+does not carry over to the next.
+
+**Branching and pull requests.** Every issue (or a part of one, when it is split into several) gets
+its own branch off `develop`, never off another open feature branch (no stacking): a stacked branch
+can't be merged independently, and a base branch that gets deleted before retargeting orphans it.
+Pull requests target `develop`, not `main`. Each one is assigned to the project owner, carries the
+milestone of the issue it belongs to, and an `enhancement` (or `bug`/`documentation`) label — GitHub's
+own filtering is meant to stay a second, independent source of truth alongside this file. Commits
+and pull request descriptions carry no `Co-Authored-By` trailer and no "Generated with"/session-link
+footer, by the project owner's explicit standing instruction. Issues are closed by hand after their
+pull requests merge (merging to `develop` does not auto-close anything on `main`), so an issue still
+open on GitHub does not necessarily mean the work isn't done — check its pull requests.
+
+Pull requests are also meant to be added to a GitHub Project board named "phonia"; as of this
+writing that step is blocked because the `gh` CLI token in use lacks the `project`/`read:project`
+scope (`gh auth refresh -s project` would fix it) — worth doing once, by the project owner, since a
+CLI login can't grant itself a new scope.
+
+**Testing discipline.** `cargo test --workspace` must stay safe to run anywhere, including CI: it
+never touches real hardware or a real account. Tests that need something a plain CI machine doesn't
+have (a real sound card, the person's real TIDAL login, a real D-Bus session/PulseAudio server) are
+marked `#[ignore]` and run by hand, deliberately, as documented above — in particular, **never**
+`cargo test --workspace -- --include-ignored`, which would open the real sound card. Anything that
+plays audio to verify a change is checked through a silent file, a PipeWire null sink, or an ALSA
+loopback (`snd-aloop`), never through real speakers unless the person explicitly asks to hear it.
+
+**Keeping this current.** `ROADMAP.md` is updated in the same session a part of an issue merges, not
+as a later cleanup pass; `docs/DECISIONS.md` gets a new, dated entry for a decision worth recording
+at the time it's made, never edited afterwards to hide that something changed — a decision that gets
+revisited gets a new entry saying so.
 
 ## License
 
