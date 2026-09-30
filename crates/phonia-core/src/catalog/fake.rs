@@ -2,7 +2,7 @@
 
 use super::{
     Album, AlbumFilter, Artist, Catalog, CatalogError, Kind, MAX_ITEMS_LIMIT, MAX_SEARCH_LIMIT,
-    Page, SearchResults, Track,
+    Page, Playlist, SearchResults, Track,
 };
 use futures_util::future::BoxFuture;
 use std::collections::HashMap;
@@ -48,6 +48,18 @@ pub enum Call {
         offset: u32,
         limit: u32,
     },
+    FavoriteTracks {
+        offset: u32,
+        limit: u32,
+    },
+    FavoriteAlbums {
+        offset: u32,
+        limit: u32,
+    },
+    MyPlaylists {
+        offset: u32,
+        limit: u32,
+    },
 }
 
 /// What a [`FakeCatalog`] knows of one artist.
@@ -67,6 +79,9 @@ struct State {
     playlists: HashMap<String, Vec<Track>>,
     album_details: HashMap<String, Album>,
     artists: HashMap<String, ArtistData>,
+    favorite_tracks: Vec<Track>,
+    favorite_albums: Vec<Album>,
+    my_playlists: Vec<Playlist>,
     error: Option<CatalogError>,
     delay: Duration,
     calls: Vec<Call>,
@@ -135,6 +150,24 @@ impl FakeCatalog {
             artist: artist.clone(),
         };
         self.state.lock().unwrap().artists.insert(artist.id, data);
+        self
+    }
+
+    /// The user's favorite tracks, for `favorite_tracks`.
+    pub fn with_favorite_tracks(self, tracks: Vec<Track>) -> Self {
+        self.state.lock().unwrap().favorite_tracks = tracks;
+        self
+    }
+
+    /// The user's favorite albums, for `favorite_albums`.
+    pub fn with_favorite_albums(self, albums: Vec<Album>) -> Self {
+        self.state.lock().unwrap().favorite_albums = albums;
+        self
+    }
+
+    /// The user's own playlists, for `my_playlists`.
+    pub fn with_my_playlists(self, playlists: Vec<Playlist>) -> Self {
+        self.state.lock().unwrap().my_playlists = playlists;
         self
     }
 
@@ -332,6 +365,39 @@ impl Catalog for FakeCatalog {
             None => Err(CatalogError::NotFound),
         })
     }
+
+    fn favorite_tracks(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Track>, CatalogError>> {
+        let call = Call::FavoriteTracks { offset, limit };
+        self.answer(call, move |state| {
+            Ok(page_of(&state.favorite_tracks, offset, limit))
+        })
+    }
+
+    fn favorite_albums(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Album>, CatalogError>> {
+        let call = Call::FavoriteAlbums { offset, limit };
+        self.answer(call, move |state| {
+            Ok(page_of(&state.favorite_albums, offset, limit))
+        })
+    }
+
+    fn my_playlists(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Playlist>, CatalogError>> {
+        let call = Call::MyPlaylists { offset, limit };
+        self.answer(call, move |state| {
+            Ok(page_of(&state.my_playlists, offset, limit))
+        })
+    }
 }
 
 #[cfg(test)]
@@ -460,6 +526,49 @@ mod tests {
             .unwrap();
         assert_eq!(singles.items[0].id, "s1");
         assert_eq!(catalog.calls()[0], Call::Album { id: "9".into() });
+    }
+
+    fn playlist_of(id: &str) -> Playlist {
+        Playlist {
+            id: id.into(),
+            title: format!("Playlist {id}"),
+            creator: None,
+            description: None,
+            track_count: None,
+            duration: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_library_comes_back_paged_and_is_remembered() {
+        let catalog = FakeCatalog::new()
+            .with_favorite_tracks((1..=3).map(track).collect())
+            .with_favorite_albums(vec![album_of("a1")])
+            .with_my_playlists(vec![playlist_of("p1"), playlist_of("p2")]);
+
+        let tracks = catalog.favorite_tracks(0, 2).await.unwrap();
+        assert_eq!((tracks.total, tracks.items.len()), (3, 2));
+
+        let albums = catalog.favorite_albums(0, 10).await.unwrap();
+        assert_eq!(albums.items[0].id, "a1");
+
+        let playlists = catalog.my_playlists(0, 10).await.unwrap();
+        assert_eq!(
+            playlists
+                .items
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            ["p1", "p2"]
+        );
+
+        assert_eq!(
+            catalog.calls()[0],
+            Call::FavoriteTracks {
+                offset: 0,
+                limit: 2
+            }
+        );
     }
 
     #[tokio::test]

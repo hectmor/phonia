@@ -232,4 +232,28 @@ pub trait Catalog: Send + Sync {
         offset: u32,
         limit: u32,
     ) -> BoxFuture<'static, Result<Page<Album>, CatalogError>>;
+
+    /// The tracks the logged-in user has favorited, newest first. At most [`MAX_ITEMS_LIMIT`]
+    /// per page.
+    fn favorite_tracks(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Track>, CatalogError>>;
+
+    /// The albums the logged-in user has favorited, newest first. At most [`MAX_ITEMS_LIMIT`]
+    /// per page.
+    fn favorite_albums(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Album>, CatalogError>>;
+
+    /// The playlists the logged-in user created themselves — not the ones they only follow. At
+    /// most [`MAX_ITEMS_LIMIT`] per page.
+    fn my_playlists(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Playlist>, CatalogError>>;
 }
