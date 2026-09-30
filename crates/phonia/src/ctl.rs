@@ -89,6 +89,12 @@ pub enum CtlCommand {
         #[arg(long)]
         limit: Option<u32>,
     },
+    /// Shows the library: favorite tracks, favorite albums, and the playlists you created
+    /// yourself (the first 50 of each, or `--limit`, at most 100).
+    Library {
+        #[arg(long)]
+        limit: Option<u32>,
+    },
     /// Mutes (`on`), unmutes (`off`) or flips (`toggle`, the default) a shared output; the level is kept.
     Mute {
         mode: Option<MuteMode>,
@@ -281,6 +287,7 @@ pub async fn run(args: CtlArgs, config_flag: Option<&Path>) -> Result<()> {
         } => search(&client, json, query.join(" "), kinds, limit, offset).await,
         CtlCommand::Album { id, limit } => album(&client, json, id, limit).await,
         CtlCommand::Artist { id, limit } => artist(&client, json, id, limit).await,
+        CtlCommand::Library { limit } => library(&client, json, limit).await,
         CtlCommand::Mute { mode } => mute(&client, json, mode.unwrap_or(MuteMode::Toggle)).await,
         CtlCommand::Output { action } => output(&client, json, action).await,
         CtlCommand::Queue { action } => queue(&client, json, action).await,
@@ -576,6 +583,12 @@ async fn artist(client: &Client, json: bool, id: String, limit: Option<u32>) -> 
     print_payload(json, &payload, || format_artist(&payload))
 }
 
+async fn library(client: &Client, json: bool, limit: Option<u32>) -> Result<()> {
+    require_catalog(client, "a library")?;
+    let payload = client.request(Request::Library { limit }).await?;
+    print_payload(json, &payload, || format_library(&payload))
+}
+
 /// The album's line, then who it is by, its copyright, and its tracks, numbered as on the album,
 /// with a heading for each disc when there is more than one.
 fn format_album(payload: &Payload) -> String {
@@ -674,6 +687,51 @@ fn format_artist(payload: &Payload) -> String {
     });
     section(&mut text, "EPs and singles", singles, |album| {
         format!("{}   album {}", phonia_ipc::fmt::album(album), album.id)
+    });
+    text
+}
+
+/// The three lists a library has, each numbered from the start.
+fn format_library(payload: &Payload) -> String {
+    let Payload::Library {
+        favorite_tracks,
+        favorite_albums,
+        my_playlists,
+    } = payload
+    else {
+        return "unexpected answer".to_string();
+    };
+    fn section<T>(
+        text: &mut String,
+        title: &str,
+        page: &phonia_ipc::Page<T>,
+        row: impl Fn(&T) -> String,
+    ) {
+        text.push_str(&format!(
+            "\n\n{title} ({} of {}):",
+            page.items.len(),
+            page.total
+        ));
+        if page.items.is_empty() {
+            text.push_str("\n  none");
+        }
+        for (index, item) in page.items.iter().enumerate() {
+            text.push_str(&format!("\n {:>3}. {}", index + 1, row(item)));
+        }
+    }
+    let mut text = "Library:".to_string();
+    section(&mut text, "Favorite tracks", favorite_tracks, |track| {
+        format!("{}   tidal:{}", phonia_ipc::fmt::track(track), track.id)
+    });
+    section(&mut text, "Favorite albums", favorite_albums, |album| {
+        format!("{}   album {}", phonia_ipc::fmt::album(album), album.id)
+    });
+    section(&mut text, "Your playlists", my_playlists, |playlist| {
+        format!(
+            "{}   playlist {}",
+            phonia_ipc::fmt::playlist(playlist),
+            playlist.id
+        )
     });
     text
 }
@@ -1973,6 +2031,84 @@ mod tests {
         });
         assert!(
             text.starts_with("Nobody   artist 1\n\nTop tracks (0 of 0):"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_library_prints_a_section_for_each_of_its_three_lists() {
+        use phonia_ipc::{AlbumKind, AlbumSummary, Page};
+        let payload = Payload::Library {
+            favorite_tracks: Page {
+                items: vec![album_track("1", "Blind", 1, 1)],
+                total: 1,
+                offset: 0,
+            },
+            favorite_albums: Page {
+                items: vec![AlbumSummary {
+                    id: "9".into(),
+                    title: "Issues".into(),
+                    version: None,
+                    artists: vec![],
+                    release_date: Some("1999-11-16".into()),
+                    track_count: Some(16),
+                    duration_ms: None,
+                    explicit: false,
+                    quality: None,
+                    kind: Some(AlbumKind::Album),
+                    copyright: None,
+                }],
+                total: 1,
+                offset: 0,
+            },
+            my_playlists: Page {
+                items: vec![],
+                total: 0,
+                offset: 0,
+            },
+        };
+        let text = format_library(&payload);
+        assert!(
+            text.starts_with("Library:\n\nFavorite tracks (1 of 1):"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Favorite albums (1 of 1):\n   1. Issues - 1999 - 16 tracks   album 9"),
+            "{text}"
+        );
+        assert!(text.contains("Your playlists (0 of 0):\n  none"), "{text}");
+    }
+
+    #[test]
+    fn a_playlist_of_a_library_prints_like_one_from_a_search() {
+        use phonia_ipc::{Page, PlaylistSummary};
+        fn empty<T>() -> Page<T> {
+            Page {
+                items: vec![],
+                total: 0,
+                offset: 0,
+            }
+        }
+        let text = format_library(&Payload::Library {
+            favorite_tracks: empty(),
+            favorite_albums: empty(),
+            my_playlists: Page {
+                items: vec![PlaylistSummary {
+                    id: "p-1".into(),
+                    title: "Road trip".into(),
+                    creator: Some("hectmor".into()),
+                    description: None,
+                    track_count: Some(10),
+                    duration_ms: None,
+                }],
+                total: 1,
+                offset: 0,
+            },
+        });
+        assert!(
+            text.contains(
+                "Your playlists (1 of 1):\n   1. Road trip - hectmor - 10 tracks   playlist p-1"
+            ),
             "{text}"
         );
     }

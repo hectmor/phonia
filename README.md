@@ -182,6 +182,13 @@ gapless = true          # join a track to the next one of the same format with n
   tracks numbered as on the album (with a heading per disc when there is more than one), or an artist's bio,
   top tracks, albums, and EPs and singles, each row ending with the id that `queue add` takes (`tidal:<id>`,
   `album:<id>`). `--limit` sets the size of a page (at most 100).
+- **The library** (the requests `library` and `playlists` of protocol 1.6, and `phonia ctl library`):
+  favorite tracks and favorite albums (`favorite_tracks`/`favorite_albums`, newest favorited first),
+  and the playlists you created yourself, not ones you only follow (`/users/{id}/playlists`, kept
+  to your own by comparing each entry's creator to you). `library` answers the first page of all
+  three at once, the same way `artist` does for its own lists; `tracks`/`albums`/`playlists` give
+  the next pages. `phonia ctl library` prints all three, `--limit` sets the size of a page (at most
+  100).
 - `phonia config path` prints which file is used, and `phonia config show` prints every setting
   with where its value comes from (the file or the default). `--config <file>` (or the
   `PHONIA_CONFIG` environment variable) selects another file, also for `phoniad`.
