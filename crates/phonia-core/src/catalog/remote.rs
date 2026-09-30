@@ -56,6 +56,12 @@ impl TidalCatalog {
         };
         get(&self.http, &account, path, &query).await
     }
+
+    /// The id of the logged-in user, for the endpoints that are theirs specifically.
+    async fn user_id(&self) -> Result<String, CatalogError> {
+        let client = self.session.fresh().await.map_err(session_error)?;
+        tidal::user_id(&client).map_err(session_error)
+    }
 }
 
 /// Who is asking, and where the API is.
@@ -172,6 +178,14 @@ fn items_query(offset: u32, limit: u32) -> Vec<(&'static str, String)> {
         ("limit", limit.clamp(1, MAX_ITEMS_LIMIT).to_string()),
         ("offset", offset.to_string()),
     ]
+}
+
+/// The query of a favorites listing: paging, plus asking for the most recently favorited first.
+fn favorites_query(offset: u32, limit: u32) -> Vec<(&'static str, String)> {
+    let mut query = items_query(offset, limit);
+    query.push(("order", "DATE".to_string()));
+    query.push(("orderDirection", "DESC".to_string()));
+    query
 }
 
 impl Catalog for TidalCatalog {
@@ -298,12 +312,66 @@ impl Catalog for TidalCatalog {
             parse_album_items(&body)
         })
     }
+
+    fn favorite_tracks(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Track>, CatalogError>> {
+        let catalog = self.clone();
+        Box::pin(async move {
+            let user_id = catalog.user_id().await?;
+            let body = catalog
+                .get(
+                    &format!("/users/{user_id}/favorites/tracks"),
+                    favorites_query(offset, limit),
+                )
+                .await?;
+            parse_favorited_items::<RawTrack, Track>(&body)
+        })
+    }
+
+    fn favorite_albums(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Album>, CatalogError>> {
+        let catalog = self.clone();
+        Box::pin(async move {
+            let user_id = catalog.user_id().await?;
+            let body = catalog
+                .get(
+                    &format!("/users/{user_id}/favorites/albums"),
+                    favorites_query(offset, limit),
+                )
+                .await?;
+            parse_favorited_items::<RawAlbum, Album>(&body)
+        })
+    }
+
+    fn my_playlists(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Playlist>, CatalogError>> {
+        let catalog = self.clone();
+        Box::pin(async move {
+            let user_id = catalog.user_id().await?;
+            let body = catalog
+                .get(
+                    &format!("/users/{user_id}/playlists"),
+                    items_query(offset, limit),
+                )
+                .await?;
+            parse_my_playlists(&body, &user_id)
+        })
+    }
 }
 
 // --- Reading TIDAL's answers -------------------------------------------------------------------
 
 /// An id that TIDAL writes as a number in some places and as text in others.
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(untagged)]
 enum RawId {
     Number(u64),
@@ -403,6 +471,8 @@ struct RawAlbum {
 
 #[derive(Deserialize)]
 struct RawCreator {
+    #[serde(default)]
+    id: Option<RawId>,
     #[serde(default)]
     name: Option<String>,
 }
@@ -722,6 +792,66 @@ fn parse_track_items(body: &str) -> Result<Page<Track>, CatalogError> {
         out.total = total;
     }
     Ok(out)
+}
+
+/// A page of favorited items: each entry is `{"created": "<when>", "item": {...}}`; the date is
+/// not kept, only the item itself.
+fn parse_favorited_items<Raw: DeserializeOwned, T: From<Raw>>(
+    body: &str,
+) -> Result<Page<T>, CatalogError> {
+    let mut page: RawPage = serde_json::from_str(body).map_err(unreadable)?;
+    page.items = page
+        .items
+        .into_iter()
+        .map(|entry| match entry {
+            Value::Object(mut fields) if fields.contains_key("item") => {
+                fields.remove("item").unwrap_or(Value::Null)
+            }
+            other => other,
+        })
+        .collect();
+    Ok(read_items::<Raw, T>(page))
+}
+
+/// A page of the user's own playlists, told apart from ones they only follow by comparing each
+/// entry's creator id to theirs.
+fn parse_my_playlists(body: &str, user_id: &str) -> Result<Page<Playlist>, CatalogError> {
+    let page: RawPage = serde_json::from_str(body).map_err(unreadable)?;
+    let offset = page.offset.unwrap_or(0);
+    let mut skipped = 0;
+    let items: Vec<Playlist> = page
+        .items
+        .into_iter()
+        .filter_map(|value| match serde_json::from_value::<RawPlaylist>(value) {
+            Ok(raw) => Some(raw),
+            Err(_) => {
+                skipped += 1;
+                None
+            }
+        })
+        .filter(|raw| owned_by(raw, user_id))
+        .map(Playlist::from)
+        .collect();
+    if skipped > 0 {
+        crate::warn!(
+            "Warning: {skipped} item(s) of a TIDAL answer could not be read and were left out."
+        );
+    }
+    Ok(Page {
+        total: items.len() as u64,
+        offset,
+        items,
+    })
+}
+
+/// Whether a playlist's creator is `user_id` — a playlist with no creator, or one that is TIDAL's
+/// own or someone else's, is one the user only follows, not one of theirs.
+fn owned_by(playlist: &RawPlaylist, user_id: &str) -> bool {
+    playlist
+        .creator
+        .as_ref()
+        .and_then(|creator| creator.id.clone())
+        .is_some_and(|id| id.text() == user_id)
 }
 
 #[cfg(test)]
@@ -1119,6 +1249,71 @@ mod tests {
     }
 
     #[test]
+    fn a_favorites_listing_unwraps_each_items_item_and_ignores_when_it_was_favorited() {
+        let page = parse_favorited_items::<RawTrack, Track>(
+            r#"{"limit":50,"offset":0,"totalNumberOfItems":2,"items":[
+                {"created":"2024-01-01T00:00:00.000+0000","item":{"id":1,"title":"One"}},
+                {"created":"2024-01-02T00:00:00.000+0000","item":{"id":2,"title":"Two"}}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|t| t.title.as_str())
+                .collect::<Vec<_>>(),
+            ["One", "Two"]
+        );
+
+        let albums = parse_favorited_items::<RawAlbum, Album>(
+            r#"{"items":[{"created":"2024-01-01T00:00:00.000+0000",
+                "item":{"id":9,"title":"Nine"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(albums.items[0].title, "Nine");
+    }
+
+    #[test]
+    fn favorites_are_asked_for_newest_first() {
+        let query = favorites_query(0, 50);
+        assert!(query.contains(&("order", "DATE".to_string())));
+        assert!(query.contains(&("orderDirection", "DESC".to_string())));
+    }
+
+    #[test]
+    fn only_playlists_this_user_created_are_kept_not_ones_they_follow() {
+        let page = parse_my_playlists(
+            r#"{"items":[
+                {"uuid":"mine","title":"Mine","creator":{"id":42,"name":"Me"}},
+                {"uuid":"followed","title":"Someone else's","creator":{"id":7,"name":"Them"}},
+                {"uuid":"tidal","title":"TIDAL's own","creator":{"id":0,"name":"TIDAL"}},
+                {"uuid":"no-creator","title":"No creator field"}
+            ]}"#,
+            "42",
+        )
+        .unwrap();
+        assert_eq!(
+            page.items.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["mine"]
+        );
+        assert_eq!(
+            page.total, 1,
+            "total reflects what was kept, not TIDAL's raw count"
+        );
+    }
+
+    #[test]
+    fn a_creator_id_written_as_text_still_matches() {
+        let page = parse_my_playlists(
+            r#"{"items":[{"uuid":"mine","title":"Mine","creator":{"id":"42","name":"Me"}}]}"#,
+            "42",
+        )
+        .unwrap();
+        assert_eq!(page.items.len(), 1);
+    }
+
+    #[test]
     fn ids_that_could_change_a_path_are_refused() {
         for good in ["33723912", "a1b2c3d4-0000-1111-2222-333344445555"] {
             assert!(check_id(good).is_ok(), "{good}");
@@ -1387,6 +1582,53 @@ mod tests {
         assert_eq!(
             catalog.artist("1".into()).await.map(|_| ()).unwrap_err(),
             CatalogError::NotFound
+        );
+    }
+
+    /// The favorites and playlists calls against the real TIDAL and this login. Confirmed on
+    /// this account (2026-09-30): favorite albums came back real and unfiltered (2 of 2); this
+    /// account has no favorite tracks and no playlists of its own, and `/users/{id}/playlists`
+    /// answers those with `{"limit":50,"offset":0,"totalNumberOfItems":0,"items":[]}` — a real
+    /// paged answer, unlike `tidlers`' `UserPlaylistsResponse`, which only models `items` and
+    /// would have hidden that. Still unconfirmed on this account, for lack of a playlist to
+    /// follow: whether the endpoint would include a *followed* playlist too (the creator-id
+    /// filter in `parse_my_playlists` guards against that either way) and whether
+    /// `order=DATE&orderDirection=DESC` changes anything for playlists this small. Run with
+    /// `--ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "needs a TIDAL login and network"]
+    async fn a_real_library() {
+        use crate::auth::{Interaction, open_store};
+        use crate::config::SessionStoreKind;
+        use crate::openers::TidalOpener;
+
+        let store = open_store(SessionStoreKind::default(), Interaction::Allow).unwrap();
+        let opener =
+            TidalOpener::from_store(tidal::build_http_client().unwrap(), store, Quality::Hires);
+        let catalog = opener.catalog();
+
+        let tracks = catalog.favorite_tracks(0, 10).await.unwrap();
+        println!(
+            "favorite tracks: {} of {}: {:?}",
+            tracks.items.len(),
+            tracks.total,
+            tracks.items.iter().map(|t| &t.title).collect::<Vec<_>>()
+        );
+
+        let albums = catalog.favorite_albums(0, 10).await.unwrap();
+        println!(
+            "favorite albums: {} of {}: {:?}",
+            albums.items.len(),
+            albums.total,
+            albums.items.iter().map(|a| &a.title).collect::<Vec<_>>()
+        );
+
+        let playlists = catalog.my_playlists(0, 50).await.unwrap();
+        println!(
+            "my playlists: {} of {}: {:?}",
+            playlists.items.len(),
+            playlists.total,
+            playlists.items.iter().map(|p| &p.title).collect::<Vec<_>>()
         );
     }
 }

@@ -188,6 +188,16 @@ pub(crate) fn credentials(client: &TidalClient) -> Result<(String, String)> {
     Ok((access_token, country_code))
 }
 
+/// The id of the logged-in user, for the endpoints that are theirs specifically (favorites, their
+/// own playlists).
+pub(crate) fn user_id(client: &TidalClient) -> Result<String> {
+    client
+        .user_info
+        .as_ref()
+        .map(|u| u.user_id.to_string())
+        .ok_or_else(|| anyhow!("no user info loaded; run `phonia login` first"))
+}
+
 /// Fetches and decodes the `playbackinfopostpaywall` response for `track_id`, asking for `best`
 /// and, if TIDAL refuses that tier, for each lower one down to `min`.
 ///
