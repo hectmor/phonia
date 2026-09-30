@@ -82,16 +82,15 @@ to be scoped with Opus when their turn comes.
 ## Right now
 
 This file, `docs/DECISIONS.md`, and the README's "Working process" section
-are being written (2026-09-28), so the project can be picked up — by a
-person, on another machine, or by another model asked to audit it — from the
-repository alone. #21 (library: favorites and playlists) is planned: Opus
-produced a plan (favorites and playlists fetched with raw HTTP, like search
-and the album/artist views, since `tidlers`' own favorites calls have a
+landed 2026-09-29 (PR #94), so the project can be picked up — by a person, on
+another machine, or by another model asked to audit it — from the repository
+alone. #21 (library: favorites and playlists) is next: Opus produced a plan
+(favorites and playlists fetched with raw HTTP, like search and the
+album/artist views, since `tidlers`' own favorites calls have a
 parameter-name typo that breaks paging; the protocol stays additive under
 1.6; the TUI's Library section reuses the same view/stack machinery as the
 album and artist views from #20) with five open decisions, presented to the
-person and not yet approved. It is the next task once this documentation
-lands.
+person and not yet approved.
 
 ## After #21
 
