@@ -196,3 +196,32 @@ own playlists right now, and `/users/{id}/playlists` was confirmed to answer
 a genuine paged `{"totalNumberOfItems":0,...}` — a real field `tidlers`'s
 own `UserPlaylistsResponse` model doesn't capture at all, so this would have
 gone unnoticed without checking the raw response directly. (#95, #96)
+
+## 2026-09-30 — The library's TUI section gets its own stack, not a shared one
+
+Opening a favorite album or a playlist needed the exact same "push a view,
+ask for its tracks" machinery the album and artist views from #20 already
+have (`browse::Stack`, `browse::View`), and it was already written as a
+reusable, section-agnostic type — nothing about it named search. So rather
+than have the library reuse `search_views` (which would tangle two unrelated
+things: closing an album opened from a search result would have also had to
+know not to disturb one opened from the library, and vice versa), the TUI
+state gets a second, independent `library_views: Stack`, and every place
+that used to hardcode `state.search_views` now asks a small helper for
+"whichever stack the current section owns," `search_views` or
+`library_views`. A response to a request still finds its view by checking
+both stacks by serial, regardless of which section the person has since
+moved to, the same principle the serial/generation staleness scheme
+elsewhere already follows.
+
+Building this also surfaced a real, pre-existing bug, unrelated to the
+library itself: moving the cursor inside an already-opened album, playlist
+or artist page (with `j`/`k`/`gg`/`G`, away from the point where the next
+page gets fetched) never told the render loop to repaint, because the
+before/after check `apply()` uses to decide whether to redraw did not look
+at the cursor of whatever was open on top of the stack — only at which view
+was open, not where in it. The same check now also compares that cursor
+(wrapped in a small `Snapshot` struct in place of the ad hoc tuple it grew
+out of), fixed for the library and for search alike; a regression test
+against the search-side case (opening an album, moving within it) is what
+caught it, since it is the code path both sections now share. (#98)

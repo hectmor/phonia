@@ -49,7 +49,7 @@ desktop keyring, and TOML configuration.
 | #23 | Playback bar: progress, format/quality, volume, shuffle/repeat | Closed |
 | #19 | Search (tracks, albums, artists, playlists) | Code complete (PRs #82–#87 merged); **issue left open on GitHub, worth closing by hand** |
 | #20 | Album and artist views, opened from a search result | Closed |
-| #21 | Library: favorite tracks/albums and the user's playlists | In progress: core catalog (PR #95) and IPC/daemon (PR #96) merged; `ctl library`/`ctl playlists` and the TUI still to come |
+| #21 | Library: favorite tracks/albums and the user's playlists | Code complete (PRs #95–#98) |
 | #24 | Covers in the terminal (`ratatui-image`) | Not started; last of the phase by design (heavier dependency) |
 
 The catalog (search, an album, an artist, and now the library) is served by
@@ -81,19 +81,25 @@ to be scoped with Opus when their turn comes.
 
 ## Right now
 
-Implementing #21 (library: favorites and playlists), approved 2026-09-30, as
-a 4-PR split: core catalog methods (PR #95, merged), IPC/daemon (PR #96,
-merged), `ctl library`/`ctl playlists` (next), then the TUI. Favorites and
-playlists are fetched with raw HTTP, like search and the album/artist views,
-since `tidlers`' own favorites calls have a parameter-name typo that breaks
-paging; the protocol stays additive under 1.6 (`CatalogRef::FavoriteTracks`,
-`AlbumListRef::FavoriteAlbums`, a new `PlaylistListRef`, `Request::Library`
-and `Request::Playlists`); the TUI's Library section will reuse the same
-view/stack machinery as the album and artist views from #20. Verified
-against the real TIDAL API: favorite albums came back correctly; this
-account has no favorite tracks or own playlists right now, and
-`/users/{id}/playlists` was confirmed to answer with a real, paged
-`totalNumberOfItems` that `tidlers`' own model doesn't even capture.
+#21 (library: favorites and playlists) is code complete, its 4 pull requests
+all merged: core catalog methods (#95), IPC/daemon (#96), `phonia ctl
+library` (#97), and the TUI's own Library section (#98), which reuses the
+same view/stack machinery the album and artist views from #20 already have —
+opening a favorite album or a playlist from it works exactly like opening
+one from a search result. The one deliberate difference: `Enter` on a
+favorite track plays just that track rather than queuing the rest of the
+list from there, since a favorites list has no natural order and can run
+into the thousands. This closes out everything in Phase 2 except #24
+(covers), which was always meant to be last. Favorites and playlists are
+fetched with raw HTTP, like search and the album/artist views, since
+`tidlers`' own favorites calls have a parameter-name typo that breaks
+paging; the protocol stayed additive under 1.6 throughout (no version bump
+for the whole of #19-#21). Verified against the real TIDAL API, live against
+a real daemon with `ctl library`, and by driving the real TUI over a pty
+against that daemon: favorite albums came back correctly; this account has
+no favorite tracks or own playlists right now, and `/users/{id}/playlists`
+was confirmed to answer with a real, paged `totalNumberOfItems` that
+`tidlers`' own model doesn't even capture.
 
 ## After #21
 

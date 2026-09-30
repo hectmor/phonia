@@ -2,7 +2,7 @@
 
 use super::first_visible;
 use crate::app::{Focus, State};
-use crate::browse::{ArtistTab, ArtistView, Header, Phase, TrackListView, View};
+use crate::browse::{ArtistTab, ArtistView, Header, Phase, Stack, TrackListView, View};
 use crate::theme::Theme;
 use phonia_ipc::{AlbumSummary, TrackSummary, fmt};
 use ratatui::Frame;
@@ -10,8 +10,9 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-pub fn draw(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
-    match state.search_views.top() {
+/// The view on top of `stack` (the one opened from a search result, or from the library).
+pub fn draw(state: &State, stack: &Stack, theme: &Theme, frame: &mut Frame, area: Rect) {
+    match stack.top() {
         Some(View::TrackList(view)) => draw_track_list(state, view, theme, frame, area),
         Some(View::Artist(view)) => draw_artist(state, view, theme, frame, area),
         None => {}

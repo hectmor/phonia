@@ -2,6 +2,7 @@
 
 mod browse;
 mod help;
+mod library;
 mod search;
 
 /// How far the help can scroll on a screen `rows` tall.
@@ -98,7 +99,24 @@ fn draw_main(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
         if state.search_views.is_empty() {
             search::draw(state, theme, frame, inner);
         } else {
-            browse::draw(state, theme, frame, inner);
+            browse::draw(state, &state.search_views, theme, frame, inner);
+        }
+        return;
+    }
+    // The library, likewise, may have an album or a playlist opened from it.
+    if state.section() == Section::Library {
+        let crumbs = state.library_views.titles();
+        let title = std::iter::once(Section::Library.title())
+            .chain(crumbs)
+            .collect::<Vec<_>>()
+            .join(" \u{203a} ");
+        let block = panel(&title, focused, theme);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if state.library_views.is_empty() {
+            library::draw(state, theme, frame, inner);
+        } else {
+            browse::draw(state, &state.library_views, theme, frame, inner);
         }
         return;
     }
@@ -972,6 +990,145 @@ mod tests {
         press(&mut state, ']');
         let text = screen(&state, 120, 14);
         assert!(text.contains("No artists for \"korn\"."), "{text}");
+    }
+
+    fn in_the_library() -> State {
+        let mut state = State::default();
+        update(
+            &mut state,
+            Msg::Connected {
+                server: phonia_ipc::ServerInfo {
+                    name: "phoniad".into(),
+                    version: "0.1.0".into(),
+                    pid: 1,
+                },
+                protocol: phonia_ipc::Version { major: 1, minor: 6 },
+                capabilities: vec!["catalog".into()],
+                status: crate::app::tests_support::status(),
+                queue: crate::app::tests_support::queue(),
+            },
+        );
+        press(&mut state, '3');
+        state
+    }
+
+    /// The library loaded: one favorite track, one favorite album, one playlist.
+    fn with_library() -> State {
+        use crate::app::Tag;
+        let mut state = in_the_library();
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::Library { generation: 0 },
+                result: Ok(phonia_ipc::Payload::Library {
+                    favorite_tracks: phonia_ipc::Page {
+                        items: vec![phonia_ipc::TrackSummary {
+                            id: "1".into(),
+                            title: "Freak On a Leash".into(),
+                            version: None,
+                            artists: vec![phonia_ipc::ArtistRef {
+                                id: "780".into(),
+                                name: "Korn".into(),
+                            }],
+                            album: None,
+                            duration_ms: Some(212_000),
+                            explicit: false,
+                            track_number: None,
+                            volume_number: None,
+                            quality: Some(phonia_ipc::Quality::Hires),
+                            streamable: true,
+                        }],
+                        total: 42,
+                        offset: 0,
+                    },
+                    favorite_albums: phonia_ipc::Page {
+                        items: vec![phonia_ipc::AlbumSummary {
+                            id: "9".into(),
+                            title: "Issues".into(),
+                            version: None,
+                            artists: vec![],
+                            release_date: Some("1999-11-16".into()),
+                            track_count: Some(16),
+                            duration_ms: None,
+                            explicit: false,
+                            quality: None,
+                            kind: None,
+                            copyright: None,
+                        }],
+                        total: 1,
+                        offset: 0,
+                    },
+                    my_playlists: phonia_ipc::Page {
+                        items: vec![phonia_ipc::PlaylistSummary {
+                            id: "p-1".into(),
+                            title: "Road trip".into(),
+                            creator: None,
+                            description: None,
+                            track_count: Some(10),
+                            duration_ms: None,
+                        }],
+                        total: 1,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn before_the_library_loads_it_says_so() {
+        let text = screen(&in_the_library(), 80, 14);
+        assert!(text.contains("Loading..."), "{text}");
+        assert!(
+            text.contains("Favorite tracks") && text.contains("Your playlists"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_library_without_a_catalog_says_why_instead_of_loading_forever() {
+        let mut state = State::default();
+        update(
+            &mut state,
+            Msg::Connected {
+                server: phonia_ipc::ServerInfo {
+                    name: "phoniad".into(),
+                    version: "0.1.0".into(),
+                    pid: 1,
+                },
+                protocol: phonia_ipc::Version { major: 1, minor: 6 },
+                capabilities: vec![],
+                status: crate::app::tests_support::status(),
+                queue: crate::app::tests_support::queue(),
+            },
+        );
+        press(&mut state, '3');
+        let text = screen(&state, 80, 14);
+        assert!(text.contains("no TIDAL login"), "{text}");
+    }
+
+    #[test]
+    fn the_librarys_lists_are_shown_with_counts_in_the_tabs() {
+        let state = with_library();
+        let text = screen(&state, 120, 14);
+        assert!(text.contains("Favorite tracks (42)"), "{text}");
+        assert!(text.contains("Favorite albums (1)"), "{text}");
+        assert!(text.contains("Your playlists (1)"), "{text}");
+        assert!(text.contains("1. Korn - Freak On a Leash"), "{text}");
+    }
+
+    #[test]
+    fn opening_an_album_from_the_library_shows_its_tracks() {
+        use crate::app::Tag;
+        let mut state = with_library();
+        press(&mut state, 'l');
+        press(&mut state, ']'); // favorite albums
+        let (tag, _) = tagged_request(press_key(&mut state, KeyCode::Enter));
+        assert!(matches!(tag, Tag::View { .. }));
+        let text = screen(&state, 100, 14);
+        assert!(text.contains("Library \u{203a} Issues"), "{text}");
+        assert!(text.contains("Loading..."), "{text}");
     }
 
     #[test]

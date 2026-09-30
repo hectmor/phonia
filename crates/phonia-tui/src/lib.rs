@@ -11,6 +11,7 @@ pub mod conn;
 pub mod cursor;
 pub mod input;
 pub mod keymap;
+pub mod library;
 pub mod list;
 pub mod search;
 pub mod theme;

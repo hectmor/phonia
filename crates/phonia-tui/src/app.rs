@@ -3,6 +3,7 @@
 use crate::browse::{self as browse, Header, Stack};
 use crate::cursor::Cursor;
 use crate::keymap::{self, Action, Key, Resolution};
+use crate::library::{self, LibraryState, LibraryTab};
 use crate::search::{Phase, SearchState, Selected, Tab};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use phonia_ipc::{
@@ -104,6 +105,11 @@ pub struct State {
     pub search: SearchState,
     /// The album and playlist views opened from a search result.
     pub search_views: Stack,
+    /// The library: favorite tracks, favorite albums, the user's own playlists. `None` until its
+    /// section has been shown once and the daemon has been asked for it.
+    pub library: Option<LibraryState>,
+    /// The album and playlist views opened from the library.
+    pub library_views: Stack,
     /// The number the next view opened is pushed with.
     pub next_serial: u64,
 }
@@ -200,6 +206,10 @@ pub enum Tag {
     AddFrom { play_at: Option<usize> },
     /// The view pushed with this number: its tracks, or the next page of them.
     View { serial: u64 },
+    /// The request that loads the library.
+    Library { generation: u64 },
+    /// The next page of one of the library's three lists.
+    LibraryMore { tab: LibraryTab, generation: u64 },
 }
 
 /// What [`update`] decided.
@@ -226,8 +236,22 @@ impl Effects {
     }
 }
 
-/// Applies one message to the state.
+/// Applies one message to the state, then, unlike a search, the library has no key that starts
+/// loading it: it is asked for the moment its section is first shown, whatever brought the state
+/// there (a key, or the connection completing while it was already the section shown).
 pub fn update(state: &mut State, msg: Msg) -> Effects {
+    let mut effects = update_now(state, msg);
+    if let Some(request) = maybe_load_library(state) {
+        effects.redraw = true;
+        effects.commands.push(Cmd::Request {
+            tag: Tag::Library { generation: 0 },
+            request,
+        });
+    }
+    effects
+}
+
+fn update_now(state: &mut State, msg: Msg) -> Effects {
     match msg {
         Msg::Key(event) => on_key(state, event),
         Msg::Resize(columns, rows) => {
@@ -257,6 +281,10 @@ pub fn update(state: &mut State, msg: Msg) -> Effects {
             state.connection = Connection::Disconnected { reason, retry_in };
             state.search.connection_lost();
             state.search_views.connection_lost();
+            if let Some(library) = &mut state.library {
+                library.connection_lost();
+            }
+            state.library_views.connection_lost();
             Effects::redraw()
         }
         Msg::Refused { reason } => {
@@ -270,6 +298,22 @@ pub fn update(state: &mut State, msg: Msg) -> Effects {
         }
         Msg::Response { tag, result } => on_response(state, tag, result),
     }
+}
+
+/// The request that loads the library, the moment its section is first shown: refused, silently,
+/// until there is a connection with the catalog to ask (so it is tried again the moment there is
+/// one). Once asked, a failure is left as is, the same as a search that is not retried by itself.
+fn maybe_load_library(state: &mut State) -> Option<Request> {
+    if state.section() != Section::Library
+        || state.library.is_some()
+        || state.connection != Connection::Connected
+        || !state.has(phonia_ipc::CAP_CATALOG)
+    {
+        return None;
+    }
+    let (library, request) = LibraryState::new();
+    state.library = Some(library);
+    Some(request)
 }
 
 /// Starts a search for `query`, if there is a daemon that can do it; if there is not, says why
@@ -335,6 +379,38 @@ fn on_response(state: &mut State, tag: Tag, result: Result<Payload, String>) -> 
         Tag::Add { play } => on_added(state, result, play.then_some(0)),
         Tag::AddFrom { play_at } => on_added(state, result, play_at),
         Tag::View { serial } => on_view_response(state, serial, result),
+        Tag::Library { generation } => {
+            let Some(library) = &mut state.library else {
+                return Effects::default();
+            };
+            if generation != library.generation {
+                return Effects::default();
+            }
+            match result {
+                Ok(payload) => {
+                    library.finish(payload);
+                }
+                Err(reason) => library.fail(reason),
+            }
+            Effects::redraw()
+        }
+        Tag::LibraryMore { tab, generation } => {
+            let Some(library) = &mut state.library else {
+                return Effects::default();
+            };
+            if generation != library.generation {
+                return Effects::default();
+            }
+            match result {
+                Ok(payload) => library.add_page(tab, payload),
+                Err(reason) => {
+                    library.page_failed(tab);
+                    state.last_error =
+                        Some(format!("could not load more of the library: {reason}"));
+                }
+            }
+            Effects::redraw()
+        }
     }
 }
 
@@ -374,8 +450,19 @@ fn clear_pending(artist: &mut browse::ArtistView) {
     artist.singles.loading = false;
 }
 
+/// The view pushed with `serial`, wherever it is: the one opened from a search result, or the one
+/// opened from the library — whichever stack actually has it, regardless of which section the user
+/// has since moved to.
+fn find_view(state: &mut State, serial: u64) -> Option<&mut browse::View> {
+    if let Some(view) = state.search_views.find_mut(serial) {
+        Some(view)
+    } else {
+        state.library_views.find_mut(serial)
+    }
+}
+
 fn on_view_response(state: &mut State, serial: u64, result: Result<Payload, String>) -> Effects {
-    match state.search_views.find_mut(serial) {
+    match find_view(state, serial) {
         Some(browse::View::TrackList(view)) => {
             let opening = view.phase == browse::Phase::Loading;
             match result {
@@ -719,16 +806,67 @@ fn scroll_help(state: &mut State, action: Action) -> Effects {
     }
 }
 
+/// What might have changed visibly, taken before and after handling an action that does not
+/// already know on its own whether to redraw: cursor positions (the sidebar, the queue, a search's
+/// or the library's own lists, and whatever is open on top of either one's stack), which tab and
+/// which view is showing, and the two toggles (the focus, the help).
+#[derive(PartialEq)]
+struct Snapshot {
+    focus: Focus,
+    help: bool,
+    sidebar: Cursor,
+    queue_cursor: Cursor,
+    search_tab: Tab,
+    search_cursors: [Cursor; 4],
+    search_view: Option<u64>,
+    library_tab: Option<LibraryTab>,
+    library_cursors: Option<[Cursor; 3]>,
+    library_view: Option<u64>,
+    /// The cursor of whatever is open on top of the current section's stack, since moving within
+    /// an opened album, playlist or artist page does not otherwise touch anything above.
+    browsing_cursor: Option<Cursor>,
+}
+
+fn snapshot(state: &mut State) -> Snapshot {
+    Snapshot {
+        focus: state.focus,
+        help: state.help,
+        sidebar: state.sidebar,
+        queue_cursor: state.queue_cursor,
+        search_tab: state.search.tab,
+        search_cursors: state.search.list_cursors(),
+        search_view: state.search_views.top_serial(),
+        library_tab: state.library.as_ref().map(|library| library.tab),
+        library_cursors: state.library.as_ref().map(LibraryState::list_cursors),
+        library_view: state.library_views.top_serial(),
+        browsing_cursor: browsing_cursor(state),
+    }
+}
+
+/// The stack of views the section that has one (search or the library) is showing now, if the
+/// current section is one of those.
+fn active_stack_mut(state: &mut State) -> Option<&mut Stack> {
+    match state.section() {
+        Section::Search => Some(&mut state.search_views),
+        Section::Library => Some(&mut state.library_views),
+        _ => None,
+    }
+}
+
+/// The cursor of whatever is open on top of the current section's stack: an album's or a
+/// playlist's tracks, or one of an artist's three lists.
+fn browsing_cursor(state: &mut State) -> Option<Cursor> {
+    match active_stack_mut(state)?.top_mut()? {
+        browse::View::TrackList(view) => Some(view.tracks.cursor),
+        browse::View::Artist(artist) => Some(match artist.tracks_or_albums() {
+            browse::ListRef::Tracks(found) => found.cursor,
+            browse::ListRef::Albums(found) => found.cursor,
+        }),
+    }
+}
+
 fn apply(state: &mut State, action: Action) -> Effects {
-    let before = (
-        state.focus,
-        state.help,
-        state.sidebar,
-        state.queue_cursor,
-        state.search.tab,
-        state.search.list_cursors(),
-        state.search_views.top_serial(),
-    );
+    let before = snapshot(state);
     match action {
         Action::Quit => return Effects::command(Cmd::Quit),
         Action::Reconnect => return reconnect(state),
@@ -793,6 +931,12 @@ fn apply(state: &mut State, action: Action) -> Effects {
                 }
                 state.search.editing = true;
                 return Effects::redraw();
+            } else if state.section() == Section::Library {
+                return if state.library_views.is_empty() {
+                    act_on_library_result(state, action)
+                } else {
+                    act_in_view(state, action)
+                };
             } else {
                 return edit_queue(state, action);
             }
@@ -801,10 +945,14 @@ fn apply(state: &mut State, action: Action) -> Effects {
             return edit_queue(state, action);
         }
         Action::AddToQueue | Action::AddNext => {
-            return if state.search_views.is_empty() {
-                act_on_result(state, action)
-            } else {
-                act_in_view(state, action)
+            return match state.section() {
+                Section::Search if state.search_views.is_empty() => act_on_result(state, action),
+                Section::Search => act_in_view(state, action),
+                Section::Library if state.library_views.is_empty() => {
+                    act_on_library_result(state, action)
+                }
+                Section::Library => act_in_view(state, action),
+                Section::Queue => Effects::default(),
             };
         }
         Action::StartSearch => {
@@ -820,10 +968,11 @@ fn apply(state: &mut State, action: Action) -> Effects {
             return Effects::redraw();
         }
         Action::TabNext | Action::TabPrevious => {
-            if state.section() != Section::Search {
-                return Effects::default();
-            }
-            if let Some(browse::View::Artist(artist)) = state.search_views.top_mut() {
+            // An artist page (only ever opened from a search result, never from the library) has
+            // three lists to switch between; anything else open (an album, a playlist) has one.
+            if let Some(browse::View::Artist(artist)) =
+                active_stack_mut(state).and_then(Stack::top_mut)
+            {
                 let tab = artist.tab;
                 artist.tab = if action == Action::TabNext {
                     tab.next()
@@ -836,33 +985,42 @@ fn apply(state: &mut State, action: Action) -> Effects {
                     Effects::redraw()
                 };
             }
-            // A track list (an album or a playlist) has one list: nothing to switch.
-            if !state.search_views.is_empty() {
-                return Effects::default();
+            match state.section() {
+                Section::Search if state.search_views.is_empty() => {
+                    let tab = state.search.tab;
+                    state.search.tab = if action == Action::TabNext {
+                        tab.next()
+                    } else {
+                        tab.previous()
+                    };
+                    return if state.search.tab == tab {
+                        Effects::default()
+                    } else {
+                        Effects::redraw()
+                    };
+                }
+                Section::Library if state.library_views.is_empty() => {
+                    let Some(library) = &mut state.library else {
+                        return Effects::default();
+                    };
+                    let tab = library.tab;
+                    library.tab = if action == Action::TabNext {
+                        tab.next()
+                    } else {
+                        tab.previous()
+                    };
+                    return if library.tab == tab {
+                        Effects::default()
+                    } else {
+                        Effects::redraw()
+                    };
+                }
+                // A track list (an album or a playlist) has one list: nothing to switch.
+                _ => return Effects::default(),
             }
-            let tab = state.search.tab;
-            state.search.tab = if action == Action::TabNext {
-                tab.next()
-            } else {
-                tab.previous()
-            };
-            return if state.search.tab == tab {
-                Effects::default()
-            } else {
-                Effects::redraw()
-            };
         }
     }
-    if (
-        state.focus,
-        state.help,
-        state.sidebar,
-        state.queue_cursor,
-        state.search.tab,
-        state.search.list_cursors(),
-        state.search_views.top_serial(),
-    ) == before
-    {
+    if snapshot(state) == before {
         Effects::default()
     } else {
         Effects::redraw()
@@ -954,14 +1112,18 @@ fn reconnect(state: &mut State) -> Effects {
     }
 }
 
-/// Asks for the next page of the list of results being looked at, when the cursor has come near
-/// the end of what is loaded and there is more.
+/// Asks for the next page of the list being looked at (a search's or the library's own, or
+/// whatever is open on top of either one's stack), when the cursor has come near the end of what
+/// is loaded and there is more.
 fn load_more_results(state: &mut State) -> Vec<Cmd> {
-    if state.focus != Focus::Main || state.section() != Section::Search || state.search.editing {
+    if state.focus != Focus::Main || state.search.editing {
         return Vec::new();
     }
-    if let Some(serial) = state.search_views.top_serial() {
-        let Some(view) = state.search_views.top_mut() else {
+    if !matches!(state.section(), Section::Search | Section::Library) {
+        return Vec::new();
+    }
+    if let Some(serial) = active_stack_mut(state).and_then(|stack| stack.top_serial()) {
+        let Some(view) = active_stack_mut(state).and_then(Stack::top_mut) else {
             return Vec::new();
         };
         let request = match view {
@@ -1006,16 +1168,35 @@ fn load_more_results(state: &mut State) -> Vec<Cmd> {
             None => Vec::new(),
         };
     }
-    let tab = state.search.tab;
-    match state.search.next_page(tab) {
-        Some(request) => vec![Cmd::Request {
-            tag: Tag::SearchMore {
-                tab,
-                generation: state.search.generation,
-            },
-            request,
-        }],
-        None => Vec::new(),
+    match state.section() {
+        Section::Search => {
+            let tab = state.search.tab;
+            match state.search.next_page(tab) {
+                Some(request) => vec![Cmd::Request {
+                    tag: Tag::SearchMore {
+                        tab,
+                        generation: state.search.generation,
+                    },
+                    request,
+                }],
+                None => Vec::new(),
+            }
+        }
+        Section::Library => {
+            let Some(library) = &mut state.library else {
+                return Vec::new();
+            };
+            let tab = library.tab;
+            let generation = library.generation;
+            match library.next_page(tab) {
+                Some(request) => vec![Cmd::Request {
+                    tag: Tag::LibraryMore { tab, generation },
+                    request,
+                }],
+                None => Vec::new(),
+            }
+        }
+        Section::Queue => Vec::new(),
     }
 }
 
@@ -1109,6 +1290,91 @@ fn act_on_result(state: &mut State, action: Action) -> Effects {
     send_add(state, request, play)
 }
 
+/// Enter, `a` and `A` on the row under the cursor of the library's own lists (not one already
+/// opened from it): a favorite album or a playlist opens with Enter, the same as from a search
+/// result. A favorite track is different from a track in an opened album: Enter plays just that
+/// one track, not the whole list from there on — a favorites list has no natural queue order and
+/// can run into the thousands, so queuing it whole from here would be an easy way to end up with
+/// an enormous, unwanted queue. `a`/`A` always act on the one row: add it (a track), or add it
+/// whole (an album or a playlist).
+fn act_on_library_result(state: &mut State, action: Action) -> Effects {
+    if state.section() != Section::Library || state.focus != Focus::Main {
+        return Effects::default();
+    }
+    let Some(library) = &state.library else {
+        return Effects::default();
+    };
+    if library.phase != browse::Phase::Done {
+        return Effects::default();
+    }
+    let Some(selected) = library.selected() else {
+        return Effects::default();
+    };
+    if action == Action::Activate {
+        match selected {
+            library::Selected::Album(album) => {
+                let album = album.clone();
+                return open_track_list(
+                    state,
+                    phonia_ipc::CatalogRef::Album {
+                        id: album.id.clone(),
+                    },
+                    Header::Album(album),
+                );
+            }
+            library::Selected::Playlist(playlist) => {
+                let playlist = playlist.clone();
+                return open_track_list(
+                    state,
+                    phonia_ipc::CatalogRef::Playlist {
+                        id: playlist.id.clone(),
+                    },
+                    Header::Playlist(playlist),
+                );
+            }
+            library::Selected::Track(_) => {}
+        }
+    }
+    let play = action == Action::Activate;
+    let at = if action == Action::AddToQueue {
+        phonia_ipc::AddAt::End
+    } else {
+        phonia_ipc::AddAt::Next
+    };
+    let request = match selected {
+        // Enter here plays just this one track: see the doc comment above for why.
+        library::Selected::Track(track) => {
+            if !track.streamable {
+                state.last_error = Some(format!("{} is not available where you are", track.title));
+                return Effects::redraw();
+            }
+            match phonia_ipc::source::tidal(&track.id) {
+                Ok(source) => Request::QueueAdd {
+                    tracks: vec![phonia_ipc::NewTrack { source }],
+                    at,
+                },
+                Err(reason) => {
+                    state.last_error = Some(reason);
+                    return Effects::redraw();
+                }
+            }
+        }
+        library::Selected::Album(album) => Request::QueueAddFrom {
+            from: phonia_ipc::CatalogRef::Album {
+                id: album.id.clone(),
+            },
+            at,
+        },
+        library::Selected::Playlist(playlist) => Request::QueueAddFrom {
+            from: phonia_ipc::CatalogRef::Playlist {
+                id: playlist.id.clone(),
+            },
+            at,
+        },
+    };
+    send_add(state, request, play)
+}
+
 /// Sends a track, an album, a playlist or an artist's tracks to the queue: connected, and with the
 /// catalog if the request needs it (adding a whole album, playlist or artist does).
 fn send_add(state: &mut State, request: Request, play: bool) -> Effects {
@@ -1136,12 +1402,13 @@ fn send_add(state: &mut State, request: Request, play: bool) -> Effects {
 fn move_cursor(state: &mut State, action: Action) {
     let page = state.half_page();
     let queue_len = queue_len(state);
-    let tab = state.search.tab;
+    let search_tab = state.search.tab;
+    let library_tab = state.library.as_ref().map(|library| library.tab);
     let browsing = state.focus == Focus::Main
-        && state.section() == Section::Search
-        && !state.search_views.is_empty();
+        && matches!(state.section(), Section::Search | Section::Library)
+        && active_stack_mut(state).is_some_and(|stack| !stack.is_empty());
     let (len, cursor) = if browsing {
-        let Some(view) = state.search_views.top_mut() else {
+        let Some(view) = active_stack_mut(state).and_then(Stack::top_mut) else {
             return;
         };
         match view {
@@ -1156,11 +1423,16 @@ fn move_cursor(state: &mut State, action: Action) {
             (Focus::Sidebar, _) => (Section::ALL.len(), &mut state.sidebar),
             (Focus::Main, Section::Queue) => (queue_len, &mut state.queue_cursor),
             (Focus::Main, Section::Search) => {
-                let (cursor, len) = state.search.list_of(tab);
+                let (cursor, len) = state.search.list_of(search_tab);
                 (len, cursor)
             }
-            // The library lists nothing yet.
-            (Focus::Main, Section::Library) => return,
+            (Focus::Main, Section::Library) => {
+                let Some(library) = &mut state.library else {
+                    return;
+                };
+                let (cursor, len) = library.list_of(library_tab.unwrap_or_default());
+                (len, cursor)
+            }
         }
     };
     match action {
@@ -1174,9 +1446,9 @@ fn move_cursor(state: &mut State, action: Action) {
     }
 }
 
-/// Closes the view on top, if the search is what has the focus and there is one to close.
+/// Closes the view on top, if the section with the focus is one with a stack and has one open.
 fn pop_view_if_browsing(state: &mut State) -> bool {
-    state.focus == Focus::Main && state.section() == Section::Search && state.search_views.pop()
+    state.focus == Focus::Main && active_stack_mut(state).is_some_and(Stack::pop)
 }
 
 /// Opens an album or a playlist: pushes it in a loading state (its header is already known from
@@ -1227,7 +1499,11 @@ fn open_track_list(state: &mut State, of: phonia_ipc::CatalogRef, header: Header
         return Effects::redraw();
     }
     let serial = next_serial(state);
-    state.search_views.push(
+    // Whichever of the two sections is asking: opened onto its own stack.
+    let Some(stack) = active_stack_mut(state) else {
+        return Effects::default();
+    };
+    stack.push(
         serial,
         browse::View::TrackList(browse::TrackListView::new(of.clone(), header)),
     );
@@ -1260,7 +1536,7 @@ enum Row {
 
 /// The row under the cursor of the view on top, if it has finished loading and has one.
 fn browsed_row(state: &mut State) -> Option<Row> {
-    match state.search_views.top_mut()? {
+    match active_stack_mut(state)?.top_mut()? {
         browse::View::TrackList(view) if view.phase == browse::Phase::Done => {
             let index = view.tracks.cursor.selected();
             view.tracks
@@ -3345,11 +3621,15 @@ mod tests {
             "no tab switch while browsing"
         );
         assert_eq!(state.search.tab, tab_before);
-        ch(&mut state, 'G');
+        let effects = ch(&mut state, 'G');
         let Some(crate::browse::View::TrackList(view)) = state.search_views.top() else {
             panic!("no view")
         };
         assert_eq!(view.tracks.cursor.selected(), 2);
+        assert!(
+            effects.redraw,
+            "moving within an opened view must repaint it, not just move its cursor unseen"
+        );
     }
 
     #[test]
@@ -3745,5 +4025,389 @@ mod tests {
             panic!("no artist view")
         };
         assert!(matches!(view.phase, browse::Phase::Failed(_)));
+    }
+
+    // --- The library ---------------------------------------------------------------------------
+
+    fn library_track(id: &str, title: &str) -> phonia_ipc::TrackSummary {
+        let mut track = track_row(0);
+        track.id = id.into();
+        track.title = title.into();
+        track
+    }
+
+    fn library_album(id: &str, title: &str) -> phonia_ipc::AlbumSummary {
+        phonia_ipc::AlbumSummary {
+            id: id.into(),
+            title: title.into(),
+            version: None,
+            artists: vec![],
+            release_date: None,
+            track_count: None,
+            duration_ms: None,
+            explicit: false,
+            quality: None,
+            kind: None,
+            copyright: None,
+        }
+    }
+
+    fn library_playlist(id: &str, title: &str) -> phonia_ipc::PlaylistSummary {
+        phonia_ipc::PlaylistSummary {
+            id: id.into(),
+            title: title.into(),
+            creator: None,
+            description: None,
+            track_count: None,
+            duration_ms: None,
+        }
+    }
+
+    /// Connected, with the catalog, having just moved to the Library section: the request that
+    /// loads it, already sent (nothing has to be typed, unlike a search).
+    fn opening_library() -> (State, Tag) {
+        let mut state = State::default();
+        update(&mut state, connected_msg(&["catalog"]));
+        let effects = ch(&mut state, '3');
+        let (tag, request) = search_request(effects);
+        assert_eq!(
+            request,
+            Request::Library {
+                limit: Some(crate::library::PAGE_SIZE)
+            }
+        );
+        (state, tag)
+    }
+
+    /// The library loaded: two favorite tracks (the second not streamable), one favorite album,
+    /// two playlists. The focus is on the list, with the daemon able to browse.
+    fn with_library() -> State {
+        let (mut state, tag) = opening_library();
+        let mut tracks = vec![
+            library_track("1", "Freak On a Leash"),
+            library_track("2", "Blind"),
+        ];
+        tracks[1].streamable = false;
+        update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Ok(Payload::Library {
+                    favorite_tracks: phonia_ipc::Page {
+                        items: tracks,
+                        total: 2,
+                        offset: 0,
+                    },
+                    favorite_albums: phonia_ipc::Page {
+                        items: vec![library_album("9", "Issues")],
+                        total: 1,
+                        offset: 0,
+                    },
+                    my_playlists: phonia_ipc::Page {
+                        items: vec![
+                            library_playlist("p-1", "Road trip"),
+                            library_playlist("p-2", "Focus"),
+                        ],
+                        total: 2,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
+        ch(&mut state, 'l');
+        state
+    }
+
+    #[test]
+    fn moving_to_the_library_asks_for_it_once_and_the_answer_fills_its_three_lists() {
+        let (mut state, tag) = opening_library();
+        assert_eq!(tag, Tag::Library { generation: 0 });
+        assert_eq!(
+            state.library.as_ref().unwrap().phase,
+            browse::Phase::Loading
+        );
+        // Selecting it again (it is already the section shown) does not ask a second time.
+        assert!(ch(&mut state, '3').commands.is_empty());
+
+        let state = with_library();
+        let library = state.library.as_ref().unwrap();
+        assert_eq!(library.phase, browse::Phase::Done);
+        assert_eq!(library.favorite_tracks.items.len(), 2);
+        assert_eq!(library.favorite_albums.items[0].title, "Issues");
+        assert_eq!(library.playlists.items.len(), 2);
+    }
+
+    #[test]
+    fn without_a_connection_or_the_catalog_the_library_is_not_asked_for() {
+        let mut state = State::default();
+        assert!(ch(&mut state, '3').commands.is_empty());
+        assert!(state.library.is_none(), "no connection yet");
+
+        let mut state = State::default();
+        update(&mut state, connected_msg(&[]));
+        assert!(ch(&mut state, '3').commands.is_empty());
+        assert!(state.library.is_none(), "no catalog on this daemon");
+
+        // The moment a connection with the catalog exists, it is asked for.
+        update(&mut state, connected_msg(&["catalog"]));
+        assert!(state.library.is_some());
+    }
+
+    #[test]
+    fn losing_the_connection_fails_the_library_if_it_was_still_loading() {
+        let (mut state, _) = opening_library();
+        disconnected(&mut state, Duration::from_secs(1));
+        assert!(matches!(
+            state.library.as_ref().unwrap().phase,
+            browse::Phase::Failed(_)
+        ));
+
+        // One already loaded is untouched.
+        let mut state = with_library();
+        disconnected(&mut state, Duration::from_secs(1));
+        assert_eq!(state.library.as_ref().unwrap().phase, browse::Phase::Done);
+    }
+
+    #[test]
+    fn the_brackets_switch_the_librarys_own_three_tabs() {
+        let mut state = with_library();
+        assert_eq!(
+            state.library.as_ref().unwrap().tab,
+            LibraryTab::FavoriteTracks
+        );
+        ch(&mut state, ']');
+        assert_eq!(
+            state.library.as_ref().unwrap().tab,
+            LibraryTab::FavoriteAlbums
+        );
+        ch(&mut state, ']');
+        assert_eq!(state.library.as_ref().unwrap().tab, LibraryTab::Playlists);
+        assert!(!ch(&mut state, ']').redraw, "already at the last tab");
+        ch(&mut state, '[');
+        assert_eq!(
+            state.library.as_ref().unwrap().tab,
+            LibraryTab::FavoriteAlbums
+        );
+    }
+
+    #[test]
+    fn moving_in_the_library_walks_the_current_tabs_list() {
+        let mut state = with_library();
+        ch(&mut state, 'j');
+        assert_eq!(
+            state
+                .library
+                .as_ref()
+                .unwrap()
+                .favorite_tracks
+                .cursor
+                .selected(),
+            1
+        );
+        ch(&mut state, ']'); // favorite albums: one row, already there
+        assert_eq!(
+            state
+                .library
+                .as_ref()
+                .unwrap()
+                .favorite_albums
+                .cursor
+                .selected(),
+            0
+        );
+    }
+
+    #[test]
+    fn enter_on_a_favorite_track_plays_just_that_track_not_the_whole_list() {
+        // The first row, "Freak On a Leash", is streamable ("Blind" is not).
+        let mut state = with_library();
+        let (tag, request) = tagged(press(&mut state, KeyCode::Enter));
+        assert_eq!(tag, Tag::Add { play: true });
+        assert_eq!(
+            request,
+            Request::QueueAdd {
+                tracks: vec![phonia_ipc::NewTrack {
+                    source: "tidal:1".into()
+                }],
+                at: phonia_ipc::AddAt::Next,
+            }
+        );
+    }
+
+    #[test]
+    fn a_and_shift_a_on_a_favorite_track_add_just_it_to_the_end_or_after_what_plays() {
+        let mut state = with_library();
+        let (_, request) = tagged(ch(&mut state, 'a'));
+        assert_eq!(
+            request,
+            Request::QueueAdd {
+                tracks: vec![phonia_ipc::NewTrack {
+                    source: "tidal:1".into()
+                }],
+                at: phonia_ipc::AddAt::End,
+            }
+        );
+        let (_, request) = tagged(ch(&mut state, 'A'));
+        assert!(matches!(
+            request,
+            Request::QueueAdd {
+                at: phonia_ipc::AddAt::Next,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_favorite_track_that_cannot_stream_is_refused_before_it_reaches_the_daemon() {
+        let mut state = with_library();
+        ch(&mut state, 'j'); // "Blind", not streamable
+        let effects = press(&mut state, KeyCode::Enter);
+        assert!(effects.commands.is_empty());
+        assert_eq!(
+            state.last_error.as_deref(),
+            Some("Blind is not available where you are")
+        );
+    }
+
+    #[test]
+    fn enter_on_a_favorite_album_opens_it_like_from_a_search_result() {
+        let mut state = with_library();
+        ch(&mut state, ']'); // favorite albums
+        let (tag, request) = tagged(press(&mut state, KeyCode::Enter));
+        let Tag::View { serial } = tag else {
+            panic!("not a view tag")
+        };
+        assert_eq!(
+            request,
+            Request::Tracks {
+                from: phonia_ipc::CatalogRef::Album { id: "9".into() },
+                offset: 0,
+                limit: Some(crate::search::PAGE_SIZE),
+            }
+        );
+        assert_eq!(state.library_views.top_serial(), Some(serial));
+        let Some(browse::View::TrackList(view)) = state.library_views.top() else {
+            panic!("no view opened onto the library's own stack")
+        };
+        assert_eq!(view.header().title(), "Issues");
+        assert!(
+            state.search_views.is_empty(),
+            "opened onto the library, not the search"
+        );
+    }
+
+    #[test]
+    fn a_on_a_favorite_album_adds_it_whole() {
+        let mut state = with_library();
+        ch(&mut state, ']');
+        let (_, request) = tagged(ch(&mut state, 'a'));
+        assert_eq!(
+            request,
+            Request::QueueAddFrom {
+                from: phonia_ipc::CatalogRef::Album { id: "9".into() },
+                at: phonia_ipc::AddAt::End,
+            }
+        );
+    }
+
+    #[test]
+    fn enter_on_one_of_the_users_playlists_opens_it() {
+        let mut state = with_library();
+        ch(&mut state, ']');
+        ch(&mut state, ']'); // playlists
+        ch(&mut state, 'j'); // "Focus", the second one
+        let (_, request) = tagged(press(&mut state, KeyCode::Enter));
+        assert_eq!(
+            request,
+            Request::Tracks {
+                from: phonia_ipc::CatalogRef::Playlist { id: "p-2".into() },
+                offset: 0,
+                limit: Some(crate::search::PAGE_SIZE),
+            }
+        );
+        let Some(browse::View::TrackList(view)) = state.library_views.top() else {
+            panic!("no view")
+        };
+        assert_eq!(view.header().title(), "Focus");
+    }
+
+    #[test]
+    fn closing_an_opened_library_view_returns_to_the_librarys_own_lists() {
+        let mut state = with_library();
+        ch(&mut state, ']');
+        press(&mut state, KeyCode::Enter);
+        assert!(!state.library_views.is_empty());
+        ch(&mut state, 'h');
+        assert!(state.library_views.is_empty());
+        assert_eq!(
+            state.focus,
+            Focus::Main,
+            "stays on the library, not the sidebar"
+        );
+    }
+
+    #[test]
+    fn a_long_list_of_favorites_loads_more_as_the_cursor_nears_the_end() {
+        let (mut state, tag) = opening_library();
+        update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Ok(Payload::Library {
+                    favorite_tracks: phonia_ipc::Page {
+                        items: (0..50)
+                            .map(|n| library_track(&n.to_string(), "x"))
+                            .collect(),
+                        total: 120,
+                        offset: 0,
+                    },
+                    favorite_albums: phonia_ipc::Page {
+                        items: vec![],
+                        total: 0,
+                        offset: 0,
+                    },
+                    my_playlists: phonia_ipc::Page {
+                        items: vec![],
+                        total: 0,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
+        ch(&mut state, 'l');
+        // `G` puts the cursor at the last loaded row, within ten of the end of what is loaded:
+        // close enough for that same move to ask for more.
+        let effects = ch(&mut state, 'G');
+        let (tag, request) = tagged(effects);
+        assert_eq!(
+            tag,
+            Tag::LibraryMore {
+                tab: LibraryTab::FavoriteTracks,
+                generation: 0
+            }
+        );
+        assert_eq!(
+            request,
+            Request::Tracks {
+                from: phonia_ipc::CatalogRef::FavoriteTracks,
+                offset: 50,
+                limit: Some(crate::library::PAGE_SIZE),
+            }
+        );
+    }
+
+    #[test]
+    fn the_library_and_the_search_keep_their_own_open_views_apart() {
+        let mut library_state = with_library();
+        ch(&mut library_state, ']');
+        press(&mut library_state, KeyCode::Enter);
+        assert!(!library_state.library_views.is_empty());
+        assert!(library_state.search_views.is_empty());
+
+        let mut search_state = with_results(vec![track_row(11)], 1);
+        ch(&mut search_state, ']'); // Albums
+        press(&mut search_state, KeyCode::Enter);
+        assert!(!search_state.search_views.is_empty());
+        assert!(search_state.library_views.is_empty());
     }
 }
