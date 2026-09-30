@@ -417,6 +417,8 @@ pub enum CatalogRef {
     ArtistTopTracks {
         id: String,
     },
+    /// The logged-in user's favorite tracks (since 1.6, with the library).
+    FavoriteTracks,
     /// Something a newer daemon can add and this version does not know.
     #[serde(other)]
     Unknown,
@@ -430,6 +432,19 @@ pub enum AlbumListRef {
     ArtistAlbums { id: String },
     /// An artist's EPs and singles.
     ArtistSingles { id: String },
+    /// The logged-in user's favorite albums (since 1.6, with the library).
+    FavoriteAlbums,
+    /// A list a newer daemon has and this version does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// A list of playlists that can be asked for page by page (since 1.6, with the library).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PlaylistListRef {
+    /// The playlists the logged-in user created themselves, not the ones they only follow.
+    Mine,
     /// A list a newer daemon has and this version does not know.
     #[serde(other)]
     Unknown,

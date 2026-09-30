@@ -282,6 +282,12 @@ impl Daemon {
                 offset,
                 limit,
             } => self.albums(from, offset, limit).await,
+            Request::Playlists {
+                from,
+                offset,
+                limit,
+            } => self.playlists(from, offset, limit).await,
+            Request::Library { limit } => self.library(limit).await,
             Request::Search {
                 query,
                 kinds,
@@ -479,9 +485,18 @@ impl Daemon {
             Ok(limit) => limit,
             Err(reply) => return reply,
         };
-        let (id, filter) = match &from {
-            ipc::AlbumListRef::ArtistAlbums { id } => (id.clone(), AlbumFilter::Albums),
-            ipc::AlbumListRef::ArtistSingles { id } => (id.clone(), AlbumFilter::EpsAndSingles),
+        let page = match &from {
+            ipc::AlbumListRef::ArtistAlbums { id } => {
+                catalog
+                    .artist_albums(id.clone(), AlbumFilter::Albums, offset, limit)
+                    .await
+            }
+            ipc::AlbumListRef::ArtistSingles { id } => {
+                catalog
+                    .artist_albums(id.clone(), AlbumFilter::EpsAndSingles, offset, limit)
+                    .await
+            }
+            ipc::AlbumListRef::FavoriteAlbums => catalog.favorite_albums(offset, limit).await,
             ipc::AlbumListRef::Unknown => {
                 return self::error(
                     ErrorCode::BadRequest,
@@ -489,12 +504,75 @@ impl Daemon {
                 );
             }
         };
-        match catalog.artist_albums(id, filter, offset, limit).await {
+        match page {
             Ok(page) => Reply::Ok(Payload::Albums {
                 from,
                 page: convert::page(&page, convert::album_summary),
             }),
             Err(failure) => catalog_failure(&failure),
+        }
+    }
+
+    /// One page of a list of playlists.
+    async fn playlists(
+        &self,
+        from: ipc::PlaylistListRef,
+        offset: u32,
+        limit: Option<u32>,
+    ) -> Reply {
+        let catalog = match self.catalog_or_refuse("list playlists from") {
+            Ok(catalog) => catalog,
+            Err(reply) => return reply,
+        };
+        let limit = match list_limit(limit, DEFAULT_SEARCH_LIMIT) {
+            Ok(limit) => limit,
+            Err(reply) => return reply,
+        };
+        let page = match from {
+            ipc::PlaylistListRef::Mine => catalog.my_playlists(offset, limit).await,
+            ipc::PlaylistListRef::Unknown => {
+                return self::error(
+                    ErrorCode::BadRequest,
+                    "this daemon does not know that list of playlists",
+                );
+            }
+        };
+        match page {
+            Ok(page) => Reply::Ok(Payload::Playlists {
+                from,
+                page: convert::page(&page, convert::playlist_summary),
+            }),
+            Err(failure) => catalog_failure(&failure),
+        }
+    }
+
+    /// The library: the first page of the user's favorite tracks, of their favorite albums, and
+    /// of their own playlists, all asked for at the same time.
+    async fn library(&self, limit: Option<u32>) -> Reply {
+        let catalog = match self.catalog_or_refuse("show a library from") {
+            Ok(catalog) => catalog,
+            Err(reply) => return reply,
+        };
+        let limit = match list_limit(limit, DEFAULT_SEARCH_LIMIT) {
+            Ok(limit) => limit,
+            Err(reply) => return reply,
+        };
+        let (favorite_tracks, favorite_albums, my_playlists) = tokio::join!(
+            catalog.favorite_tracks(0, limit),
+            catalog.favorite_albums(0, limit),
+            catalog.my_playlists(0, limit),
+        );
+        match (favorite_tracks, favorite_albums, my_playlists) {
+            (Ok(favorite_tracks), Ok(favorite_albums), Ok(my_playlists)) => {
+                Reply::Ok(Payload::Library {
+                    favorite_tracks: convert::page(&favorite_tracks, convert::track_summary),
+                    favorite_albums: convert::page(&favorite_albums, convert::album_summary),
+                    my_playlists: convert::page(&my_playlists, convert::playlist_summary),
+                })
+            }
+            (Err(failure), ..) | (_, Err(failure), _) | (.., Err(failure)) => {
+                catalog_failure(&failure)
+            }
         }
     }
 
@@ -832,6 +910,7 @@ fn track_page(
         ipc::CatalogRef::ArtistTopTracks { id } => {
             catalog.artist_top_tracks(id.clone(), offset, limit)
         }
+        ipc::CatalogRef::FavoriteTracks => catalog.favorite_tracks(offset, limit),
         ipc::CatalogRef::Unknown => {
             return Err(error(
                 ErrorCode::BadRequest,
