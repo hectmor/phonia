@@ -163,3 +163,36 @@ Issue #21 asks to *show* the library (favorite tracks and albums, the
 person's own playlists); changing what is favorited is left for a later,
 separate issue, once showing the library has landed and the shape of that
 interaction can be judged against how it is actually used.
+
+## 2026-09-30 — The library's remaining shape: protocol, ownership, and ordering
+
+The rest of Opus's #21 plan, approved together with the item above:
+
+- **Protocol.** No new capability: the library lives under the existing
+  `catalog` one. `CatalogRef::FavoriteTracks` and `AlbumListRef::FavoriteAlbums`
+  extend the existing paged `tracks`/`albums` requests (and `queue_add_from`)
+  rather than inventing new ones, since an artist's top tracks and albums
+  already page the exact same way. A playlist listing had no request to
+  extend, so it gets its own: a new `PlaylistListRef` (currently just `Mine`)
+  behind `Request::Playlists`/`Payload::Playlists`. `Request::Library` answers
+  the first page of all three at once, the same shape `Request::Artist`
+  already uses for its bio, top tracks, albums and singles together.
+- **"Your playlists" means only the ones you created**, not ones you follow.
+  `/users/{id}/playlists` is asked for the same as before, but every entry's
+  creator id is compared to the logged-in user's own; a playlist with a
+  different creator (or none) is left out. (#95)
+- **Favorites are asked for newest first** (`order=DATE&orderDirection=DESC`),
+  since that is what someone paging their own library actually wants to see
+  first, and TIDAL's API supports the parameter for this endpoint.
+- **Enter on a favorite track plays just that track**, not the whole list
+  queued at once — unlike an album or a playlist, a favorites list has no
+  natural queue order and can run into the thousands, so queuing it whole by
+  accident would be a much easier way to end up with an unwanted, huge queue.
+  (TUI-side; lands with #21's fourth pull request.)
+
+Verified against the real TIDAL API with this account's login: favorite
+albums came back correctly (2 of 2); this account has no favorite tracks or
+own playlists right now, and `/users/{id}/playlists` was confirmed to answer
+a genuine paged `{"totalNumberOfItems":0,...}` — a real field `tidlers`'s
+own `UserPlaylistsResponse` model doesn't capture at all, so this would have
+gone unnoticed without checking the raw response directly. (#95, #96)

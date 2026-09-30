@@ -49,7 +49,7 @@ desktop keyring, and TOML configuration.
 | #23 | Playback bar: progress, format/quality, volume, shuffle/repeat | Closed |
 | #19 | Search (tracks, albums, artists, playlists) | Code complete (PRs #82–#87 merged); **issue left open on GitHub, worth closing by hand** |
 | #20 | Album and artist views, opened from a search result | Closed |
-| #21 | Library: favorite tracks/albums and the user's playlists | Planned (Opus plan drafted 2026-09-28, awaiting approval), not started |
+| #21 | Library: favorite tracks/albums and the user's playlists | In progress: core catalog (PR #95) and IPC/daemon (PR #96) merged; `ctl library`/`ctl playlists` and the TUI still to come |
 | #24 | Covers in the terminal (`ratatui-image`) | Not started; last of the phase by design (heavier dependency) |
 
 The catalog (search, an album, an artist, and now the library) is served by
@@ -81,16 +81,19 @@ to be scoped with Opus when their turn comes.
 
 ## Right now
 
-This file, `docs/DECISIONS.md`, and the README's "Working process" section
-landed 2026-09-29 (PR #94), so the project can be picked up — by a person, on
-another machine, or by another model asked to audit it — from the repository
-alone. #21 (library: favorites and playlists) is next: Opus produced a plan
-(favorites and playlists fetched with raw HTTP, like search and the
-album/artist views, since `tidlers`' own favorites calls have a
-parameter-name typo that breaks paging; the protocol stays additive under
-1.6; the TUI's Library section reuses the same view/stack machinery as the
-album and artist views from #20) with five open decisions, presented to the
-person and not yet approved.
+Implementing #21 (library: favorites and playlists), approved 2026-09-30, as
+a 4-PR split: core catalog methods (PR #95, merged), IPC/daemon (PR #96,
+merged), `ctl library`/`ctl playlists` (next), then the TUI. Favorites and
+playlists are fetched with raw HTTP, like search and the album/artist views,
+since `tidlers`' own favorites calls have a parameter-name typo that breaks
+paging; the protocol stays additive under 1.6 (`CatalogRef::FavoriteTracks`,
+`AlbumListRef::FavoriteAlbums`, a new `PlaylistListRef`, `Request::Library`
+and `Request::Playlists`); the TUI's Library section will reuse the same
+view/stack machinery as the album and artist views from #20. Verified
+against the real TIDAL API: favorite albums came back correctly; this
+account has no favorite tracks or own playlists right now, and
+`/users/{id}/playlists` was confirmed to answer with a real, paged
+`totalNumberOfItems` that `tidlers`' own model doesn't even capture.
 
 ## After #21
 
