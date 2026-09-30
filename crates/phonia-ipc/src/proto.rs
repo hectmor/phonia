@@ -2,8 +2,8 @@
 
 use crate::dto::{
     AlbumListRef, AlbumSummary, ArtistSummary, CatalogKind, CatalogRef, EndReason, ItemId,
-    OutputInfo, Page, PlaylistSummary, Quality, Queue, ReleaseReason, Repeat, Route, SinkReport,
-    Spec, State, Status, StreamQuality, TrackSummary,
+    OutputInfo, Page, PlaylistListRef, PlaylistSummary, Quality, Queue, ReleaseReason, Repeat,
+    Route, SinkReport, Spec, State, Status, StreamQuality, TrackSummary,
 };
 use serde::{Deserialize, Serialize};
 
@@ -201,6 +201,21 @@ pub enum Request {
         #[serde(default)]
         limit: Option<u32>,
     },
+    /// One page of a list of playlists (since 1.6). Answered with [`Payload::Playlists`].
+    Playlists {
+        from: PlaylistListRef,
+        #[serde(default)]
+        offset: u32,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    /// The library, all that a view of it shows, in one answer (since 1.6): the first page of the
+    /// user's favorite tracks, of their favorite albums, and of their own playlists. Answered with
+    /// [`Payload::Library`]; `limit` (default 50, most 100) is the size of each list's first page.
+    Library {
+        #[serde(default)]
+        limit: Option<u32>,
+    },
     /// Adds the tracks of an album or a playlist (since 1.6): the daemon lists them from TIDAL
     /// itself, so their titles and lengths come with them, and answers like `queue_add`, with
     /// [`Payload::Added`]. A track TIDAL lists but does not stream where the daemon is comes back
@@ -343,6 +358,17 @@ pub enum Payload {
     Albums {
         from: AlbumListRef,
         page: Page<AlbumSummary>,
+    },
+    /// A page of playlists, and the list it is of (since 1.6).
+    Playlists {
+        from: PlaylistListRef,
+        page: Page<PlaylistSummary>,
+    },
+    /// The library, with the first page of each of its lists (since 1.6).
+    Library {
+        favorite_tracks: Page<TrackSummary>,
+        favorite_albums: Page<AlbumSummary>,
+        my_playlists: Page<PlaylistSummary>,
     },
     /// The state right now, and the sequence number of the last event it includes.
     Snapshot {

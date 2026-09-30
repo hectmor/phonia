@@ -2250,6 +2250,13 @@ async fn requests_that_make_no_sense_are_refused_before_they_reach_tidal() {
             offset: 0,
             limit: None,
         },
+        Request::Playlists {
+            from: PlaylistListRef::Unknown,
+            offset: 0,
+            limit: None,
+        },
+        Request::Library { limit: Some(0) },
+        Request::Library { limit: Some(500) },
     ] {
         let error = client.request(request.clone()).await.unwrap_err();
         assert_eq!(protocol_code(error), ErrorCode::BadRequest, "{request:?}");
@@ -2293,6 +2300,12 @@ async fn without_a_catalog_none_of_them_can_be_answered() {
             offset: 0,
             limit: None,
         },
+        Request::Playlists {
+            from: PlaylistListRef::Mine,
+            offset: 0,
+            limit: None,
+        },
+        Request::Library { limit: None },
     ] {
         let error = client.request(request).await.unwrap_err();
         assert_eq!(protocol_code(error), ErrorCode::Unsupported);
@@ -2325,6 +2338,122 @@ async fn an_artists_top_tracks_can_be_added_to_the_queue_whole() {
         })
         .collect();
     assert_eq!(offsets, [0, 100], "listed a hundred at a time");
+    f.finish().await;
+}
+
+// --- The library (protocol 1.6, #21) ---------------------------------------------------------
+
+fn playlist_named(id: &str, title: &str) -> catalog::Playlist {
+    catalog::Playlist {
+        id: id.into(),
+        title: title.into(),
+        creator: Some("hectmor".into()),
+        description: None,
+        track_count: Some(10),
+        duration: Some(Duration::from_secs(2400)),
+    }
+}
+
+/// Two favorite tracks, one favorite album and two of the user's own playlists.
+fn with_a_library() -> FakeCatalog {
+    browsable()
+        .with_favorite_tracks(tracks(2))
+        .with_favorite_albums(vec![album_named(
+            "20",
+            "Untouchables",
+            catalog::AlbumKind::Album,
+        )])
+        .with_my_playlists(vec![
+            playlist_named("p-mine-1", "Road trip"),
+            playlist_named("p-mine-2", "Focus"),
+        ])
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_library_comes_whole_in_one_answer_with_a_page_of_each_list() {
+    let catalog = with_a_library();
+    let f = fixture_with_catalog("library", Some(Arc::new(catalog.clone()))).await;
+    let client = f.client().await;
+    let Payload::Library {
+        favorite_tracks,
+        favorite_albums,
+        my_playlists,
+    } = client
+        .request(Request::Library { limit: None })
+        .await
+        .unwrap()
+    else {
+        panic!("not a library");
+    };
+    assert_eq!(favorite_tracks.items.len(), 2);
+    assert_eq!(favorite_albums.items[0].title, "Untouchables");
+    assert_eq!(
+        my_playlists
+            .items
+            .iter()
+            .map(|p| p.title.as_str())
+            .collect::<Vec<_>>(),
+        ["Road trip", "Focus"]
+    );
+    assert_eq!(catalog.calls().len(), 3, "three asks, one answer");
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn favorite_tracks_and_albums_are_paged_by_their_own_catalog_ref() {
+    let catalog = with_a_library();
+    let f = fixture_with_catalog("favorites-paged", Some(Arc::new(catalog))).await;
+    let client = f.client().await;
+
+    let Payload::Tracks { from, page } = client
+        .request(Request::Tracks {
+            from: CatalogRef::FavoriteTracks,
+            offset: 1,
+            limit: None,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("not tracks");
+    };
+    assert_eq!(from, CatalogRef::FavoriteTracks);
+    assert_eq!(page.items.len(), 1, "the second of the two favorites");
+
+    let Payload::Albums { from, page } = client
+        .request(Request::Albums {
+            from: AlbumListRef::FavoriteAlbums,
+            offset: 0,
+            limit: None,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("not albums");
+    };
+    assert_eq!(from, AlbumListRef::FavoriteAlbums);
+    assert_eq!(page.items[0].title, "Untouchables");
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_page_of_playlists_is_the_users_own() {
+    let catalog = with_a_library();
+    let f = fixture_with_catalog("playlists", Some(Arc::new(catalog))).await;
+    let client = f.client().await;
+    let Payload::Playlists { from, page } = client
+        .request(Request::Playlists {
+            from: PlaylistListRef::Mine,
+            offset: 1,
+            limit: None,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("not playlists");
+    };
+    assert_eq!(from, PlaylistListRef::Mine);
+    assert_eq!(page.items[0].title, "Focus");
+    assert_eq!((page.total, page.offset), (2, 1));
     f.finish().await;
 }
 
