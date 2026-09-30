@@ -63,7 +63,16 @@ chain works with real hardware (a Fosi Audio DS2 during development).
   turn, on top (the title becomes a full breadcrumb, `Search › Korn › Issues`); `a`/`A` there add
   it whole. `h`, `Left`, `Backspace` or starting a new search closes the view on top, back to what
   opened it. Every list, results and an open view alike, loads more by itself as the cursor nears
-  the end of what came, 50 at a time. Library is still empty. Other keys are vim-like: `j`/`k` (or the arrows) move, `gg` and `G` go
+  the end of what came, 50 at a time. The **library** section needs no query: the moment it is
+  first shown it asks the daemon for it once, and says why not where the lists would be if there is
+  no connection yet or the daemon has no TIDAL login. It has the same three tabs the protocol
+  answers with (`[`/`]` switch between them, each with its own count): favorite tracks, favorite
+  albums, and the playlists made by the account logged in (not ones only followed). A favorite
+  album or a playlist opens the same way one from a search result does (`Library › Issues`), with
+  the same `Enter`/`a`/`A` and closing behaviour; a favorite track is the one exception to how a
+  track inside an opened list behaves elsewhere: `Enter` plays just that one track rather than
+  queuing the rest of the list from there, since a list of favorites has no natural order and can
+  run into the thousands. Other keys are vim-like: `j`/`k` (or the arrows) move, `gg` and `G` go
   to the ends, `Ctrl-d`/`Ctrl-u` move half a page, `h`/`l`/`Tab` change panel, `1`-`3` jump to a
   section, `?` shows the keys (and scrolls with `j`/`k` when the terminal is too short for it)
   and `q` (or `Ctrl-c`) quits. The help is drawn from the same table the keys are read from, so
