@@ -1500,6 +1500,7 @@ fn a_track(id: &str, title: &str) -> catalog::Track {
         album: Some(catalog::AlbumRef {
             id: "9".into(),
             title: "Untouchables".into(),
+            cover: None,
         }),
         duration: Some(Duration::from_secs(271)),
         explicit: false,
@@ -1530,6 +1531,7 @@ fn a_catalog() -> FakeCatalog {
                 quality: None,
                 kind: None,
                 copyright: None,
+                cover: None,
             }],
             total: 1,
             offset: 0,
@@ -2024,6 +2026,7 @@ fn korn() -> catalog::Artist {
     catalog::Artist {
         id: "780".into(),
         name: "Korn".into(),
+        picture: None,
     }
 }
 
@@ -2043,6 +2046,7 @@ fn album_named(id: &str, title: &str, kind: catalog::AlbumKind) -> catalog::Albu
         quality: Some(phonia_core::config::Quality::Hires),
         kind: Some(kind),
         copyright: Some("(P) 1999".into()),
+        cover: None,
     }
 }
 
@@ -2351,6 +2355,7 @@ fn playlist_named(id: &str, title: &str) -> catalog::Playlist {
         description: None,
         track_count: Some(10),
         duration: Some(Duration::from_secs(2400)),
+        cover: None,
     }
 }
 

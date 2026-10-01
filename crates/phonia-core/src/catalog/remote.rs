@@ -392,6 +392,8 @@ struct RawArtist {
     id: RawId,
     #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
+    picture: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -399,6 +401,8 @@ struct RawAlbumRef {
     id: RawId,
     #[serde(default)]
     title: Option<String>,
+    #[serde(default)]
+    cover: Option<String>,
 }
 
 /// TIDAL's `mediaMetadata`: `tags` lists what the item is available in, and `HIRES_LOSSLESS` is
@@ -467,6 +471,8 @@ struct RawAlbum {
     artists: Vec<RawArtist>,
     #[serde(default)]
     artist: Option<RawArtist>,
+    #[serde(default)]
+    cover: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -490,6 +496,10 @@ struct RawPlaylist {
     number_of_tracks: Option<u32>,
     #[serde(default)]
     duration: Option<u64>,
+    /// A playlist's square image id, the same shape as an album's cover: TIDAL also has a
+    /// rectangular `image`, not used here since a cover is shown as a square.
+    #[serde(default, rename = "squareImage")]
+    square_image: Option<String>,
 }
 
 /// A page as TIDAL writes it, with its items still unread.
@@ -555,6 +565,7 @@ impl From<RawTrack> for Track {
             album: raw.album.map(|album| AlbumRef {
                 id: album.id.text(),
                 title: album.title.unwrap_or_default(),
+                cover: album.cover.filter(|cover| !cover.is_empty()),
             }),
             duration: secs(raw.duration),
             explicit: raw.explicit.unwrap_or(false),
@@ -580,6 +591,7 @@ impl From<RawAlbum> for Album {
             quality: tier(raw.audio_quality.as_deref(), raw.media_metadata.as_ref()),
             kind: raw.kind.as_deref().and_then(album_kind),
             copyright: raw.copyright.filter(|text| !text.is_empty()),
+            cover: raw.cover.filter(|cover| !cover.is_empty()),
         }
     }
 }
@@ -599,6 +611,7 @@ impl From<RawArtist> for Artist {
         Artist {
             id: raw.id.text(),
             name: raw.name.unwrap_or_default(),
+            picture: raw.picture.filter(|picture| !picture.is_empty()),
         }
     }
 }
@@ -612,6 +625,7 @@ impl From<RawPlaylist> for Playlist {
             description: raw.description.filter(|text| !text.is_empty()),
             track_count: raw.number_of_tracks,
             duration: secs(raw.duration),
+            cover: raw.square_image.filter(|cover| !cover.is_empty()),
         }
     }
 }
@@ -867,7 +881,7 @@ mod tests {
         "albums": {"limit":50,"offset":0,"totalNumberOfItems":1,"items":[
             {"id":33723912,"title":"Untouchables","version":null,"duration":3103,
              "numberOfTracks":14,"releaseDate":"2002-06-11","explicit":true,
-             "audioQuality":"HI_RES_LOSSLESS",
+             "audioQuality":"HI_RES_LOSSLESS","cover":"11111111-2222-3333-4444-555555555555",
              "artists":[{"id":3606115,"name":"Korn","type":"MAIN"}]}
         ]},
         "tracks": {"limit":50,"offset":0,"totalNumberOfItems":123,"items":[
@@ -880,7 +894,7 @@ mod tests {
         "playlists": {"limit":50,"offset":0,"totalNumberOfItems":1,"items":[
             {"uuid":"a1b2c3d4-0000-1111-2222-333344445555","title":"Nu metal",
              "description":"","creator":{"id":0,"name":"TIDAL"},
-             "numberOfTracks":40,"duration":9000}
+             "numberOfTracks":40,"duration":9000,"squareImage":"66666666-7777-8888-9999-000000000000"}
         ]},
         "topHit": {"type":"ARTISTS","value":{"id":1}}
     }"#;
@@ -895,13 +909,15 @@ mod tests {
             artists.items[0],
             Artist {
                 id: "3606115".into(),
-                name: "Korn".into()
+                name: "Korn".into(),
+                picture: Some("abc".into()),
             }
         );
         assert_eq!(
             artists.items[1].id, "77",
             "an id written as text is fine too"
         );
+        assert_eq!(artists.items[1].picture, None, "no picture is none");
 
         let album = &results.albums.unwrap().items[0];
         assert_eq!(album.id, "33723912");
@@ -913,6 +929,10 @@ mod tests {
         assert!(album.explicit);
         assert_eq!(album.quality, Some(Quality::Hires));
         assert_eq!(album.artists[0].name, "Korn");
+        assert_eq!(
+            album.cover.as_deref(),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
 
         let tracks = results.tracks.unwrap();
         assert_eq!(
@@ -928,7 +948,8 @@ mod tests {
             track.album,
             Some(AlbumRef {
                 id: "33723912".into(),
-                title: "Untouchables".into()
+                title: "Untouchables".into(),
+                cover: Some("x".into()),
             })
         );
         assert_eq!(track.quality, Some(Quality::Hires));
@@ -939,6 +960,10 @@ mod tests {
         assert_eq!(playlist.creator.as_deref(), Some("TIDAL"));
         assert_eq!(playlist.description, None, "an empty description is none");
         assert_eq!(playlist.track_count, Some(40));
+        assert_eq!(
+            playlist.cover.as_deref(),
+            Some("66666666-7777-8888-9999-000000000000")
+        );
     }
 
     #[test]
@@ -982,10 +1007,11 @@ mod tests {
         assert_eq!(album_kind("EP"), Some(AlbumKind::Ep));
         assert_eq!(album_kind("SINGLE"), Some(AlbumKind::Single));
         assert_eq!(album_kind("COMPILATION"), None);
-        let raw: RawAlbum = serde_json::from_str(r#"{"id":1,"copyright":""}"#).unwrap();
+        let raw: RawAlbum = serde_json::from_str(r#"{"id":1,"copyright":"","cover":""}"#).unwrap();
         let album = Album::from(raw);
         assert_eq!(album.kind, None);
         assert_eq!(album.copyright, None, "an empty copyright is none");
+        assert_eq!(album.cover, None, "an empty cover is none");
     }
 
     #[test]
@@ -1008,9 +1034,12 @@ mod tests {
             Artist::from(raw),
             Artist {
                 id: "780".into(),
-                name: "Korn".into()
+                name: "Korn".into(),
+                picture: Some("x".into()),
             }
         );
+        let raw: RawArtist = serde_json::from_str(r#"{"id":1,"picture":""}"#).unwrap();
+        assert_eq!(Artist::from(raw).picture, None, "an empty picture is none");
     }
 
     #[test]
@@ -1522,10 +1551,15 @@ mod tests {
         let album = catalog.album("33723912".into()).await.unwrap();
         println!("album: {album:?}");
         assert_eq!(album.title, "Issues");
+        assert!(album.cover.is_some(), "a real album has a cover id");
 
         let korn = catalog.artist("780".into()).await.unwrap();
         println!("artist: {korn:?}");
         assert_eq!(korn.name, "Korn");
+        assert!(
+            korn.picture.is_some(),
+            "a real, popular artist has a picture"
+        );
 
         let bio = catalog.artist_bio("780".into()).await.unwrap();
         println!(
@@ -1622,6 +1656,12 @@ mod tests {
             albums.total,
             albums.items.iter().map(|a| &a.title).collect::<Vec<_>>()
         );
+        if let Some(first) = albums.items.first() {
+            assert!(
+                first.cover.is_some(),
+                "a real favorite album has a cover id"
+            );
+        }
 
         let playlists = catalog.my_playlists(0, 50).await.unwrap();
         println!(
