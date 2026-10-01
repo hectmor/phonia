@@ -8,7 +8,9 @@
 pub mod app;
 pub mod browse;
 pub mod conn;
+pub mod covers;
 pub mod cursor;
+pub mod graphics;
 pub mod input;
 pub mod keymap;
 pub mod library;
