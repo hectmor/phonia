@@ -28,6 +28,15 @@ impl Header {
             Header::Playlist(playlist) => &playlist.title,
         }
     }
+
+    /// TIDAL's cover id (a UUID), to turn into an image URL with `phonia_ipc::image::url`; not
+    /// every album or playlist has one.
+    pub fn cover(&self) -> Option<&str> {
+        match self {
+            Header::Album(album) => album.cover.as_deref(),
+            Header::Playlist(playlist) => playlist.cover.as_deref(),
+        }
+    }
 }
 
 /// An album or a playlist, opened to see its tracks.

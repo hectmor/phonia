@@ -11,6 +11,7 @@ pub fn help_overflow(rows: u16) -> usize {
 }
 
 use crate::app::{Connection, Focus, Section, State, seconds_left};
+use crate::covers::Covers;
 use crate::theme::Theme;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -38,10 +39,10 @@ pub fn areas(area: Rect) -> Areas {
     Areas { sidebar, main, bar }
 }
 
-pub fn draw(state: &State, theme: &Theme, frame: &mut Frame) {
+pub fn draw(state: &State, theme: &Theme, covers: &Covers, frame: &mut Frame) {
     let areas = areas(frame.area());
     draw_sidebar(state, theme, frame, areas.sidebar);
-    draw_main(state, theme, frame, areas.main);
+    draw_main(state, theme, covers, frame, areas.main);
     draw_bar(state, theme, frame, areas.bar);
     if state.help {
         help::draw(theme, state.help_scroll, frame);
@@ -83,7 +84,7 @@ fn draw_sidebar(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
     );
 }
 
-fn draw_main(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
+fn draw_main(state: &State, theme: &Theme, covers: &Covers, frame: &mut Frame, area: Rect) {
     let focused = state.focus == Focus::Main;
     // The search has its own layout inside the panel: the line, the tabs and the results, or an
     // album or a playlist opened from one of them.
@@ -99,7 +100,7 @@ fn draw_main(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
         if state.search_views.is_empty() {
             search::draw(state, theme, frame, inner);
         } else {
-            browse::draw(state, &state.search_views, theme, frame, inner);
+            browse::draw(state, &state.search_views, theme, covers, frame, inner);
         }
         return;
     }
@@ -116,7 +117,7 @@ fn draw_main(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
         if state.library_views.is_empty() {
             library::draw(state, theme, frame, inner);
         } else {
-            browse::draw(state, &state.library_views, theme, frame, inner);
+            browse::draw(state, &state.library_views, theme, covers, frame, inner);
         }
         return;
     }
@@ -352,7 +353,7 @@ mod tests {
     pub(crate) fn screen(state: &State, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| draw(state, &Theme::new(false), frame))
+            .draw(|frame| draw(state, &Theme::new(false), &Covers::disabled(), frame))
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
         (0..height)
@@ -767,7 +768,9 @@ mod tests {
         let theme = Theme::new(false);
         let has_reverse_row = |state: &State| {
             let mut terminal = Terminal::new(TestBackend::new(60, 14)).unwrap();
-            terminal.draw(|frame| draw(state, &theme, frame)).unwrap();
+            terminal
+                .draw(|frame| draw(state, &theme, &Covers::disabled(), frame))
+                .unwrap();
             let buffer = terminal.backend().buffer().clone();
             (0..14).any(|y| {
                 (14..40).any(|x| {
@@ -929,7 +932,7 @@ mod tests {
         }
         let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
         terminal
-            .draw(|frame| draw(&state, &Theme::new(false), frame))
+            .draw(|frame| draw(&state, &Theme::new(false), &Covers::disabled(), frame))
             .unwrap();
         let cursor = terminal.get_cursor_position().unwrap();
         // The sidebar (14) and the panel's border (1), then "/ " and four letters, on the first
@@ -1140,7 +1143,9 @@ mod tests {
         let theme = Theme::new(false);
         let reversed_rows = |state: &State| {
             let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
-            terminal.draw(|frame| draw(state, &theme, frame)).unwrap();
+            terminal
+                .draw(|frame| draw(state, &theme, &Covers::disabled(), frame))
+                .unwrap();
             let buffer = terminal.backend().buffer().clone();
             (0..14)
                 .filter(|y| {
@@ -1263,6 +1268,155 @@ mod tests {
     }
 
     #[test]
+    fn an_albums_cover_reserves_room_beside_the_header_and_draws_once_its_ready() {
+        use crate::browse::{Header, TrackListView, View};
+        use crate::covers::{self, Outcome};
+        use ratatui_image::Resize;
+        use ratatui_image::picker::Picker;
+
+        let album = phonia_ipc::AlbumSummary {
+            id: "9".into(),
+            title: "Issues".into(),
+            version: None,
+            artists: vec![phonia_ipc::ArtistRef {
+                id: "780".into(),
+                name: "Korn".into(),
+            }],
+            release_date: None,
+            track_count: None,
+            duration_ms: None,
+            explicit: false,
+            quality: None,
+            kind: None,
+            copyright: None,
+            cover: Some("3c6247c7-d0d7-4978-91b1-0bddc13f45b5".into()),
+        };
+        let mut state = State::default();
+        press(&mut state, '2'); // Search
+        state.search_views.push(
+            0,
+            View::TrackList(TrackListView::new(
+                phonia_ipc::CatalogRef::Album { id: "9".into() },
+                Header::Album(album.clone()),
+            )),
+        );
+
+        let (width, height) = (100, 30);
+        let theme = Theme::new(false);
+        let main = areas(Rect::new(0, 0, width, height)).main;
+        let inner = panel("x", false, &theme).inner(main);
+        let picker = Picker::halfblocks();
+        let cells = covers::cover_size(inner, picker.font_size()).unwrap();
+        let url = covers::cover_url(&Header::Album(album), cells, picker.font_size()).unwrap();
+
+        let mut covers = Covers::new(Some(picker.clone()));
+        covers.start(&url);
+        let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            u32::from(cells.width) * 10,
+            u32::from(cells.height) * 20,
+            image::Rgb([220, 20, 20]),
+        ));
+        let protocol = picker
+            .new_protocol(image, cells, Resize::default())
+            .unwrap();
+        covers.finish(url, Outcome::Ready(protocol));
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| draw(&state, &theme, &covers, frame))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        // Somewhere in the reserved area, a cell's style was touched: the plain background
+        // everywhere else never is.
+        let drawn = (inner.y..inner.y + cells.height).any(|y| {
+            (inner.x..inner.x + cells.width).any(|x| {
+                let style = buffer[(x, y)].style();
+                style.fg.is_some() || style.bg.is_some()
+            })
+        });
+        assert!(drawn, "no cover pixels found in the reserved area");
+
+        // The header's own text is still shown, to the right of the cover, not under it.
+        let text = (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Korn - Issues"), "{text}");
+    }
+
+    #[test]
+    fn with_covers_off_or_no_cover_id_the_layout_is_exactly_as_before() {
+        use crate::browse::{Header, TrackListView, View};
+
+        let with_cover = |cover: Option<&str>| {
+            let mut state = State::default();
+            press(&mut state, '2');
+            state.search_views.push(
+                0,
+                View::TrackList(TrackListView::new(
+                    phonia_ipc::CatalogRef::Album { id: "9".into() },
+                    Header::Album(phonia_ipc::AlbumSummary {
+                        id: "9".into(),
+                        title: "Issues".into(),
+                        version: None,
+                        artists: vec![],
+                        release_date: None,
+                        track_count: None,
+                        duration_ms: None,
+                        explicit: false,
+                        quality: None,
+                        kind: None,
+                        copyright: None,
+                        cover: cover.map(str::to_string),
+                    }),
+                )),
+            );
+            state
+        };
+
+        // Covers enabled, but this item has no cover id.
+        let no_cover_id = screen_with(
+            &with_cover(None),
+            &Covers::new(Some(ratatui_image::picker::Picker::halfblocks())),
+            100,
+            30,
+        );
+        // This item has a cover id, but covers are off.
+        let covers_off = screen_with(
+            &with_cover(Some("3c6247c7-d0d7-4978-91b1-0bddc13f45b5")),
+            &Covers::disabled(),
+            100,
+            30,
+        );
+        // Both lay out identically to a plain `Covers::disabled()` screen: the header's own text
+        // starts at the same column either way, so nothing reserved room for a cover in either.
+        assert_eq!(no_cover_id, screen(&with_cover(None), 100, 30));
+        assert_eq!(covers_off, screen(&with_cover(Some("x")), 100, 30));
+    }
+
+    /// Like [`screen`], but with the given [`Covers`] instead of a disabled one.
+    fn screen_with(state: &State, covers: &Covers, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| draw(state, &Theme::new(false), covers, frame))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
     fn an_open_album_lists_its_tracks_numbered_with_the_unstreamable_one_dimmed() {
         let state = open_album_view();
         let text = screen(&state, 100, 14);
@@ -1280,7 +1434,9 @@ mod tests {
         let theme = Theme::new(false);
         let reversed_rows = |state: &State| {
             let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
-            terminal.draw(|frame| draw(state, &theme, frame)).unwrap();
+            terminal
+                .draw(|frame| draw(state, &theme, &Covers::disabled(), frame))
+                .unwrap();
             let buffer = terminal.backend().buffer().clone();
             (0..14)
                 .filter(|y| {

@@ -134,6 +134,21 @@ impl State {
     fn half_page(&self) -> usize {
         usize::from(self.size.1 / 2).max(1)
     }
+
+    /// The header of whatever album or playlist is open on top of the current section's stack
+    /// (search or the library), if that is what is open there (an artist page has none, and
+    /// neither does the queue).
+    pub fn open_header(&self) -> Option<&browse::Header> {
+        let stack = match self.section() {
+            Section::Search => &self.search_views,
+            Section::Library => &self.library_views,
+            Section::Queue => return None,
+        };
+        match stack.top()? {
+            browse::View::TrackList(view) => Some(view.header()),
+            browse::View::Artist(_) => None,
+        }
+    }
 }
 
 /// Something that happened.
