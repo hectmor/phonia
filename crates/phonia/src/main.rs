@@ -114,6 +114,12 @@ enum Command {
         /// `$XDG_RUNTIME_DIR/phonia/phoniad.sock`.
         #[arg(long)]
         socket: Option<PathBuf>,
+        /// Whether to show covers, and how: a real graphics protocol (Kitty, Sixel, iTerm2) if the
+        /// terminal has one, or halfblocks if not but it has true colour ("auto", the default);
+        /// always halfblocks, even over a real protocol ("halfblocks"); or never ask the terminal
+        /// and never show one ("off").
+        #[arg(long, default_value_t = phonia_tui::graphics::CoverMode::Auto)]
+        covers: phonia_tui::graphics::CoverMode,
     },
     /// Lists the sound cards that can play, with the device name to put in the config file.
     Devices,
@@ -245,8 +251,8 @@ async fn main() -> ExitCode {
             }
         }
         Command::Ctl(args) => ctl::run(args, cli.config.as_deref()).await,
-        Command::Tui { socket } => match ctl::socket_path(cli.config.as_deref(), socket) {
-            Ok(socket) => phonia_tui::run(socket).await,
+        Command::Tui { socket, covers } => match ctl::socket_path(cli.config.as_deref(), socket) {
+            Ok(socket) => phonia_tui::run(socket, covers).await,
             Err(error) => Err(error),
         },
         Command::Devices => run_devices().await,

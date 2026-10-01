@@ -311,3 +311,45 @@ speculative, churn to redo once part 4 actually needed something different.
 Folding that wiring into part 4, its first real caller, keeps every PR
 compiling and testing green with no unused plumbing, the same discipline
 already applied throughout #19–#21.
+
+## 2026-10-01 — The first cover: an opened album's or playlist's header, and how it is laid out
+
+The first visible part of #24: an opened album's or playlist's header shows
+its cover beside the title, copyright and track count that were already
+there. A few decisions this needed:
+
+- **The layout never jumps.** Whether a cover's space is reserved depends
+  only on things known the instant the header is about to draw — a picker
+  exists (covers are not off, and one was detected), the item actually has
+  a cover id, and the header's own area is big enough — never on whether
+  the image has actually finished fetching. A cover still loading, or one
+  that failed, leaves that same reserved rectangle blank; it is filled in,
+  without reflowing anything else, the moment it is ready. Getting this
+  gate exactly right mattered: an early version reserved the space whenever
+  a picker existed, regardless of whether the item had a cover id at all,
+  which would have shown a blank gap forever next to anything TIDAL has no
+  artwork for. A regression test (`with_covers_off_or_no_cover_id_the_layout_is_exactly_as_before`)
+  pins the fix: that case must lay out byte-for-byte like covers never
+  existed.
+- **The size:** a third of the header's own height, clamped to 6–12 rows,
+  with the width computed from the terminal's reported font size so the
+  image comes out square in pixels, not just in character cells (usually
+  about twice as tall as wide). Below a minimum, or with no room left for
+  the header's text beside it, no cover shows at all rather than a
+  cramped one.
+- **`Covers` owns the `Picker`,** not a separate parameter threaded
+  alongside it: both are one resource for drawing, so `view::draw` only
+  grows the one new parameter it needs. A `None` picker (covers off, or
+  none detected) and "nothing to show a cover of" are kept as two different
+  reasons for the same visible outcome (no cover), so a future case that
+  can tell them apart (a settings line explaining why, say) is free to.
+- **The run loop's own cover-fetching** (`--covers`, querying the terminal
+  once via `graphics::setup` right after entering the alternate screen,
+  and a fetch's result arriving on its own channel) is not modeled as an
+  `app::Msg`: a fetch finishing redraws directly, the same reasoning that
+  keeps `Covers` itself out of `app::State` (2026-10-01, the part 3 entry
+  above). The main panel's own area, needed to decide how big a cover to
+  ask for, is approximated from the terminal's raw size rather than
+  threading the exact bordered, inner area out of the view layer into the
+  run loop: close enough to pick a sane request size, not required to be
+  exact, and avoids a second, parallel way to compute layout.

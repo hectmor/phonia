@@ -3,17 +3,26 @@
 use super::first_visible;
 use crate::app::{Focus, State};
 use crate::browse::{ArtistTab, ArtistView, Header, Phase, Stack, TrackListView, View};
+use crate::covers::{self, Covers};
 use crate::theme::Theme;
 use phonia_ipc::{AlbumSummary, TrackSummary, fmt};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use ratatui_image::Image;
 
 /// The view on top of `stack` (the one opened from a search result, or from the library).
-pub fn draw(state: &State, stack: &Stack, theme: &Theme, frame: &mut Frame, area: Rect) {
+pub fn draw(
+    state: &State,
+    stack: &Stack,
+    theme: &Theme,
+    covers: &Covers,
+    frame: &mut Frame,
+    area: Rect,
+) {
     match stack.top() {
-        Some(View::TrackList(view)) => draw_track_list(state, view, theme, frame, area),
+        Some(View::TrackList(view)) => draw_track_list(state, view, theme, covers, frame, area),
         Some(View::Artist(view)) => draw_artist(state, view, theme, frame, area),
         None => {}
     }
@@ -23,13 +32,45 @@ fn draw_track_list(
     state: &State,
     view: &TrackListView,
     theme: &Theme,
+    covers: &Covers,
     frame: &mut Frame,
     area: Rect,
 ) {
-    let header = header_lines(view.header(), theme);
-    let [header_area, list_area] =
-        Layout::vertical([Constraint::Length(header.len() as u16), Constraint::Min(0)]).areas(area);
-    frame.render_widget(Paragraph::new(header), header_area);
+    let header_lines = header_lines(view.header(), theme);
+    // The cover's own space is reserved whenever one *could* show here (a picker, a cover id to
+    // show, and room enough), whether or not it has actually finished fetching yet: the layout
+    // must not jump once it has. An item with no cover id at all reserves nothing, the same as a
+    // terminal with no picker.
+    let reserved = covers.picker().and_then(|picker| {
+        let cells = covers::cover_size(area, picker.font_size())?;
+        let url = covers::cover_url(view.header(), cells, picker.font_size())?;
+        Some((url, cells))
+    });
+    let (cover_area, header_area, list_area) = match reserved {
+        Some((url, cells)) => {
+            let [top, list_area] =
+                Layout::vertical([Constraint::Length(cells.height), Constraint::Min(0)])
+                    .areas(area);
+            let [cover_area, header_area] =
+                Layout::horizontal([Constraint::Length(cells.width), Constraint::Min(0)])
+                    .areas(top);
+            (Some((cover_area, url)), header_area, list_area)
+        }
+        None => {
+            let [header_area, list_area] = Layout::vertical([
+                Constraint::Length(header_lines.len() as u16),
+                Constraint::Min(0),
+            ])
+            .areas(area);
+            (None, header_area, list_area)
+        }
+    };
+    if let Some((cover_area, url)) = &cover_area
+        && let Some(protocol) = covers.ready(url)
+    {
+        frame.render_widget(Image::new(protocol), *cover_area);
+    }
+    frame.render_widget(Paragraph::new(header_lines), header_area);
     let focused = state.focus == Focus::Main;
     let lines = match &view.phase {
         Phase::Loading => vec![Line::styled("Loading...", theme.dim)],
