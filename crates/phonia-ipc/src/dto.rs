@@ -301,6 +301,10 @@ pub struct ArtistRef {
 pub struct AlbumRef {
     pub id: String,
     pub title: String,
+    /// TIDAL's cover id (a UUID), to turn into an image URL with [`crate::image::url`] (since 1.6,
+    /// with covers).
+    #[serde(default)]
+    pub cover: Option<String>,
 }
 
 fn yes() -> bool {
@@ -371,12 +375,20 @@ pub struct AlbumSummary {
     pub kind: Option<AlbumKind>,
     #[serde(default)]
     pub copyright: Option<String>,
+    /// TIDAL's cover id (a UUID), to turn into an image URL with [`crate::image::url`] (since 1.6,
+    /// with covers).
+    #[serde(default)]
+    pub cover: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtistSummary {
     pub id: String,
     pub name: String,
+    /// TIDAL's picture id (a UUID), the same shape as an album's cover id (since 1.6, with
+    /// covers); many artists have none.
+    #[serde(default)]
+    pub picture: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -392,6 +404,10 @@ pub struct PlaylistSummary {
     pub track_count: Option<u32>,
     #[serde(default)]
     pub duration_ms: Option<u64>,
+    /// TIDAL's square image id (a UUID), the same shape as an album's cover id (since 1.6, with
+    /// covers).
+    #[serde(default)]
+    pub cover: Option<String>,
 }
 
 /// One page of a list that may be longer: `total` is how many there are in all, `offset` where

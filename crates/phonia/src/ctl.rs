@@ -589,6 +589,12 @@ async fn library(client: &Client, json: bool, limit: Option<u32>) -> Result<()> 
     print_payload(json, &payload, || format_library(&payload))
 }
 
+/// The URL of a cover or a picture, at a size fit for opening in a browser rather than for a
+/// terminal cell; `None` when there is no id to build one from.
+fn cover_url(kind: phonia_ipc::image::Kind, id: Option<&str>) -> Option<String> {
+    phonia_ipc::image::url(kind, id?, 640)
+}
+
 /// The album's line, then who it is by, its copyright, and its tracks, numbered as on the album,
 /// with a heading for each disc when there is more than one.
 fn format_album(payload: &Payload) -> String {
@@ -601,6 +607,9 @@ fn format_album(payload: &Payload) -> String {
     }
     if let Some(copyright) = &album.copyright {
         text.push_str(&format!("\n{copyright}"));
+    }
+    if let Some(cover) = cover_url(phonia_ipc::image::Kind::AlbumCover, album.cover.as_deref()) {
+        text.push_str(&format!("\nCover: {cover}"));
     }
     let discs: std::collections::BTreeSet<u32> = tracks
         .items
@@ -650,6 +659,12 @@ fn format_artist(payload: &Payload) -> String {
         return "unexpected answer".to_string();
     };
     let mut text = format!("{}   artist {}", artist.name, artist.id);
+    if let Some(picture) = cover_url(
+        phonia_ipc::image::Kind::ArtistPicture,
+        artist.picture.as_deref(),
+    ) {
+        text.push_str(&format!("\nPicture: {picture}"));
+    }
     if let Some(bio) = bio {
         // A bio is long: the first paragraph, cut where a sentence ends if it is still long.
         let first = bio.split("\n\n").next().unwrap_or(bio).trim();
@@ -1804,6 +1819,7 @@ mod tests {
                     album: Some(AlbumRef {
                         id: "9".into(),
                         title: "Untouchables".into(),
+                        cover: None,
                     }),
                     duration_ms: Some(271_000),
                     explicit: false,
@@ -1824,6 +1840,7 @@ mod tests {
                 items: vec![ArtistSummary {
                     id: "780".into(),
                     name: "Korn".into(),
+                    picture: None,
                 }],
                 total: 1,
                 offset: 0,
@@ -1901,6 +1918,7 @@ mod tests {
                 quality: Some(Quality::Hires),
                 kind: Some(phonia_ipc::AlbumKind::Album),
                 copyright: Some("(P) 1999 Sony".into()),
+                cover: None,
             },
             tracks: phonia_ipc::Page {
                 items: tracks,
@@ -1927,6 +1945,54 @@ mod tests {
              \n   1. Dead - 1:15 - hires   tidal:1\n   2. Trash - 1:15 - hires   tidal:2"
         );
         assert!(!text.contains("Disc"), "one disc needs no heading");
+        assert!(!text.contains("Cover:"), "no cover id, no line");
+    }
+
+    #[test]
+    fn an_album_and_an_artist_print_a_cover_url_when_they_have_one() {
+        use phonia_ipc::ArtistSummary;
+        let Payload::Album { mut album, tracks } = an_album(vec![], 0) else {
+            panic!("not an album")
+        };
+        album.cover = Some("3c6247c7-d0d7-4978-91b1-0bddc13f45b5".into());
+        let text = format_album(&Payload::Album { album, tracks });
+        assert!(
+            text.contains(
+                "Cover: https://resources.tidal.com/images/3c6247c7/d0d7/4978/91b1/0bddc13f45b5/640x640.jpg"
+            ),
+            "{text}"
+        );
+
+        let payload = Payload::Artist {
+            artist: ArtistSummary {
+                id: "780".into(),
+                name: "Korn".into(),
+                picture: Some("ca8a29d3-efcd-4cd2-8dea-a376e1c64b1e".into()),
+            },
+            bio: None,
+            top_tracks: phonia_ipc::Page {
+                items: vec![],
+                total: 0,
+                offset: 0,
+            },
+            albums: phonia_ipc::Page {
+                items: vec![],
+                total: 0,
+                offset: 0,
+            },
+            singles: phonia_ipc::Page {
+                items: vec![],
+                total: 0,
+                offset: 0,
+            },
+        };
+        let text = format_artist(&payload);
+        assert!(
+            text.contains(
+                "Picture: https://resources.tidal.com/images/ca8a29d3/efcd/4cd2/8dea/a376e1c64b1e/750x750.jpg"
+            ),
+            "{text}"
+        );
     }
 
     #[test]
@@ -1967,11 +2033,13 @@ mod tests {
             quality: None,
             kind: Some(AlbumKind::Single),
             copyright: None,
+            cover: None,
         };
         let payload = Payload::Artist {
             artist: ArtistSummary {
                 id: "780".into(),
                 name: "Korn".into(),
+                picture: None,
             },
             bio: Some(format!("{}\n\nA second paragraph.", "x".repeat(500))),
             top_tracks: Page {
@@ -2023,6 +2091,7 @@ mod tests {
             artist: ArtistSummary {
                 id: "1".into(),
                 name: "Nobody".into(),
+                picture: None,
             },
             bio: None,
             top_tracks: empty(),
@@ -2057,6 +2126,7 @@ mod tests {
                     quality: None,
                     kind: Some(AlbumKind::Album),
                     copyright: None,
+                    cover: None,
                 }],
                 total: 1,
                 offset: 0,
@@ -2100,6 +2170,7 @@ mod tests {
                     description: None,
                     track_count: Some(10),
                     duration_ms: None,
+                    cover: None,
                 }],
                 total: 1,
                 offset: 0,

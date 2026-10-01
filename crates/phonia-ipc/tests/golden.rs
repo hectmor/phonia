@@ -699,6 +699,7 @@ fn a_track_summary() -> TrackSummary {
         album: Some(AlbumRef {
             id: "33723912".into(),
             title: "Untouchables".into(),
+            cover: None,
         }),
         duration_ms: Some(271_000),
         explicit: false,
@@ -799,13 +800,14 @@ fn search_results_carry_a_page_of_each_kind_asked_for() {
                 items: vec![ArtistSummary {
                     id: "780".into(),
                     name: "Korn".into(),
+                    picture: None,
                 }],
                 total: 1,
                 offset: 0,
             }),
             playlists: None,
         }),
-        r#"{"type":"response","id":3,"ok":{"type":"search_results","query":"korn","tracks":{"items":[{"id":"33723914","title":"Here to Stay","version":null,"artists":[{"id":"780","name":"Korn"}],"album":{"id":"33723912","title":"Untouchables"},"duration_ms":271000,"explicit":false,"track_number":2,"volume_number":null,"quality":"hires","streamable":true}],"total":123,"offset":0},"albums":null,"artists":{"items":[{"id":"780","name":"Korn"}],"total":1,"offset":0},"playlists":null}}"#,
+        r#"{"type":"response","id":3,"ok":{"type":"search_results","query":"korn","tracks":{"items":[{"id":"33723914","title":"Here to Stay","version":null,"artists":[{"id":"780","name":"Korn"}],"album":{"id":"33723912","title":"Untouchables","cover":null},"duration_ms":271000,"explicit":false,"track_number":2,"volume_number":null,"quality":"hires","streamable":true}],"total":123,"offset":0},"albums":null,"artists":{"items":[{"id":"780","name":"Korn","picture":null}],"total":1,"offset":0},"playlists":null}}"#,
     );
 }
 
@@ -1166,6 +1168,7 @@ fn an_album_summary() -> AlbumSummary {
         quality: Some(Quality::Hires),
         kind: Some(AlbumKind::Album),
         copyright: Some("(P) 1999".into()),
+        cover: None,
     }
 }
 
@@ -1183,13 +1186,14 @@ fn an_album_an_artist_and_pages_come_back_whole() {
             album: an_album_summary(),
             tracks: page(16),
         }),
-        r#"{"type":"response","id":1,"ok":{"type":"album","album":{"id":"33723912","title":"Issues","version":null,"artists":[{"id":"780","name":"Korn"}],"release_date":"1999-11-16","track_count":16,"duration_ms":3200000,"explicit":true,"quality":"hires","kind":"album","copyright":"(P) 1999"},"tracks":{"items":[{"id":"33723914","title":"Here to Stay","version":null,"artists":[{"id":"780","name":"Korn"}],"album":{"id":"33723912","title":"Untouchables"},"duration_ms":271000,"explicit":false,"track_number":2,"volume_number":null,"quality":"hires","streamable":true}],"total":16,"offset":0}}}"#,
+        r#"{"type":"response","id":1,"ok":{"type":"album","album":{"id":"33723912","title":"Issues","version":null,"artists":[{"id":"780","name":"Korn"}],"release_date":"1999-11-16","track_count":16,"duration_ms":3200000,"explicit":true,"quality":"hires","kind":"album","copyright":"(P) 1999","cover":null},"tracks":{"items":[{"id":"33723914","title":"Here to Stay","version":null,"artists":[{"id":"780","name":"Korn"}],"album":{"id":"33723912","title":"Untouchables","cover":null},"duration_ms":271000,"explicit":false,"track_number":2,"volume_number":null,"quality":"hires","streamable":true}],"total":16,"offset":0}}}"#,
     );
     // The artist: every list a page, and the bio only when there is one.
     let artist = Payload::Artist {
         artist: ArtistSummary {
             id: "780".into(),
             name: "Korn".into(),
+            picture: None,
         },
         bio: None,
         top_tracks: page(300),

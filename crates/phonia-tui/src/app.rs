@@ -2996,6 +2996,7 @@ mod tests {
                             quality: None,
                             kind: None,
                             copyright: None,
+                            cover: None,
                         }],
                         1,
                         0,
@@ -3004,6 +3005,7 @@ mod tests {
                         vec![phonia_ipc::ArtistSummary {
                             id: "780".into(),
                             name: "Korn".into(),
+                            picture: None,
                         }],
                         1,
                         0,
@@ -3016,6 +3018,7 @@ mod tests {
                             description: None,
                             track_count: Some(25),
                             duration_ms: None,
+                            cover: None,
                         }],
                         1,
                         0,
@@ -3753,6 +3756,7 @@ mod tests {
             quality: None,
             kind: None,
             copyright: None,
+            cover: None,
         };
         update(
             &mut state,
@@ -3762,6 +3766,7 @@ mod tests {
                     artist: phonia_ipc::ArtistSummary {
                         id: "780".into(),
                         name: "Korn".into(),
+                        picture: None,
                     },
                     bio: Some("A nu metal band.".into()),
                     top_tracks: page_of(top, 300, 0).unwrap(),
@@ -3815,6 +3820,7 @@ mod tests {
                     artist: phonia_ipc::ArtistSummary {
                         id: "780".into(),
                         name: "Korn".into(),
+                        picture: None,
                     },
                     bio: None,
                     top_tracks: page_of(vec![], 0, 0).unwrap(),
@@ -3997,6 +4003,7 @@ mod tests {
                             quality: None,
                             kind: None,
                             copyright: None,
+                            cover: None,
                         }],
                         35,
                         2,
@@ -4049,6 +4056,7 @@ mod tests {
             quality: None,
             kind: None,
             copyright: None,
+            cover: None,
         }
     }
 
@@ -4060,6 +4068,7 @@ mod tests {
             description: None,
             track_count: None,
             duration_ms: None,
+            cover: None,
         }
     }
 

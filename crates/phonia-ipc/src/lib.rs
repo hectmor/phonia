@@ -23,6 +23,7 @@ pub mod client;
 pub mod dto;
 pub mod fmt;
 pub mod framing;
+pub mod image;
 pub mod proto;
 pub mod socket;
 pub mod source;

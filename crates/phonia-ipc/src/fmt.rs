@@ -217,6 +217,7 @@ mod tests {
             album: Some(AlbumRef {
                 id: "9".into(),
                 title: "Untouchables".into(),
+                cover: None,
             }),
             duration_ms: Some(271_000),
             explicit: true,
@@ -305,6 +306,7 @@ mod tests {
             quality: Some(Quality::Lossless),
             kind: Some(AlbumKind::Album),
             copyright: None,
+            cover: None,
         };
         assert_eq!(
             super::album(&album),
@@ -332,12 +334,14 @@ mod tests {
             description: None,
             track_count: Some(40),
             duration_ms: None,
+            cover: None,
         };
         assert_eq!(super::playlist(&playlist), "Nu metal - TIDAL - 40 tracks");
         assert_eq!(
             artist(&ArtistSummary {
                 id: "1".into(),
-                name: "Korn".into()
+                name: "Korn".into(),
+                picture: None,
             }),
             "Korn"
         );

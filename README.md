@@ -190,7 +190,13 @@ gapless = true          # join a track to the next one of the same format with n
 - `phonia ctl album <id>` and `phonia ctl artist <id>` print those views: an album's details, copyright and
   tracks numbered as on the album (with a heading per disc when there is more than one), or an artist's bio,
   top tracks, albums, and EPs and singles, each row ending with the id that `queue add` takes (`tidal:<id>`,
-  `album:<id>`). `--limit` sets the size of a page (at most 100).
+  `album:<id>`). `--limit` sets the size of a page (at most 100). When TIDAL has one, a `Cover:`/`Picture:`
+  line gives the image's own URL at a size fit for opening by hand, not for a terminal cell.
+- **Cover art**: albums, playlists and artists each carry an opaque TIDAL image id (`cover`/`picture`
+  in the wire types, since protocol 1.6), not a URL -- `phonia_ipc::image::url(kind, id, min_px)` turns
+  one into the actual URL, at the smallest of TIDAL's own fixed sizes for that kind that is at least
+  `min_px` (or the largest there is, if none is big enough). The CDN needs no TIDAL login. Nothing
+  renders an image yet; that is the terminal interface's job, coming with issue #24.
 - **The library** (the requests `library` and `playlists` of protocol 1.6, and `phonia ctl library`):
   favorite tracks and favorite albums (`favorite_tracks`/`favorite_albums`, newest favorited first),
   and the playlists you created yourself, not ones you only follow (`/users/{id}/playlists`, kept
