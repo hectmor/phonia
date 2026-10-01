@@ -489,6 +489,7 @@ mod tests {
             quality: None,
             kind: None,
             copyright: None,
+            cover: None,
         }
     }
 
@@ -497,6 +498,7 @@ mod tests {
         let korn = Artist {
             id: "780".into(),
             name: "Korn".into(),
+            picture: None,
         };
         let catalog = FakeCatalog::new()
             .with_album_details(album_of("9"))
@@ -536,6 +538,7 @@ mod tests {
             description: None,
             track_count: None,
             duration: None,
+            cover: None,
         }
     }
 

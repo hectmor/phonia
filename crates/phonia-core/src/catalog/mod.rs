@@ -45,6 +45,9 @@ pub struct ArtistRef {
 pub struct AlbumRef {
     pub id: String,
     pub title: String,
+    /// TIDAL's cover id (a UUID), to be turned into an image URL at whatever size is needed; not
+    /// every album has one.
+    pub cover: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,12 +92,16 @@ pub struct Album {
     /// An album, an EP or a single, when TIDAL says.
     pub kind: Option<AlbumKind>,
     pub copyright: Option<String>,
+    /// TIDAL's cover id (a UUID), to be turned into an image URL at whatever size is needed.
+    pub cover: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Artist {
     pub id: String,
     pub name: String,
+    /// TIDAL's picture id (a UUID), the same shape as an album's cover id; many artists have none.
+    pub picture: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +113,8 @@ pub struct Playlist {
     pub description: Option<String>,
     pub track_count: Option<u32>,
     pub duration: Option<Duration>,
+    /// TIDAL's square image id (a UUID), the same shape as an album's cover id.
+    pub cover: Option<String>,
 }
 
 /// One page of a list that may be longer: `total` is how many there are in all.
