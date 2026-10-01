@@ -523,21 +523,40 @@ more importantly, *why* it was chosen.
   `tokio` rather than a codec crate.
 
 - **`phonia-tui`** (a crate of this workspace) -- the terminal interface. Like `phonia-ipc` it does
-  not depend on `phonia-core`, so it builds without ALSA; it talks to the daemon through
-  `phonia-ipc` only, and how it connects is a parameter, so the reconnection is tested against a
-  scripted daemon over an in-memory pipe with `tokio`'s paused clock. It is an Elm-style loop: a pure `update(state, message)` and a pure
-  `view(state)`, tested with plain values and a test backend, and only `run` touches the terminal.
-  All colours live in one `theme` module and are the terminal's own sixteen, so it follows the
-  user's palette; with `NO_COLOR` set it uses none.
+  not depend on `phonia-core`, so it builds without ALSA, zbus or a keyring; it talks to the daemon
+  through `phonia-ipc` only, and how it connects is a parameter, so the reconnection is tested
+  against a scripted daemon over an in-memory pipe with `tokio`'s paused clock. It is an Elm-style
+  loop: a pure `update(state, message)` and a pure `view(state)`, tested with plain values and a
+  test backend, and only `run` touches the terminal. All colours live in one `theme` module and are
+  the terminal's own sixteen, so it follows the user's palette; with `NO_COLOR` set it uses none.
+  Its one exception to having no network of its own: fetching a cover (#24) straight from TIDAL's
+  public image CDN, which needs no TIDAL session, so it does not have to go through the daemon
+  (see `docs/DECISIONS.md`, 2026-10-01).
 
 - **[`ratatui`](https://docs.rs/ratatui)** -- draws the terminal interface: layout, widgets and a
   `TestBackend` that lets the screens be tested without a terminal. Chosen because it is the
-  maintained standard for Rust TUIs and the one `ratatui-image` (covers, later) builds on; it
-  installs the panic hook that gives the terminal back.
+  maintained standard for Rust TUIs and the one `ratatui-image` (covers) builds on; it installs the
+  panic hook that gives the terminal back.
 
 - **[`crossterm`](https://docs.rs/crossterm)** -- reads the keyboard and the terminal's size
   changes. Its `event-stream` feature gives an async stream that goes in the same `select!` as the
   daemon's events. It is the backend `ratatui` uses, in the same version, so it adds nothing new.
+
+- **[`ratatui-image`](https://docs.rs/ratatui-image)** -- draws a cover through whichever graphics
+  protocol the terminal actually supports (Kitty, Sixel, iTerm2), detected once at startup
+  (`Picker::from_query_stdio`, called right after entering the alternate screen and before reading
+  terminal events, per its own requirement), with a "halfblocks" fallback (half-height block
+  characters in 24-bit colour) when none is there. Pulled in with `default-features = false,
+  features = ["crossterm"]`: its defaults turn on `chafa-dyn`, which links the C library `libchafa`
+  through `pkg-config` -- a system dependency this project otherwise has none of on the terminal
+  side, and not needed for Kitty, Sixel, iTerm2 or the halfblocks fallback, the four protocols this
+  project actually draws with.
+
+- **[`image`](https://docs.rs/image)** -- decodes the JPEG TIDAL's image CDN serves covers as.
+  Pulled in with `default-features = false, features = ["jpeg"]`: its defaults also bring in, among
+  others, AVIF decoding (`ravif`/`rav1e`, by far the heaviest of them) that this project has no use
+  for, since TIDAL serves covers as JPEG only. (`ratatui-image` itself still turns on `png`, for its
+  iTerm2 encoder; that comes along either way.)
 
 - **[`tokio`](https://docs.rs/tokio)** -- the async runtime. Needed because talking to TIDAL
   (`reqwest`, `tidlers`) is inherently async I/O. The decode+ALSA-write loop, by contrast, is

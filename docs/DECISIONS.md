@@ -275,3 +275,39 @@ every size `phonia_ipc::image::Kind` claims for `AlbumCover` and
 genuinely is not — the size lists are not guesses. `PlaylistCover`'s sizes
 (TIDAL's other clients' own choices) are not yet confirmed the same way,
 for lack of a playlist on this account. (#99, #100)
+
+## 2026-10-01 — Covers: the two new dependencies, pared down, and a PR split adjustment
+
+`ratatui-image` and `image`, added to `phonia-tui` with their defaults
+turned off:
+
+- `ratatui-image`'s own default features (`chafa-dyn`, on by default) link
+  the C library `libchafa` through `pkg-config` — a system dependency this
+  project otherwise has none of on the terminal side, and not needed for
+  any of the four protocols actually drawn with (Kitty, Sixel, iTerm2,
+  halfblocks). Enabled instead: only `crossterm`, the backend this project
+  already uses.
+- `image`'s own defaults bring in several decoders this project has no use
+  for (AVIF's `ravif`/`rav1e` by far the heaviest), since TIDAL serves
+  covers as JPEG only. Enabled instead: only `jpeg`. (`ratatui-image`'s own
+  dependency on `image` separately asks for `png`, unconditionally, for its
+  iTerm2 encoder; Cargo's feature unification means `png` and `flate2` are
+  pulled in by that regardless of what `phonia-tui` itself asks for.)
+
+A clean build of `phonia-tui` with both new dependencies, from nothing:
+about 24 s wall clock on this machine. No ALSA, zbus or keyring dependency
+was pulled in — `cargo tree -p phonia-tui` confirms the TUI's own dependency
+boundary (#19, 2026-09-27) still holds; the one new thing it reaches on its
+own is the network, for the CDN, nothing else.
+
+One deliberate split adjustment from the approved plan: part 3 (this one)
+ships the two dependencies and the fetch/decode/encode pipeline
+(`graphics.rs`, `covers.rs`), fully unit-tested on their own, but does
+**not** wire them into the run loop (the `--covers` flag, querying the
+terminal at startup, the channel a fetch answers on) the way the plan's own
+PR 3 described. There is nothing yet to ask either one for a cover — that
+is part 4 — so wiring them to nothing to exercise live would have been
+speculative, churn to redo once part 4 actually needed something different.
+Folding that wiring into part 4, its first real caller, keeps every PR
+compiling and testing green with no unused plumbing, the same discipline
+already applied throughout #19–#21.

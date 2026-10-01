@@ -50,7 +50,7 @@ desktop keyring, and TOML configuration.
 | #19 | Search (tracks, albums, artists, playlists) | Code complete (PRs #82–#87 merged); **issue left open on GitHub, worth closing by hand** |
 | #20 | Album and artist views, opened from a search result | Closed |
 | #21 | Library: favorite tracks/albums and the user's playlists | Code complete (PRs #95–#98) |
-| #24 | Covers in the terminal (`ratatui-image`) | In progress: catalog ids (PR #99) and IPC/daemon + `phonia_ipc::image::url` (PR #100) merged; the TUI itself (the heavier-dependency part) still to come |
+| #24 | Covers in the terminal (`ratatui-image`) | In progress: catalog ids (PR #99), IPC/daemon + `phonia_ipc::image::url` (PR #100), and the TUI's own dependencies and fetch/decode pipeline (PR #101) merged; nothing draws a cover yet |
 
 The catalog (search, an album, an artist, and now the library) is served by
 the **daemon**, not the TUI process: the TUI depends only on `phonia-ipc`, so
@@ -82,11 +82,17 @@ to be scoped with Opus when their turn comes.
 ## Right now
 
 #21 (library) is done; #24 (covers), the last of Phase 2, is in progress, as
-an approved 7-PR plan: core catalog ids (#99, merged) and IPC/daemon + the
-`phonia_ipc::image::url` helper (#100, merged) are done; the TUI side —
-dependencies (`ratatui-image`, `image`, `reqwest`), terminal protocol
-detection with a fallback, and drawing covers in an album/playlist header,
-an artist page, and the queue's now-playing pane — is parts 3–7, not started.
+an approved 7-PR plan: core catalog ids (#99), IPC/daemon + the
+`phonia_ipc::image::url` helper (#100), and the TUI's new dependencies with
+its terminal-detection and fetch/decode/encode pipeline (#101) are merged —
+with no visible change yet, by design (nothing asks for a cover): what
+actually draws one in an album/playlist header, an artist page, and the
+queue's now-playing pane is parts 4–7. One adjustment from the plan as
+written: wiring the run loop's own cover-fetching (the `--covers` flag,
+querying the terminal at startup, the channel that brings a fetch back) is
+folded into part 4, its first real caller, rather than built ahead of one
+in part 3 — the same "every PR compiles, nothing speculative" rule the rest
+of this project already follows.
 
 The key architectural call: the **TUI fetches and decodes covers itself**,
 straight from TIDAL's public, unauthenticated image CDN; the daemon's only

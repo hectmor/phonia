@@ -9,8 +9,11 @@ description = "The terminal interface of phonia: a client of the daemon"
 anyhow.workspace = true
 crossterm.workspace = true
 futures-util.workspace = true
+image.workspace = true
 phonia-ipc.workspace = true
 ratatui.workspace = true
+ratatui-image.workspace = true
+reqwest.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
