@@ -9,3 +9,7 @@ description = "Wire protocol and client for talking to the phonia daemon"
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+# Only for the ignored, real-CDN test in `image.rs`: never a production dependency of this crate.
+reqwest.workspace = true

@@ -155,6 +155,7 @@ pub fn track_summary(track: &tidal_catalog::Track) -> ipc::TrackSummary {
         album: track.album.as_ref().map(|album| ipc::AlbumRef {
             id: album.id.clone(),
             title: album.title.clone(),
+            cover: album.cover.clone(),
         }),
         duration_ms: track.duration.map(ms),
         explicit: track.explicit,
@@ -182,6 +183,7 @@ pub fn album_summary(album: &tidal_catalog::Album) -> ipc::AlbumSummary {
             tidal_catalog::AlbumKind::Single => ipc::AlbumKind::Single,
         }),
         copyright: album.copyright.clone(),
+        cover: album.cover.clone(),
     }
 }
 
@@ -189,6 +191,7 @@ pub fn artist_summary(artist: &tidal_catalog::Artist) -> ipc::ArtistSummary {
     ipc::ArtistSummary {
         id: artist.id.clone(),
         name: artist.name.clone(),
+        picture: artist.picture.clone(),
     }
 }
 
@@ -200,6 +203,7 @@ pub fn playlist_summary(playlist: &tidal_catalog::Playlist) -> ipc::PlaylistSumm
         description: playlist.description.clone(),
         track_count: playlist.track_count,
         duration_ms: playlist.duration.map(ms),
+        cover: playlist.cover.clone(),
     }
 }
 
@@ -667,5 +671,73 @@ mod tests {
     fn milliseconds_saturate_instead_of_overflowing() {
         assert_eq!(ms(Duration::MAX), u64::MAX);
         assert_eq!(ms(Duration::from_micros(1_999)), 1);
+    }
+
+    #[test]
+    fn cover_and_picture_ids_cross_the_wire_unchanged() {
+        let mut album = tidal_catalog::Album {
+            id: "9".into(),
+            title: "Issues".into(),
+            version: None,
+            artists: vec![],
+            release_date: None,
+            track_count: None,
+            duration: None,
+            explicit: false,
+            quality: None,
+            kind: None,
+            copyright: None,
+            cover: Some("cover-id".into()),
+        };
+        assert_eq!(album_summary(&album).cover.as_deref(), Some("cover-id"));
+        album.cover = None;
+        assert_eq!(album_summary(&album).cover, None, "no cover is none");
+
+        let artist = tidal_catalog::Artist {
+            id: "780".into(),
+            name: "Korn".into(),
+            picture: Some("picture-id".into()),
+        };
+        assert_eq!(
+            artist_summary(&artist).picture.as_deref(),
+            Some("picture-id")
+        );
+
+        let playlist = tidal_catalog::Playlist {
+            id: "p-1".into(),
+            title: "Road trip".into(),
+            creator: None,
+            description: None,
+            track_count: None,
+            duration: None,
+            cover: Some("square-id".into()),
+        };
+        assert_eq!(
+            playlist_summary(&playlist).cover.as_deref(),
+            Some("square-id")
+        );
+
+        let track = tidal_catalog::Track {
+            id: "1".into(),
+            title: "Blind".into(),
+            version: None,
+            artists: vec![],
+            album: Some(tidal_catalog::AlbumRef {
+                id: "9".into(),
+                title: "Issues".into(),
+                cover: Some("cover-id".into()),
+            }),
+            duration: None,
+            explicit: false,
+            track_number: None,
+            volume_number: None,
+            quality: None,
+            streamable: true,
+        };
+        assert_eq!(
+            track_summary(&track).album.unwrap().cover.as_deref(),
+            Some("cover-id"),
+            "a track's embedded album keeps its cover too"
+        );
     }
 }

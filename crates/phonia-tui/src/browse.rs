@@ -251,6 +251,7 @@ mod tests {
             quality: None,
             kind: None,
             copyright: None,
+            cover: None,
         })
     }
 
@@ -321,6 +322,7 @@ mod tests {
                 description: None,
                 track_count: None,
                 duration_ms: None,
+                cover: None,
             })
             .title(),
             "Nu metal"

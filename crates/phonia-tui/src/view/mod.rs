@@ -857,6 +857,7 @@ mod tests {
             album: Some(phonia_ipc::AlbumRef {
                 id: "9".into(),
                 title: "Issues".into(),
+                cover: None,
             }),
             duration_ms: Some(271_000),
             explicit: false,
@@ -892,6 +893,7 @@ mod tests {
                             quality: Some(phonia_ipc::Quality::Hires),
                             kind: None,
                             copyright: None,
+                            cover: None,
                         }],
                         total: 20,
                         offset: 0,
@@ -1054,6 +1056,7 @@ mod tests {
                             quality: None,
                             kind: None,
                             copyright: None,
+                            cover: None,
                         }],
                         total: 1,
                         offset: 0,
@@ -1066,6 +1069,7 @@ mod tests {
                             description: None,
                             track_count: Some(10),
                             duration_ms: None,
+                            cover: None,
                         }],
                         total: 1,
                         offset: 0,
@@ -1318,6 +1322,7 @@ mod tests {
                         items: vec![phonia_ipc::ArtistSummary {
                             id: "780".into(),
                             name: "Korn".into(),
+                            picture: None,
                         }],
                         total: 1,
                         offset: 0,
@@ -1354,6 +1359,7 @@ mod tests {
                     artist: phonia_ipc::ArtistSummary {
                         id: "780".into(),
                         name: "Korn".into(),
+                        picture: None,
                     },
                     bio: Some("A nu metal band.\nMore about it.".into()),
                     top_tracks: phonia_ipc::Page {
@@ -1374,6 +1380,7 @@ mod tests {
                             quality: Some(phonia_ipc::Quality::Hires),
                             kind: None,
                             copyright: None,
+                            cover: None,
                         }],
                         total: 35,
                         offset: 0,

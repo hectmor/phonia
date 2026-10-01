@@ -50,7 +50,7 @@ desktop keyring, and TOML configuration.
 | #19 | Search (tracks, albums, artists, playlists) | Code complete (PRs #82–#87 merged); **issue left open on GitHub, worth closing by hand** |
 | #20 | Album and artist views, opened from a search result | Closed |
 | #21 | Library: favorite tracks/albums and the user's playlists | Code complete (PRs #95–#98) |
-| #24 | Covers in the terminal (`ratatui-image`) | Not started; last of the phase by design (heavier dependency) |
+| #24 | Covers in the terminal (`ratatui-image`) | In progress: catalog ids (PR #99) and IPC/daemon + `phonia_ipc::image::url` (PR #100) merged; the TUI itself (the heavier-dependency part) still to come |
 
 The catalog (search, an album, an artist, and now the library) is served by
 the **daemon**, not the TUI process: the TUI depends only on `phonia-ipc`, so
@@ -81,30 +81,34 @@ to be scoped with Opus when their turn comes.
 
 ## Right now
 
-#21 (library: favorites and playlists) is code complete, its 4 pull requests
-all merged: core catalog methods (#95), IPC/daemon (#96), `phonia ctl
-library` (#97), and the TUI's own Library section (#98), which reuses the
-same view/stack machinery the album and artist views from #20 already have —
-opening a favorite album or a playlist from it works exactly like opening
-one from a search result. The one deliberate difference: `Enter` on a
-favorite track plays just that track rather than queuing the rest of the
-list from there, since a favorites list has no natural order and can run
-into the thousands. This closes out everything in Phase 2 except #24
-(covers), which was always meant to be last. Favorites and playlists are
-fetched with raw HTTP, like search and the album/artist views, since
-`tidlers`' own favorites calls have a parameter-name typo that breaks
-paging; the protocol stayed additive under 1.6 throughout (no version bump
-for the whole of #19-#21). Verified against the real TIDAL API, live against
-a real daemon with `ctl library`, and by driving the real TUI over a pty
-against that daemon: favorite albums came back correctly; this account has
-no favorite tracks or own playlists right now, and `/users/{id}/playlists`
-was confirmed to answer with a real, paged `totalNumberOfItems` that
-`tidlers`' own model doesn't even capture.
+#21 (library) is done; #24 (covers), the last of Phase 2, is in progress, as
+an approved 7-PR plan: core catalog ids (#99, merged) and IPC/daemon + the
+`phonia_ipc::image::url` helper (#100, merged) are done; the TUI side —
+dependencies (`ratatui-image`, `image`, `reqwest`), terminal protocol
+detection with a fallback, and drawing covers in an album/playlist header,
+an artist page, and the queue's now-playing pane — is parts 3–7, not started.
 
-## After #21
+The key architectural call: the **TUI fetches and decodes covers itself**,
+straight from TIDAL's public, unauthenticated image CDN; the daemon's only
+job is to put the right image id (a UUID, not a URL) in what it already
+sends. This refines, rather than reverses, the #19 decision that the catalog
+is served by the daemon: that decision was about owning the *TIDAL session*,
+and the image CDN needs none, while decoding an image for a specific
+terminal's protocol and cell size has to happen wherever it is drawn anyway.
+True color stays a separate follow-up, not part of #24: the interface's
+accent colors are a product decision of their own, distinct from being able
+to show a picture at all. See `docs/DECISIONS.md` for the full reasoning.
 
-#24 (covers) finishes Phase 2. Then Phase 3's remaining issues (#25, #26,
-#28, #30, #31), planned one at a time with Opus as they come up, unless the
+Verified against the real CDN: every size claimed for an album cover and an
+artist picture is genuinely served (and one size larger genuinely is not),
+confirmed against this account's own real cover and picture ids. Playlist
+cover sizes are not yet confirmed the same way, for lack of a playlist on
+this account; they are TIDAL's other clients' own choices, unverified here.
+
+## After #24
+
+Phase 2 closes with #24. Then Phase 3's remaining issues (#25, #26, #28,
+#30, #31), planned one at a time with Opus as they come up, unless the
 person redirects.
 
 ## Conventions this file assumes

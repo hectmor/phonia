@@ -225,3 +225,53 @@ was open, not where in it. The same check now also compares that cursor
 out of), fixed for the library and for search alike; a regression test
 against the search-side case (opening an album, moving within it) is what
 caught it, since it is the code path both sections now share. (#98)
+
+## 2026-10-01 — Covers: the TUI fetches and decodes them itself, from TIDAL's public CDN
+
+Issue #24 (the last of Phase 2) needed a real architectural call before any
+code: does the daemon hand the TUI an image's bytes, or just enough to get
+them itself? Opus's plan, approved as written:
+
+- **TIDAL's image CDN needs no login**, confirmed directly: a plain,
+  unauthenticated GET to `https://resources.tidal.com/images/<id with
+  dashes turned into slashes>/<size>x<size>.jpg` serves a real cover or
+  picture. Only a handful of fixed sizes exist per kind of artwork (not an
+  arbitrary one); asking for any other is a 404/403.
+- **The daemon's only job is the id**, not a URL and not bytes: `Album.cover`,
+  `Artist.picture`, `Playlist.cover` (from TIDAL's `squareImage`, the
+  rectangular `image` is not used) ride along on the wire types that already
+  exist, as plain `Option<String>` ids, additive under protocol 1.6 like
+  everything since #19.
+- **`phonia_ipc::image::url(kind, id, min_px)`** turns an id into the actual
+  URL, picking the smallest of that kind's fixed sizes that is at least
+  `min_px` (or the largest there is, if none is big enough) — a pure
+  function any client can call once it knows what size it needs.
+- **The TUI fetches and decodes the JPEG itself**, rather than the daemon
+  proxying the bytes over the socket. This refines, not reverses, the #19
+  decision that the catalog is served by the daemon: that decision was
+  about owning the *TIDAL session*, so a client never needs one of its own;
+  the image CDN needs no session at all. Meanwhile encoding a cover for a
+  terminal's specific graphics protocol depends on that terminal's cell
+  pixel size, which only the TUI knows — so the `image`/`ratatui-image`
+  dependency has to live there regardless of who fetches the bytes, and a
+  daemon proxy would only add cost (base64 JPEG inside a protocol that has
+  never carried binary payloads, a second network hop, a cache in the
+  daemon) for no real gain. A future MPRIS bridge wants a URL
+  (`mpris:artUrl`) anyway, not bytes, which the id-on-the-wire shape gives
+  for free.
+- **True color stays a separate follow-up, not part of #24.** An image
+  rendered through a real graphics protocol brings its own pixels
+  regardless of the interface's own palette; only the "halfblocks" fallback
+  (no Kitty/Sixel/iTerm2, used only when `COLORTERM` says true color is
+  available) touches that question at all, and only inside the image's own
+  cells. Taking the TUI's *own* accent colors from a cover (TIDAL's
+  `vibrantColor`) changes how the whole interface looks for every album —
+  a product decision of its own, not a dependency of showing a picture.
+
+Verified against the real CDN with this account's own real ids (an album
+cover and an artist picture, both confirmed via the earlier catalog work):
+every size `phonia_ipc::image::Kind` claims for `AlbumCover` and
+`ArtistPicture` is genuinely served, and one size past the largest claimed
+genuinely is not — the size lists are not guesses. `PlaylistCover`'s sizes
+(TIDAL's other clients' own choices) are not yet confirmed the same way,
+for lack of a playlist on this account. (#99, #100)
