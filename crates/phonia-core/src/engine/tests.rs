@@ -600,6 +600,84 @@ fn a_different_format_reopens_the_sink() {
     assert_eq!(h.sink(1).played(), ramp(2_000));
 }
 
+/// A track whose format the device refuses (an unsupported rate, in real life) plays everything
+/// before it in full, is reported as its own `TrackEnded { Failed }` (not silently swallowed, the
+/// bug `#25`/`#26` found: the track never became `self.current`, so nothing else would have known
+/// it existed), and stops the engine like any other failure.
+#[test]
+fn a_track_the_device_refuses_ends_as_failed_and_stops_the_engine() {
+    let mut h = Harness::new(
+        vec![
+            TestTrack::pcm_with("a", 2_000, SPEC_48K),
+            TestTrack::pcm_with("b", 2_000, SPEC_96K),
+        ],
+        FakeSinkFactory::autoplay(),
+    );
+    h.play("a");
+    // Past this point `a`'s own sink has already been opened successfully, so the scripted
+    // failure below can only apply to the next open (`b`'s), not steal `a`'s.
+    h.events_until(is_started);
+    h.sinks
+        .fail_next_open("hw:0,0 (DS2) cannot play 96000 Hz natively");
+
+    let labels = h.labels_until(is_stopped);
+    assert_eq!(
+        labels,
+        [
+            "state:Playing",
+            "ended:a:Completed",
+            "state:Loading",
+            "ended:b:Failed",
+            "error:opening the audio output: hw:0,0 (DS2) cannot play 96000 Hz natively",
+            "state:Stopped",
+        ]
+    );
+    assert_eq!(
+        h.sink(0).played(),
+        ramp(2_000),
+        "a played in full, untouched"
+    );
+    assert_eq!(
+        h.sinks.handles().len(),
+        1,
+        "the refused open never produced a sink"
+    );
+    assert_eq!(
+        h.sinks.release_count(),
+        1,
+        "the card is released once, when the engine stops"
+    );
+}
+
+/// The sharpest form of the bug: the very first track the engine is ever asked to play is
+/// refused. There is no previous track at all, so before the fix neither `self.current` nor
+/// `self.outgoing` held anything `fail()` could report as ended -- the refusal vanished into a
+/// bare `Event::Error` and a `state:Stopped`, with no `TrackEnded` for it whatsoever.
+#[test]
+fn the_very_first_track_the_device_refuses_still_ends_as_failed() {
+    let mut h = Harness::new(
+        vec![TestTrack::pcm("a", 2_000)],
+        FakeSinkFactory::autoplay(),
+    );
+    h.sinks
+        .fail_next_open("hw:0,0 (DS2) cannot play 48000 Hz natively");
+    h.play("a");
+
+    assert_eq!(
+        h.labels_until(is_stopped),
+        [
+            "state:Loading",
+            "ended:a:Failed",
+            "error:opening the audio output: hw:0,0 (DS2) cannot play 48000 Hz natively",
+            "state:Stopped",
+        ]
+    );
+    assert!(
+        h.sinks.handles().is_empty(),
+        "the refused open never produced a sink"
+    );
+}
+
 #[test]
 fn play_with_no_track_asks_the_supplier_and_reports_an_empty_queue() {
     let mut h = Harness::new(vec![], FakeSinkFactory::autoplay());

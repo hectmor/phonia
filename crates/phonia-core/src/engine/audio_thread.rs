@@ -986,8 +986,17 @@ impl AudioThread {
 
         let spec = source.spec();
         let duration = meta.duration.or_else(|| source.duration());
-        if !self.sink.as_ref().is_some_and(|sink| sink.spec() == spec) {
-            self.open_sink(spec)?;
+        if !self.sink.as_ref().is_some_and(|sink| sink.spec() == spec)
+            && let Err(error) = self.open_sink(spec)
+        {
+            // This track never became `self.current`, so `fail()` (which the caller calls with
+            // this error) has no way to know it existed: say so here, before the error leaves,
+            // or a track the device refuses just vanishes with no `TrackEnded` at all.
+            self.emit(Event::TrackEnded {
+                meta,
+                reason: EndReason::Failed,
+            });
+            return Err(error);
         }
 
         self.current = Some(Playing {

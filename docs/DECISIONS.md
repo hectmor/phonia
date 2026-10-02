@@ -637,3 +637,47 @@ threading that label in would mean the `open_pcm`/resolve deduplication
 the plan sketched for part 1, deliberately deferred (see that entry):
 still not needed, since this PR touches none of that resolve/reserve
 boilerplate.
+
+## 2026-10-02 — #25/#26 part 3: a refused track is reported as `TrackEnded`, always
+
+A second real bug the planning investigation found, independent of #25's
+own capability work: `start_track` destructures its `Prepared` into
+`meta`/`source`/etc. and only builds `self.current` (or, on the gapless
+join path, `self.outgoing`) *after* `open_sink` succeeds. When it fails
+instead, `fail()` is the only thing that runs next, and `fail()` only
+knows how to report a track that is `self.current` or `self.outgoing` --
+for a track that never got that far, especially the very first one the
+engine is ever asked to play, neither is set, so the refusal reached
+clients as a bare `Event::Error` with no matching `TrackEnded` at all: the
+track simply vanished, leaving no record that it had ever been attempted.
+
+The fix is narrow and keeps `fail()` itself untouched: `start_track` now
+emits `Event::TrackEnded { meta, reason: Failed }` for its own track right
+where `open_sink` fails, before the error is returned to whichever of its
+two callers (the ordinary `Msg::Loaded` handler, or `start_opened_ahead`
+on the gapless-prefetch path) goes on to call `fail(error)` as before.
+Since this track was never installed as `self.current`/`self.outgoing`,
+`fail()`'s own cleanup can't double-report it -- the two simply don't
+overlap. The event order for this one case becomes `TrackEnded` then
+`Error` (the reverse of `fail()`'s own Error-then-TrackEnded order for a
+track that really was playing), which is harmless: nothing in this
+codebase branches on the relative order of those two events.
+
+Two tests pin this, both against `FakeSinkFactory`'s existing
+`fail_next_open` (no new test hook was needed -- it already fails
+whatever `SinkFactory::open` call comes next, exactly what a device
+refusal looks like from the engine's point of view): a previous track
+playing in full before the next one is refused (confirming the first
+track's own audio and the release count are untouched), and the sharper
+case the bug report singled out, the very first track ever played being
+refused, with no previous track at all. A third scenario the plan asked
+for -- the same refusal, but with the next track already prefetched ahead
+of the first one finishing -- turned out to be unreliable to force
+deterministically through `FakeSinkFactory::autoplay()` (an instantly-played
+fake sink never gives `maybe_prefetch`'s periodic check a chance to run
+before the track ends, so prefetching only ever starts reactively, inside
+`end_of_source` itself, once the current track is already done -- there is
+no way to race it ahead of that from a test): since the fix lives in
+`start_track`, which both the ordinary and the opened-ahead callers already
+share and call identically on failure, the two tests written cover the
+same code without needing to pin that particular timing.
