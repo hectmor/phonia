@@ -77,6 +77,7 @@ pub fn queue_dto(queue: &QueueSnapshot) -> ipc::Queue {
                 source: item.track.source.0.clone(),
                 title: item.track.title.clone(),
                 duration_ms: item.track.duration.map(ms),
+                cover: item.track.cover.clone(),
             })
             .collect(),
         order: queue.order.iter().map(|id| ipc::ItemId(id.0)).collect(),
@@ -245,6 +246,7 @@ pub fn status_dto(
                 title: meta.title.clone(),
                 duration_ms: meta.duration.map(ms),
                 quality: meta.quality.as_ref().map(stream_quality),
+                cover: meta.cover.clone(),
             }
         }),
         spec: status.spec.map(spec),
@@ -333,6 +335,7 @@ pub fn event(event: &engine::Event, queue: &QueueSnapshot) -> ipc::Event {
                 spec: spec(*format),
                 gapless: *gapless,
                 quality: meta.quality.as_ref().map(stream_quality),
+                cover: meta.cover.clone(),
             }
         }
         engine::Event::TrackEnded { meta, reason } => ipc::Event::TrackEnded {
@@ -368,19 +371,23 @@ mod tests {
     use phonia_core::queue::{QueueItem, QueueTrack, Repeat};
 
     fn snapshot() -> QueueSnapshot {
-        let item = |id, source: &str, title: Option<&str>, secs: Option<u64>| QueueItem {
-            id: ItemId(id),
-            track: QueueTrack {
-                source: TrackRef(source.to_string()),
-                title: title.map(str::to_string),
-                duration: secs.map(Duration::from_secs),
-            },
-        };
+        let item =
+            |id, source: &str, title: Option<&str>, secs: Option<u64>, cover: Option<&str>| {
+                QueueItem {
+                    id: ItemId(id),
+                    track: QueueTrack {
+                        source: TrackRef(source.to_string()),
+                        title: title.map(str::to_string),
+                        duration: secs.map(Duration::from_secs),
+                        cover: cover.map(str::to_string),
+                    },
+                }
+            };
         QueueSnapshot {
             version: 3,
             items: vec![
-                item(7, "file:/m/a.flac", Some("a.flac"), Some(215)),
-                item(8, "tidal:1", None, None),
+                item(7, "file:/m/a.flac", Some("a.flac"), Some(215), None),
+                item(8, "tidal:1", None, None, Some("cover-uuid")),
             ],
             order: vec![ItemId(8), ItemId(7)],
             current: Some(ItemId(7)),
@@ -396,7 +403,9 @@ mod tests {
         assert_eq!(dto.items[0].id, ipc::ItemId(7));
         assert_eq!(dto.items[0].source, "file:/m/a.flac");
         assert_eq!(dto.items[0].duration_ms, Some(215_000));
+        assert_eq!(dto.items[0].cover, None);
         assert_eq!(dto.items[1].title, None);
+        assert_eq!(dto.items[1].cover.as_deref(), Some("cover-uuid"));
         assert_eq!(dto.order, [ipc::ItemId(8), ipc::ItemId(7)]);
         assert_eq!(
             (dto.current, dto.shuffle, dto.repeat),
@@ -413,6 +422,7 @@ mod tests {
                 title: Some("a.flac".into()),
                 duration: Some(Duration::from_secs(215)),
                 quality: None,
+                cover: Some("cover-uuid".into()),
             }),
             spec: Some(SourceSpec {
                 sample_rate: 96_000,
@@ -433,6 +443,7 @@ mod tests {
             Some("file:/m/a.flac"),
             "the wire names the source, never the engine's reference"
         );
+        assert_eq!(track.cover.as_deref(), Some("cover-uuid"));
         assert_eq!((dto.position_ms, dto.state), (1_500, ipc::State::Playing));
         assert_eq!(dto.spec.unwrap().sample_rate, 96_000);
         assert_eq!(
@@ -454,6 +465,7 @@ mod tests {
             title: None,
             duration: None,
             quality: Some(delivered),
+            cover: None,
         };
         let started = engine::Event::TrackStarted {
             meta: meta.clone(),
@@ -491,6 +503,7 @@ mod tests {
             title: None,
             duration: None,
             quality: None,
+            cover: None,
         };
         let spec = SourceSpec {
             sample_rate: 96_000,
@@ -538,6 +551,7 @@ mod tests {
             title: None,
             duration: None,
             quality: None,
+            cover: None,
         };
         let event = event(
             &engine::Event::TrackEnded {

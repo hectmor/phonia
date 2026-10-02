@@ -16,6 +16,9 @@ pub struct TrackMeta {
     pub duration: Option<Duration>,
     /// What TIDAL delivered for the track; `None` for a track that isn't streamed.
     pub quality: Option<Delivered>,
+    /// The track's album's cover id (a UUID), to turn into an image URL with
+    /// `phonia_ipc::image::url`; `None` for a local file, or a TIDAL track with no album.
+    pub cover: Option<String>,
 }
 
 /// The quality tier a streamed track was asked for, and the one TIDAL actually gave.

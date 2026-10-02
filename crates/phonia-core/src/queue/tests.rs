@@ -10,6 +10,7 @@ fn track(name: &str) -> QueueTrack {
         source: TrackRef(name.to_string()),
         title: Some(name.to_string()),
         duration: None,
+        cover: None,
     }
 }
 
@@ -583,6 +584,7 @@ fn opening_a_track_fills_in_only_what_was_missing() {
         source: TrackRef("a".into()),
         title: None,
         duration: None,
+        cover: None,
     }]);
     let before = inner.snapshot().version;
 

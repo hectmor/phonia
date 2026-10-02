@@ -29,12 +29,13 @@ pub async fn wait_for_shutdown(signal: &mut watch::Receiver<bool>) {
     let _ = signal.wait_for(|stopping| *stopping).await;
 }
 
-/// A track on its way into the queue: what it is, its title and length if known, and why they
-/// are not known, if they are not.
+/// A track on its way into the queue: what it is, its title, length and cover if known, and why
+/// they are not known, if they are not.
 type Accepted = (
     Source,
     Option<String>,
     Option<std::time::Duration>,
+    Option<String>,
     Option<String>,
 );
 
@@ -745,10 +746,10 @@ impl Daemon {
         for outcome in outcomes {
             match outcome {
                 Outcome::Ready(source, info) => {
-                    accepted.push((source, info.title, info.duration, None))
+                    accepted.push((source, info.title, info.duration, info.cover, None))
                 }
                 Outcome::Unresolved(source, reason) => {
-                    accepted.push((source, None, None, Some(reason)))
+                    accepted.push((source, None, None, None, Some(reason)))
                 }
                 Outcome::Rejected(source, reason) => {
                     rejected.push(ipc::Rejected { source, reason })
@@ -772,10 +773,11 @@ impl Daemon {
         let _serial = self.control_lock.lock().await;
         let tracks: Vec<QueueTrack> = accepted
             .iter()
-            .map(|(source, title, duration, _)| QueueTrack {
+            .map(|(source, title, duration, cover, _)| QueueTrack {
                 source: phonia_core::engine::TrackRef(source.to_wire()),
                 title: title.clone(),
                 duration: *duration,
+                cover: cover.clone(),
             })
             .collect();
         let queue = self.controller.queue();
@@ -784,7 +786,7 @@ impl Daemon {
             AddAt::Next => queue.play_next(tracks),
             AddAt::Index { index } => queue.insert(index, tracks),
         };
-        for (id, (_, _, _, reason)) in ids.iter().zip(&accepted) {
+        for (id, (_, _, _, _, reason)) in ids.iter().zip(&accepted) {
             if let Some(reason) = reason {
                 unresolved_reasons.push(ipc::Unresolved {
                     id: ipc::ItemId(id.0),
@@ -853,7 +855,8 @@ impl Daemon {
                     Some(artist) => format!("{} - {}", artist.name, track.title),
                     None => track.title.clone(),
                 };
-                accepted.push((source, Some(name), track.duration, None));
+                let cover = track.album.as_ref().and_then(|album| album.cover.clone());
+                accepted.push((source, Some(name), track.duration, cover, None));
             } else {
                 rejected.push(ipc::Rejected {
                     source: source.to_wire(),

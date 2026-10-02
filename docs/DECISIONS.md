@@ -381,3 +381,40 @@ regardless of whether the item had a cover id at all (see the entry just
 above) — this one was written to require an actual picture id from the
 start, and `an_artist_with_no_picture_or_with_covers_off_lays_out_as_before`
 pins that it does.
+
+## 2026-10-01 — The now-playing track's cover reaches the wire, ahead of drawing it
+
+Part 6 of 7 carries a cover id for the *track that is actually playing*,
+not just for an opened album, playlist or artist page, all the way from
+TIDAL to the wire — with nothing drawn from it yet (that is part 7). Doing
+this as its own PR, ahead of any TUI rendering code that uses it, follows
+the same "every PR compiles, nothing speculative" rule as folding the run
+loop's wiring into part 4 rather than part 3: the data plumbing and the
+drawing are two independently reviewable, independently testable changes,
+and the plumbing does not need the drawing to exist first to be correct.
+
+The id travels the same path the title and the duration already do:
+`SourceInfo` (what describing a source learns before it plays),
+`TrackMeta` (what the engine reports once it is loaded or playing), and
+`QueueTrack`/`QueueItem` (what the queue remembers about an entry) each
+grew a `cover: Option<String>` field, additive under IPC 1.6 like every
+other field #24 has added. `TidalOpener::describe` and `TidalOpener::open`
+populate it from `tidlers`'s own `Track.album.cover` and
+`phonia_core::catalog::AlbumRef.cover` respectively — the same field
+`phonia-core`'s own catalog types gained in part 1 (2026-10-01, "Covers:
+the TUI fetches and decodes them itself") for album/playlist headers; a
+local file always has `None`.
+`phoniad`'s `queue_add_from` (adding a whole album or playlist at once,
+where the listing already carries each track's album cover) and
+`queue_add` (adding tracks one at a time, resolved through `describe`)
+both fill it the same way title and duration already were — the
+`Accepted` tuple internal to `daemon.rs` grew a matching field rather than
+inventing a second shape for "a track on its way into the queue."
+
+One extra wrinkle this part surfaced: `Queue::open_entry` fills in a
+loaded track's title and duration from what the queue already knew,
+*only if the opener itself did not report one* (`loaded.meta.title =
+loaded.meta.title.or(item.track.title)`, and the same for duration) — a
+track opened fresh always knows its own cover from TIDAL already, so the
+same `.or()` pattern was the natural fit for `cover` too, rather than a
+special case.

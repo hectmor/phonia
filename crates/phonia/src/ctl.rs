@@ -1332,6 +1332,7 @@ mod tests {
             source: format!("file:/m/{id}.flac"),
             title: title.map(str::to_string),
             duration_ms: ms,
+            cover: None,
         };
         Queue {
             version: 1,
@@ -1379,6 +1380,7 @@ mod tests {
                 title: Some("Song".into()),
                 duration_ms: Some(348_680),
                 quality: None,
+                cover: None,
             }),
             spec: Some(Spec {
                 sample_rate: 192_000,
@@ -1725,6 +1727,7 @@ mod tests {
             },
             gapless,
             quality: None,
+            cover: None,
         };
         assert_eq!(
             format_event(&started(false)),
@@ -1755,6 +1758,7 @@ mod tests {
             },
             gapless: true,
             quality: Some(quality),
+            cover: None,
         };
         assert_eq!(
             format_event(&started(fell)),
@@ -1781,6 +1785,7 @@ mod tests {
                     requested: Quality::Hires,
                     delivered: Quality::Lossless,
                 }),
+                cover: None,
             }),
             spec: None,
             position_ms: 0,

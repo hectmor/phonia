@@ -45,6 +45,7 @@ fn status() -> Status {
             title: Some("a.flac".into()),
             duration_ms: Some(215_000),
             quality: None,
+            cover: None,
         }),
         spec: Some(spec()),
         position_ms: 1_234,
@@ -56,7 +57,7 @@ fn status() -> Status {
     }
 }
 
-const STATUS_JSON: &str = r#"{"state":"playing","track":{"item_id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000,"quality":null},"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"position_ms":1234,"duration_ms":215000,"output":{"state":"open"},"route":null,"volume":null,"quality_range":null}"#;
+const STATUS_JSON: &str = r#"{"state":"playing","track":{"item_id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000,"quality":null,"cover":null},"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"position_ms":1234,"duration_ms":215000,"output":{"state":"open"},"route":null,"volume":null,"quality_range":null}"#;
 
 fn queue() -> Queue {
     Queue {
@@ -67,12 +68,14 @@ fn queue() -> Queue {
                 source: "file:/music/a.flac".into(),
                 title: Some("a.flac".into()),
                 duration_ms: Some(215_000),
+                cover: None,
             },
             QueueItem {
                 id: ItemId(8),
                 source: "tidal:233059491".into(),
                 title: None,
                 duration_ms: None,
+                cover: Some("abc123-def4".into()),
             },
         ],
         order: vec![ItemId(8), ItemId(7)],
@@ -82,7 +85,7 @@ fn queue() -> Queue {
     }
 }
 
-const QUEUE_JSON: &str = r#"{"version":5,"items":[{"id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000},{"id":8,"source":"tidal:233059491","title":null,"duration_ms":null}],"order":[8,7],"current":7,"shuffle":true,"repeat":"all"}"#;
+const QUEUE_JSON: &str = r#"{"version":5,"items":[{"id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000,"cover":null},{"id":8,"source":"tidal:233059491","title":null,"duration_ms":null,"cover":"abc123-def4"}],"order":[8,7],"current":7,"shuffle":true,"repeat":"all"}"#;
 
 // ---- requests ------------------------------------------------------------------------------
 
@@ -296,7 +299,7 @@ fn successful_responses() {
         Reply::Ok(Payload::Status(status())),
         &format!(
             r#"{{"type":"response","id":2,"ok":{{"type":"status","state":"playing","track":{},"spec":{},"position_ms":1234,"duration_ms":215000,"output":{{"state":"open"}},"route":null,"volume":null,"quality_range":null}}}}"#,
-            r#"{"item_id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000,"quality":null}"#,
+            r#"{"item_id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000,"quality":null,"cover":null}"#,
             r#"{"sample_rate":96000,"channels":2,"bits_per_sample":24}"#
         ),
     );
@@ -388,8 +391,9 @@ fn events() {
             spec: spec(),
             gapless: false,
             quality: None,
+            cover: Some("cover-uuid".into()),
         },
-        r#"{"type":"event","seq":2,"event":{"type":"track_started","item_id":7,"source":"tidal:1","title":"t","duration_ms":1000,"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"gapless":false,"quality":null}}"#,
+        r#"{"type":"event","seq":2,"event":{"type":"track_started","item_id":7,"source":"tidal:1","title":"t","duration_ms":1000,"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"gapless":false,"quality":null,"cover":"cover-uuid"}}"#,
     );
     event(
         21,
@@ -404,8 +408,9 @@ fn events() {
                 requested: Quality::Hires,
                 delivered: Quality::Lossless,
             }),
+            cover: None,
         },
-        r#"{"type":"event","seq":21,"event":{"type":"track_started","item_id":8,"source":null,"title":null,"duration_ms":null,"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"gapless":true,"quality":{"requested":"hires","delivered":"lossless"}}}"#,
+        r#"{"type":"event","seq":21,"event":{"type":"track_started","item_id":8,"source":null,"title":null,"duration_ms":null,"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"gapless":true,"quality":{"requested":"hires","delivered":"lossless"},"cover":null}}"#,
     );
     event(
         3,

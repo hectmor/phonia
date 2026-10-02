@@ -476,6 +476,7 @@ mod tests {
                 },
                 gapless: false,
                 quality: None,
+                cover: None,
             }),
         );
         update(
@@ -531,12 +532,14 @@ mod tests {
                             source: "file:/a.flac".into(),
                             title: Some("A".into()),
                             duration_ms: Some(65_000),
+                            cover: None,
                         },
                         QueueItem {
                             id: ItemId(2),
                             source: "tidal:9".into(),
                             title: None,
                             duration_ms: None,
+                            cover: None,
                         },
                     ],
                     order: vec![ItemId(2), ItemId(1)],
@@ -655,6 +658,7 @@ mod tests {
                     requested: phonia_ipc::Quality::Hires,
                     delivered: phonia_ipc::Quality::Lossless,
                 }),
+                cover: None,
             }),
         );
         let text = screen(&state, 120, 12);
@@ -715,6 +719,7 @@ mod tests {
                 source: format!("file:/t{n}.flac"),
                 title: Some(format!("Track {n}")),
                 duration_ms: None,
+                cover: None,
             })
             .collect();
         update(

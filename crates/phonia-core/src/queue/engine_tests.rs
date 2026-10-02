@@ -64,6 +64,7 @@ impl TrackOpener for TestOpener {
                 title,
                 duration: None,
                 quality: None,
+                cover: None,
             };
             Ok(match media {
                 Media::Pcm(frames) => LoadedTrack::new(
@@ -102,6 +103,7 @@ fn entry(name: &str) -> QueueTrack {
         source: TrackRef(name.to_string()),
         title: Some(name.to_string()),
         duration: None,
+        cover: None,
     }
 }
 
@@ -269,6 +271,7 @@ fn opening_an_entry_rewrites_the_reference_and_fills_in_what_the_queue_did_not_k
         source: TrackRef("x".into()),
         title: None,
         duration: None,
+        cover: None,
     }]);
 
     let loaded = block_on(queue.open(ids[0].track_ref(), Duration::ZERO)).unwrap();
