@@ -681,3 +681,36 @@ no way to race it ahead of that from a test): since the fix lives in
 `start_track`, which both the ordinary and the opened-ahead callers already
 share and call identically on failure, the two tests written cover the
 same code without needing to pin that particular timing.
+
+## 2026-10-02 — #25/#26 part 4 (last): `phonia devices` shows what a USB DAC claims, passively
+
+The issue's own literal suggestion -- read `/proc/asound/cardN/stream0`
+-- was rejected as the thing that *decides* anything back in part 1 (live
+`HwParams` probing is authoritative and already open for the real
+attempt; `stream0` is USB-only, pre-quirks, and blind to live state), but
+it is still worth showing *somewhere*, for exactly one reason none of the
+probing can match: it is the only way to say anything about a USB DAC's
+capabilities **without opening the device**, so without taking it from
+PipeWire first. `phonia devices` is read-only and already does not touch
+PipeWire for anything else it prints, so it is the natural home.
+
+`output/device.rs` gained a small parser (`parse_advertised`): it reads
+the `Format:`/`Channels:`/`Rates:` lines of each altset under `stream0`'s
+`Playback:` section, stopping at a `Capture:` section if there is one,
+and skipping a `SPECIAL` (DSD) altset -- not a PCM format phonia or TIDAL
+ever asks for. The `Rates:` value is kept as the kernel printed it, not
+parsed into numbers: a continuous range (`8000 - 192000 (continuous)`,
+seen on some devices) needs no special case this way, and `phonia
+devices` never computes anything from this text, only displays it.
+Altsets that report the same channel count and rates (the common USB
+Audio Class shape: one altset per format, otherwise identical) are
+grouped into one line, since that is normally every PCM altset a simple
+DAC exposes -- the real Fosi Audio DS2 fixture this is tested against
+(its actual `stream0`, captured by hand and checked into the test module
+verbatim) collapses to exactly one line, `S16_LE, S24_3LE, S32_LE at
+44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000 (2ch)`,
+confirmed against the real CLI output too.
+
+This closes #25 and #26: all 4 parts of the approved plan are merged.
+Both issues are code-complete; closing them on GitHub is, as always, left
+for the project owner to do by hand once they've seen this.

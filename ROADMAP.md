@@ -67,8 +67,8 @@ done — it is its own product decision, not a leftover.
 |---|---|---|
 | #27 | Gapless playback | Closed (verified bit-exact against real TIDAL over `snd-aloop`) |
 | #29 | Quality tiers, a floor, and automatic fallback | Closed (parts 1–3); an optional part 4 (AAC decode for the lossy tiers) is not started and not blocking |
-| #25 | DAC capability detection | In progress: approved 4-PR plan; parts 1–3 merged (probing, `caps::choose`, precise refusals in `AlsaSink::open`, and the engine reporting a refused track correctly); only the optional part 4 (`phonia devices` shows what a USB DAC advertises) is left |
-| #26 | Per-track sample rate switching | In progress, same plan as #25 (see below) |
+| #25 | DAC capability detection | Code complete (PRs #106–#109, all 4 parts); **issue left open on GitHub, worth closing by hand** |
+| #26 | Per-track sample rate switching | Code complete, same plan and PRs as #25; **issue left open on GitHub, worth closing by hand** |
 | #28 | Signal path indicator in the TUI | Not started |
 | #30 | ReplayGain in shared mode | Not started |
 | #31 | Hardware mixer volume | Not started |
@@ -81,55 +81,67 @@ to be scoped with Opus when their turn comes.
 
 ## Right now
 
-Phase 2 is fully closed (#17–#24, tagged `v0.2.0`). Work has moved to Phase
-3: **#25 (DAC capability detection) and #26 (per-track sample rate
-switching)**, planned together with Opus since they are two sides of one
-mechanism, as an approved 4-PR plan.
+Phase 2 is fully closed (#17–#24, tagged `v0.2.0`). **#25 (DAC capability
+detection) and #26 (per-track sample rate switching) are also done**,
+planned together with Opus since they are two sides of one mechanism, as
+an approved 4-PR plan, all merged (#106–#109).
 
 What the investigation behind that plan found: the "reopen the PCM when a
-track's format changes" mechanics #26 asks for **already exist** at the
+track's format changes" mechanics #26 asks for **already existed** at the
 engine level (`start_track`/`open_sink`/`join_next` in
-`engine/audio_thread.rs`), tested against a fake sink. The real gap is #25:
-today `AlsaSink::open` picks a format by blindly trying a hardcoded priority
-list against the device and asks for the track's exact rate on faith, so an
-unsupported one surfaces as a raw ALSA error instead of a clear refusal, and
-a refused track's failure was never even reported as `TrackEnded` to
-clients (a bug found along the way, fixed in part 3).
+`engine/audio_thread.rs`), tested against a fake sink. The real gap was
+#25: `AlsaSink::open` used to pick a format by blindly trying a hardcoded
+priority list against the device and ask for the track's exact rate on
+faith, so an unsupported one surfaced as a raw ALSA error instead of a
+clear refusal; and a refused track's failure was never even reported as
+`TrackEnded` to clients, a second bug found along the way and fixed in
+part 3.
 
-Approved design: live `HwParams` probing (on the PCM already being opened)
-decides everything, not parsing `/proc/asound/cardN/stream0` as the issue
-literally suggests — `stream0` is USB-only, pre-quirks, and blind to live
-device state (another substream holding the rate, a replugged DAC), so it
-is relegated to a passive, display-only addition to `phonia devices` (part
-4). No capability cache: probing is cheap (microseconds) and a cache would
-go stale in exactly the cases live probing handles for free. The policy
-stays **bit-perfect or refuse** in exclusive mode — shared/PipeWire remains
-the one deliberate, clearly-labelled non-bit-perfect exception, untouched
-by this work — what improves is the refusal *message* (precise: what was
-asked, what the device actually offers), not the policy. See
-`docs/DECISIONS.md` for the full reasoning and the plan's own open
-decisions as the person settled them.
+Approved design: live `HwParams` probing (on the PCM already being
+opened) decides everything, not parsing `/proc/asound/cardN/stream0` as
+the issue literally suggests — `stream0` is USB-only, pre-quirks, and
+blind to live device state (another substream holding the rate, a
+replugged DAC), so it stayed a passive, display-only addition to `phonia
+devices` (part 4) instead. No capability cache: probing is cheap
+(microseconds) and a cache would go stale in exactly the cases live
+probing handles for free. The policy stays **bit-perfect or refuse** in
+exclusive mode — shared/PipeWire remains the one deliberate,
+clearly-labelled non-bit-perfect exception, untouched by this work — what
+improved is the refusal *message* (precise: what was asked, what the
+device actually offers), not the policy. See `docs/DECISIONS.md` for the
+full reasoning and the plan's own open decisions as the person settled
+them.
 
-Part 1 (`output/caps.rs`: pure, unit-tested capability types and probing;
-`phonia probe-device` fixed — it used to report "yes" to everything on a
-`plughw:`/`default` device, since it never disabled automatic resampling),
-part 2 (`caps::choose` picks the tightest lossless container a device
-actually offers at a track's exact rate; `AlsaSink::open` now probes before
-committing anything and refuses precisely, naming what it found, instead of
-surfacing a raw ALSA error; the old hardcoded `pick_format` is gone), and
-part 3 (`start_track` now emits the refused track's own `TrackEnded
-{ Failed }` before the error reaches `fail()` — previously, a track refused
-with nothing playing before it left no trace at all beyond a bare
-`Event::Error`, since neither `self.current` nor `self.outgoing` ever held
-it) are merged. Only the optional part 4 is left: `phonia devices` showing
-what a USB DAC advertises via `stream0`, passively.
+Part 1 added `output/caps.rs` (pure, unit-tested capability types and
+probing) and fixed `phonia probe-device` (it used to report "yes" to
+everything on a `plughw:`/`default` device, since it never disabled
+automatic resampling). Part 2 added `caps::choose`, which picks the
+tightest lossless container a device actually offers at a track's exact
+rate (`AlsaSink::open` now probes before committing anything and refuses
+precisely instead of surfacing a raw ALSA error; the old hardcoded
+`pick_format` is gone). Part 3 fixed `start_track` to emit the refused
+track's own `TrackEnded { Failed }` before the error reaches `fail()` —
+previously, a track refused with nothing playing before it left no trace
+at all beyond a bare `Event::Error`, since neither `self.current` nor
+`self.outgoing` ever held it. Part 4 made `phonia devices` show, for a
+USB card, an `advertises ...` line parsed from `stream0` — what the
+device *claims* in its USB descriptors, before any kernel quirk or real
+negotiation; purely informational, and the one piece that can be read
+without taking the card from PipeWire at all.
 
-Verified against the real Fosi Audio DS2: it accepts every TIDAL rate in
-`S16_LE`, `S24_3LE` and `S32_LE` (not `S24_LE`) — confirmed both via the new
-`probe-device` and a dedicated `#[ignore]`d test, run by hand with the DAC
-freed from PipeWire first. Because of that, the *refusal* path (a rate or
-format this DAC can't do) cannot be exercised against it and is tested with
-fakes instead.
+Verified against the real Fosi Audio DS2 throughout: it accepts every
+TIDAL rate in `S16_LE`, `S24_3LE` and `S32_LE` (not `S24_LE`) — confirmed
+via `probe-device`, the real `stream0` text (captured as part 4's own test
+fixture), and a dedicated `#[ignore]`d test, each run by hand with the DAC
+freed from PipeWire first. Because this DAC accepts everything TIDAL can
+send it, the *refusal* path (a rate or format a device can't do) cannot be
+exercised against it and is tested with fakes instead.
+
+Phase 3 continues with #28 (signal path indicator in the TUI), #30
+(ReplayGain in shared mode) and #31 (hardware mixer volume), planned one
+at a time with Opus as they come up, unless redirected. #25 and #26 are
+code-complete but still open on GitHub (see "Conventions" below) — close
+them by hand when convenient.
 
 ## Conventions this file assumes
 

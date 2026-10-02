@@ -239,9 +239,87 @@ pub fn list(asound: &Path) -> Result<String> {
             card.index,
             if card.usb { ", USB" } else { "" }
         ));
+        // Only a USB device publishes this; HDA and HDMI cards have no stream0 at all. Purely
+        // informational -- read without opening the device, so it costs PipeWire nothing -- never
+        // what a real open negotiates: see `output::alsa::probe` for that.
+        if card.usb
+            && let Ok(stream0) =
+                std::fs::read_to_string(asound.join(format!("card{}/stream0", card.index)))
+        {
+            for line in advertised_lines(&stream0) {
+                lines.push(format!("      advertises {line}"));
+            }
+        }
     }
     lines.push("Or use `auto` for the first USB sound card.".to_string());
     Ok(lines.join("\n"))
+}
+
+/// One format/channel-count combination a USB device's `stream0` says an altset offers, with the
+/// rates it claims for that altset, exactly as the kernel printed them (so a continuous range such
+/// as `8000 - 192000 (continuous)` passes through unchanged, not just a comma list).
+struct Advertised {
+    format: String,
+    channels: String,
+    rates: String,
+}
+
+/// Parses the `Playback:` section of a USB device's `/proc/asound/cardN/stream0` (stopping at a
+/// `Capture:` section, if there is one): one `Format`/`Channels`/`Rates` triple per altset, in the
+/// order they appear. A `SPECIAL` (DSD) altset is skipped -- it is not a PCM format phonia (or
+/// TIDAL) ever asks for. Never used to decide anything: it describes what the device *claims*
+/// before any kernel quirk list or actual negotiation, which `output::alsa::probe` alone decides.
+fn parse_advertised(stream0: &str) -> Vec<Advertised> {
+    let mut found = Vec::new();
+    let (mut format, mut channels) = (None, None);
+    for line in stream0.lines() {
+        let line = line.trim();
+        if line == "Capture:" {
+            break;
+        }
+        if let Some(value) = line.strip_prefix("Format:") {
+            format = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("Channels:") {
+            channels = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("Rates:")
+            && let (Some(format), Some(channels)) = (format.take(), channels.take())
+            && format != "SPECIAL"
+        {
+            found.push(Advertised {
+                format,
+                channels,
+                rates: value.trim().to_string(),
+            });
+        }
+    }
+    found
+}
+
+/// [`parse_advertised`]'s altsets, grouped into one line per distinct (channels, rates) pair --
+/// which, on a real DAC, is normally all of them, since one altset per format at the same rates
+/// and channel count is the common USB Audio Class shape.
+fn advertised_lines(stream0: &str) -> Vec<String> {
+    let mut groups: Vec<(String, String, Vec<String>)> = Vec::new();
+    for Advertised {
+        format,
+        channels,
+        rates,
+    } in parse_advertised(stream0)
+    {
+        match groups
+            .iter_mut()
+            .find(|(c, r, _)| *c == channels && *r == rates)
+        {
+            Some((_, _, formats)) => formats.push(format),
+            None => groups.push((channels, rates, vec![format])),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(channels, rates, formats)| {
+            format!("{} at {rates} ({channels}ch)", formats.join(", "))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -437,5 +515,162 @@ mod tests {
             list(&root).unwrap(),
             "No sound cards with playback were found."
         );
+    }
+
+    // ---- stream0 -------------------------------------------------------------------------------
+
+    /// Captured verbatim from `/proc/asound/card0/stream0` on the Fosi Audio DS2 used to verify
+    /// #25 against real hardware: three PCM altsets (S16_LE, S24_3LE, S32_LE), all at the same
+    /// eight rates, plus a fourth, `SPECIAL` (DSD) one that must be skipped.
+    const DS2_STREAM0: &str = "\
+Speed Dragon Fosi Audio DS2 at usb-0000:00:14.0-1, high speed : USB Audio
+
+Playback:
+  Status: Stop
+  Interface 2
+    Altset 1
+    Format: S16_LE
+    Channels: 2
+    Endpoint: 0x03 (3 OUT) (ASYNC)
+    Rates: 44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000
+    Data packet interval: 125 us
+    Bits: 16
+    Channel map: FL FR
+    Sync Endpoint: 0x84 (4 IN)
+    Sync EP Interface: 2
+    Sync EP Altset: 1
+    Implicit Feedback Mode: No
+  Interface 2
+    Altset 2
+    Format: S24_3LE
+    Channels: 2
+    Endpoint: 0x03 (3 OUT) (ASYNC)
+    Rates: 44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000
+    Data packet interval: 125 us
+    Bits: 24
+    Channel map: FL FR
+    Sync Endpoint: 0x84 (4 IN)
+    Sync EP Interface: 2
+    Sync EP Altset: 2
+    Implicit Feedback Mode: No
+  Interface 2
+    Altset 3
+    Format: S32_LE
+    Channels: 2
+    Endpoint: 0x03 (3 OUT) (ASYNC)
+    Rates: 44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000
+    Data packet interval: 125 us
+    Bits: 32
+    Channel map: FL FR
+    Sync Endpoint: 0x84 (4 IN)
+    Sync EP Interface: 2
+    Sync EP Altset: 3
+    Implicit Feedback Mode: No
+  Interface 2
+    Altset 4
+    Format: SPECIAL
+    Channels: 2
+    Endpoint: 0x03 (3 OUT) (ASYNC)
+    Rates: 44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000
+    Data packet interval: 125 us
+    Bits: 32
+    DSD raw: DOP=0, bitrev=0
+    Channel map: FL FR
+    Sync Endpoint: 0x84 (4 IN)
+    Sync EP Interface: 2
+    Sync EP Altset: 4
+    Implicit Feedback Mode: No";
+
+    #[test]
+    fn the_real_ds2_stream0_parses_to_its_three_pcm_altsets_not_the_dsd_one() {
+        let advertised = parse_advertised(DS2_STREAM0);
+        assert_eq!(advertised.len(), 3, "the SPECIAL (DSD) altset is skipped");
+        assert_eq!(
+            advertised
+                .iter()
+                .map(|a| a.format.as_str())
+                .collect::<Vec<_>>(),
+            ["S16_LE", "S24_3LE", "S32_LE"]
+        );
+        for format in &advertised {
+            assert_eq!(format.channels, "2");
+            assert_eq!(
+                format.rates,
+                "44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000"
+            );
+        }
+    }
+
+    #[test]
+    fn identical_rates_and_channels_are_grouped_into_one_line() {
+        assert_eq!(
+            advertised_lines(DS2_STREAM0),
+            [
+                "S16_LE, S24_3LE, S32_LE at 44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000 (2ch)"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_continuous_rate_range_passes_through_exactly_as_the_kernel_printed_it() {
+        let stream0 = "\
+Some Other DAC : USB Audio
+
+Playback:
+  Status: Stop
+  Interface 1
+    Altset 1
+    Format: S32_LE
+    Channels: 2
+    Rates: 8000 - 192000 (continuous)
+    Bits: 32";
+        assert_eq!(
+            advertised_lines(stream0),
+            ["S32_LE at 8000 - 192000 (continuous) (2ch)"]
+        );
+    }
+
+    #[test]
+    fn parsing_stops_at_a_capture_section() {
+        let stream0 = "\
+Some Webcam Mic : USB Audio
+
+Playback:
+  Interface 1
+    Altset 1
+    Format: S16_LE
+    Channels: 2
+    Rates: 48000
+
+Capture:
+  Interface 2
+    Altset 1
+    Format: S16_LE
+    Channels: 1
+    Rates: 16000";
+        assert_eq!(advertised_lines(stream0), ["S16_LE at 48000 (2ch)"]);
+    }
+
+    #[test]
+    fn an_empty_or_unparseable_stream0_advertises_nothing() {
+        assert!(parse_advertised("").is_empty());
+        assert!(parse_advertised("garbage, not a real stream0 at all").is_empty());
+    }
+
+    #[test]
+    fn phonia_devices_shows_what_a_usb_card_advertises_and_leaves_hda_cards_alone() {
+        let root = asound("stream0");
+        std::fs::write(root.join("card1").join("stream0"), DS2_STREAM0).unwrap();
+        let text = list(&root).unwrap();
+        assert!(
+            text.contains(
+                "      advertises S16_LE, S24_3LE, S32_LE at 44100, 48000, 88200, 96000, \
+                 176400, 192000, 352800, 384000 (2ch)"
+            ),
+            "{text}"
+        );
+        // card0 (NVidia) and card2 (sofhdadsp) are not USB and have no stream0: no such line for
+        // either of them.
+        assert_eq!(text.matches("advertises").count(), 1);
     }
 }

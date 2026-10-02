@@ -107,7 +107,11 @@ chain works with real hardware (a Fosi Audio DS2 during development).
   prints its channel range and, for every rate it accepts (44.1 kHz .. 384 kHz), which lossless
   formats (`S16_LE`, `S24_3LE`, `S24_LE`, `S32_LE`) it accepts *at that exact rate* -- a real USB
   DAC commonly constrains format and rate jointly (24-bit only up to 96 kHz, say), so the two are
-  tested together, not independently (#25).
+  tested together, not independently (#25). `phonia devices` shows something related but weaker,
+  with no device opened and nothing taken from PipeWire: for a USB card, an `advertises ...` line
+  parsed straight from `/proc/asound/cardN/stream0` -- what the device *claims* in its USB
+  descriptors, before any kernel quirk or real negotiation, not what `probe-device`/actual playback
+  found. HDA and HDMI cards have no `stream0` at all, so they get no such line.
 
 All commands are run with `cargo run -p phonia -- <command>`, for example:
 
