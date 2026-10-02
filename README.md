@@ -103,8 +103,11 @@ chain works with real hardware (a Fosi Audio DS2 during development).
   trimmed to the exact frame. Ctrl+C stops playback and releases the DAC.
 
 - **`phonia probe-device [--device <device>]`** -- Opens the given ALSA device in playback mode
-  (without writing anything) and lists which formats (`S16_LE`, `S24_3LE`, `S24_LE`, `S32_LE`)
-  and which rates (44.1 kHz .. 384 kHz) it accepts natively.
+  (without writing anything), disables automatic resampling the same way real playback does, and
+  prints its channel range and, for every rate it accepts (44.1 kHz .. 384 kHz), which lossless
+  formats (`S16_LE`, `S24_3LE`, `S24_LE`, `S32_LE`) it accepts *at that exact rate* -- a real USB
+  DAC commonly constrains format and rate jointly (24-bit only up to 96 kHz, say), so the two are
+  tested together, not independently (#25).
 
 All commands are run with `cargo run -p phonia -- <command>`, for example:
 

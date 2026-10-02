@@ -67,8 +67,8 @@ done — it is its own product decision, not a leftover.
 |---|---|---|
 | #27 | Gapless playback | Closed (verified bit-exact against real TIDAL over `snd-aloop`) |
 | #29 | Quality tiers, a floor, and automatic fallback | Closed (parts 1–3); an optional part 4 (AAC decode for the lossy tiers) is not started and not blocking |
-| #25 | DAC capability detection | Not started |
-| #26 | Per-track sample rate switching | Not started |
+| #25 | DAC capability detection | In progress: approved 4-PR plan; part 1 (real joint rate/format probing, `output/caps.rs`, `probe-device` fixed) merged |
+| #26 | Per-track sample rate switching | In progress, same plan as #25 (see below) |
 | #28 | Signal path indicator in the TUI | Not started |
 | #30 | ReplayGain in shared mode | Not started |
 | #31 | Hardware mixer volume | Not started |
@@ -81,44 +81,49 @@ to be scoped with Opus when their turn comes.
 
 ## Right now
 
-#21 (library) and #24 (covers, the last of Phase 2) are both done: all 7
-parts of #24's approved plan are merged (#99–#105) — core catalog ids,
-IPC/daemon with the `phonia_ipc::image::url` helper, the TUI's dependencies
-and fetch/decode/encode pipeline, an opened album's or playlist's header
-cover, an opened artist's own picture, the now-playing track's cover id
-reaching the wire, and finally that same cover shown above the Queue
-section's own list, with `phonia tui --covers auto|halfblocks|off`
-controlling all of them. The run loop's own wiring (the `--covers` flag,
-querying the terminal at startup, the channel a fetch answers on), which the
-plan as written put in part 3 ahead of any caller, landed instead with part
-4, its first real one — the same "every PR compiles, nothing speculative"
-rule the rest of this project already follows.
+Phase 2 is fully closed (#17–#24, tagged `v0.2.0`). Work has moved to Phase
+3: **#25 (DAC capability detection) and #26 (per-track sample rate
+switching)**, planned together with Opus since they are two sides of one
+mechanism, as an approved 4-PR plan.
 
-Phase 2 is now fully closed, except for #19 and #21 showing open on GitHub
-(both code-complete; close by hand).
+What the investigation behind that plan found: the "reopen the PCM when a
+track's format changes" mechanics #26 asks for **already exist** at the
+engine level (`start_track`/`open_sink`/`join_next` in
+`engine/audio_thread.rs`), tested against a fake sink. The real gap is #25:
+today `AlsaSink::open` picks a format by blindly trying a hardcoded priority
+list against the device and asks for the track's exact rate on faith, so an
+unsupported one surfaces as a raw ALSA error instead of a clear refusal, and
+a refused track's failure was never even reported as `TrackEnded` to
+clients (a bug found along the way, fixed in part 3).
 
-The key architectural call: the **TUI fetches and decodes covers itself**,
-straight from TIDAL's public, unauthenticated image CDN; the daemon's only
-job is to put the right image id (a UUID, not a URL) in what it already
-sends. This refines, rather than reverses, the #19 decision that the catalog
-is served by the daemon: that decision was about owning the *TIDAL session*,
-and the image CDN needs none, while decoding an image for a specific
-terminal's protocol and cell size has to happen wherever it is drawn anyway.
-True color stays a separate follow-up, not part of #24: the interface's
-accent colors are a product decision of their own, distinct from being able
-to show a picture at all. See `docs/DECISIONS.md` for the full reasoning.
+Approved design: live `HwParams` probing (on the PCM already being opened)
+decides everything, not parsing `/proc/asound/cardN/stream0` as the issue
+literally suggests — `stream0` is USB-only, pre-quirks, and blind to live
+device state (another substream holding the rate, a replugged DAC), so it
+is relegated to a passive, display-only addition to `phonia devices` (part
+4). No capability cache: probing is cheap (microseconds) and a cache would
+go stale in exactly the cases live probing handles for free. The policy
+stays **bit-perfect or refuse** in exclusive mode — shared/PipeWire remains
+the one deliberate, clearly-labelled non-bit-perfect exception, untouched
+by this work — what improves is the refusal *message* (precise: what was
+asked, what the device actually offers), not the policy. See
+`docs/DECISIONS.md` for the full reasoning and the plan's own open
+decisions as the person settled them.
 
-Verified against the real CDN: every size claimed for an album cover and an
-artist picture is genuinely served (and one size larger genuinely is not),
-confirmed against this account's own real cover and picture ids. Playlist
-cover sizes are not yet confirmed the same way, for lack of a playlist on
-this account; they are TIDAL's other clients' own choices, unverified here.
+Part 1 (`output/caps.rs`: pure, unit-tested capability types and probing;
+`phonia probe-device` fixed — it used to report "yes" to everything on a
+`plughw:`/`default` device, since it never disabled automatic resampling)
+is merged. Remaining: part 2 (the best format per track, and a precise
+refusal, in `AlsaSink::open`), part 3 (the engine reports a refused track's
+`TrackEnded` correctly), part 4 (`phonia devices` shows what a USB DAC
+advertises via `stream0`, passively).
 
-## After #24
-
-Phase 2 is closed. Next: Phase 3's remaining issues (#25, #26, #28, #30,
-#31), planned one at a time with Opus as they come up, unless the person
-redirects.
+Verified against the real Fosi Audio DS2: it accepts every TIDAL rate in
+`S16_LE`, `S24_3LE` and `S32_LE` (not `S24_LE`) — confirmed both via the new
+`probe-device` and a dedicated `#[ignore]`d test, run by hand with the DAC
+freed from PipeWire first. Because of that, the *refusal* path (a rate or
+format this DAC can't do) cannot be exercised against it and is tested with
+fakes instead.
 
 ## Conventions this file assumes
 

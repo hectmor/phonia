@@ -463,3 +463,117 @@ did.
 
 `#24` is now code-complete: all 7 parts merged (#99–#105). True color
 stays deliberately out of scope, same as every entry above has said.
+
+## 2026-10-02 — #25/#26: live `HwParams` probing, no cache, refuse-not-resample
+
+Phase 2 closed (tagged `v0.2.0`). Opus planned #25 (DAC capability
+detection) and #26 (per-track sample rate switching) together, since a
+read-only investigation first found they are two sides of one mechanism,
+not two independent features — both issues' GitHub bodies were one-liners,
+scoped properly here the same way every Phase 3+ issue is meant to be.
+
+**What already existed, found before any design work started:** the
+engine already reopens the sink whenever a track's `SourceSpec` differs
+from the one currently open (`start_track`/`open_sink`/`join_next` in
+`engine/audio_thread.rs`), tested against `FakeSinkFactory`. So #26's
+literal ask ("reopen the PCM when rate/format changes") was mostly already
+true. Two real gaps were found instead: `AlsaSink::open` picks a format by
+trying a hardcoded priority list against the device and asks for the
+track's exact rate on faith, with no idea beforehand whether either will
+work, so a mismatch surfaces as a raw ALSA `EINVAL` rather than a clear
+refusal (the existing post-hoc "does not support N Hz" read-back check
+almost never fires — `HwParams::set_rate(_, ValueOr::Nearest)` actually
+requests an exact rate under the hood, so the real failure happens
+earlier); and a track whose open failed was never reported to clients as
+`TrackEnded { Failed }`, only as a bare `Event::Error`, which is a bug
+unrelated to either issue's literal ask, found along the way and fixed in
+part 3.
+
+**The design, approved as follows:**
+
+- **Live `HwParams` probing, on the PCM already being opened, decides
+  everything** — not parsing `/proc/asound/cardN/stream0` as #25's own
+  wording suggests. `stream0` is USB-only (HDA and HDMI cards have none),
+  describes the device before kernel quirks are applied, and knows nothing
+  about live state (another substream holding the rate, a DAC replugged as
+  a different model); live probing is exactly what ALSA will enforce on
+  this open, costs on the order of microseconds, and needs no extra
+  reservation since the PCM is already open for the real attempt. `stream0`
+  is kept as a passive, read-without-opening-the-device extra (part 4,
+  `phonia devices`), since it is the only way to show *something* about a
+  USB DAC's capabilities without taking it from PipeWire first — it never
+  drives a decision.
+- **No persisted or cross-open capability cache.** A cache would only help
+  an engine pre-check or a closed-device display, and it would go stale in
+  exactly the cases live probing handles for free (a replug, a different
+  DAC with the same configured id, a rate another substream has locked).
+  Probing at daemon startup was also rejected: it would mean reserving the
+  DAC from the desktop before anything needs to play, which contradicts
+  the 2026-09-23 "given back, not held hostage" reservation decision.
+- **No engine-level pre-check either** (a `SinkFactory::check(spec)` a
+  prefetched track's readiness could consult before committing to it was
+  considered and rejected): the outcome would be identical to refusing
+  inside `AlsaSink::open` itself (the current track still plays to its end,
+  the next one is still refused), it would need the cache just rejected,
+  and it adds a second path that could disagree with the real open. The
+  only real gain, an earlier warning, belongs with #28 if anyone wants it.
+- **The policy stays bit-perfect-or-refuse in exclusive mode.** Padding a
+  source into a wider lossless container (16-bit into `S24_3LE`/`S32LE`,
+  which already happened for 24-into-32) is not resampling and is fine;
+  generalized here to "any container with at least as many significant
+  bits as the source," which also makes a 20-bit FLAC playable on more
+  DACs. Changing the *rate*, or truncating *depth*, is not attempted —
+  shared mode remains the one deliberate, clearly-labelled exception, and
+  is out of scope for both issues entirely (`SharedSinkFactory` already
+  lets PipeWire resample to whatever the real sink runs at, and always
+  reports itself as not bit-perfect). What improves is the refusal
+  *message*: precise, informed by what the device was just found to
+  accept, naming the shared-mode escape hatch, instead of a raw ALSA
+  errno or a silent wrong-rate guess.
+- **A refused track stops playback**, like every other failure today,
+  rather than skipping to the next queue entry — skipping would need loop
+  guards against `repeat: one` and against a queue where every remaining
+  track is unplayable on this DAC, which stopping avoids needing at all.
+- **`catalog.rs`'s `bit_perfect: true` for every exclusive card stays as
+  it is.** Under refuse-not-resample, an exclusive card genuinely either
+  plays bit-perfect or does not play at all, so the flag already describes
+  that route honestly; there is no way to measure it passively without
+  taking the card from PipeWire, so a doc comment is the only change.
+  Separately, the person noted a future product wish for phonia to play on
+  any output device, bit-perfect only once a real DAC is actually in use —
+  which this project's shared/exclusive split already is; worth revisiting
+  if an "automatic output selection" issue is ever filed, but it changes
+  nothing here.
+- **No IPC changes in #25/#26.** Device capabilities and a structured
+  "unsupported format" error code are left for #28 (signal path indicator
+  in the TUI), the natural seam: `AlsaSink` will hold its probed
+  `Capabilities`, so `report()` can attach them to `SinkReport` once #28
+  wants to show them.
+
+**PR split (4 parts, all approved up front, folded into the plan rather
+than discovered part by part the way #24's was — the investigation this
+time was thorough enough that no mid-plan deviation was expected):** part
+1, `output/caps.rs` (pure types: `SampleFormat`, `Capabilities`,
+`probe_with`) plus a real `probe` in `output/alsa.rs` and `probe-device`
+rewritten on top of it (also fixing it to disable resampling before
+probing, which it never did before — on a `plughw:`/`default` device it
+was reporting "yes" to everything, since the plug layer was silently
+converting under it); no playback behavior change. Part 2: `caps::choose`
+and a typed `Unsupported` error, `AlsaSink::open` rewritten to probe
+before committing hw_params and refuse precisely when nothing fits (the
+old hardcoded `pick_format` retired). Part 3: the engine emits
+`TrackEnded { Failed }` for a track whose open failed (the bug above).
+Part 4: `phonia devices` gains a passive per-USB-card line parsed from
+`stream0`.
+
+**Verification:** the development machine's Fosi Audio DS2 accepts every
+rate TIDAL serves in `S16_LE`, `S24_3LE` and `S32_LE` (not `S24_LE`) —
+confirmed two ways, both while the DAC was freed from PipeWire by hand
+(`pactl set-card-profile ... off`, restored after): the rewritten
+`phonia probe-device` CLI, and a new `#[ignore]`d test
+(`hardware_capabilities`, following the existing `hardware_pause_resume_*`
+test's own pattern exactly — `PHONIA_TEST_DEVICE`, run by hand, never in
+CI). Because this DAC accepts everything TIDAL can send it, the *refusal*
+path cannot be exercised against real hardware and is covered by unit
+tests (`caps.rs`'s own suite, joint rate/format constraints modelled with
+fake closures) and, in part 3, engine tests against a refusing fake sink.
