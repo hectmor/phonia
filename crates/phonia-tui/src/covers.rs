@@ -178,15 +178,14 @@ pub struct Wanted {
     pub cells: Size,
 }
 
-/// Which cover, if any, the main panel's current header wants, given its own area. `None` when
-/// there is no picker (covers off, or none detected), nothing open with a cover to show (an
-/// artist page, or nothing open, wants none — later parts of #24 add those), or `header_area` is
-/// too small to fit one.
+/// Which cover, if any, the main panel's current header or picture wants, given its own area.
+/// `None` when there is no picker (covers off, or none detected), nothing open with a cover to
+/// show, or `header_area` is too small to fit one.
 pub fn wanted(state: &app::State, covers: &Covers, header_area: Rect) -> Option<Wanted> {
     let picker = covers.picker()?;
-    let header = state.open_header()?;
+    let (kind, id) = state.open_cover()?;
     let cells = cover_size(header_area, picker.font_size())?;
-    let url = cover_url(header, cells, picker.font_size())?;
+    let url = url_at(kind, id, cells, picker.font_size())?;
     Some(Wanted { url, cells })
 }
 
@@ -197,6 +196,25 @@ pub fn cover_url(header: &Header, cells: Size, font_size: FontSize) -> Option<St
         Header::Album(_) => phonia_ipc::image::Kind::AlbumCover,
         Header::Playlist(_) => phonia_ipc::image::Kind::PlaylistCover,
     };
+    url_at(kind, id, cells, font_size)
+}
+
+/// The URL for an artist's `picture`, at a size that fits `cells`, if there is one at all.
+pub fn picture_url(picture: Option<&str>, cells: Size, font_size: FontSize) -> Option<String> {
+    url_at(
+        phonia_ipc::image::Kind::ArtistPicture,
+        picture?,
+        cells,
+        font_size,
+    )
+}
+
+fn url_at(
+    kind: phonia_ipc::image::Kind,
+    id: &str,
+    cells: Size,
+    font_size: FontSize,
+) -> Option<String> {
     let min_px = u32::from(cells.width) * u32::from(font_size.width);
     phonia_ipc::image::url(kind, id, min_px)
 }
@@ -502,6 +520,52 @@ mod tests {
         assert_eq!(
             found.url,
             cover_url(&album_header(Some(COVER_ID)), found.cells, font_size()).unwrap()
+        );
+    }
+
+    #[test]
+    fn an_artists_picture_is_its_own_kind_distinct_from_an_albums_cover() {
+        let cells = Size::new(1, 1);
+        let found_picture = picture_url(Some(COVER_ID), cells, font_size()).unwrap();
+        let found_album = cover_url(&album_header(Some(COVER_ID)), cells, font_size()).unwrap();
+        // ArtistPicture has no 80px size; AlbumCover does: the same id, the same cells, two
+        // different URLs, because they come from two different kinds' size tables.
+        assert!(found_picture.ends_with("160x160.jpg"), "{found_picture}");
+        assert!(found_album.ends_with("80x80.jpg"), "{found_album}");
+        assert_eq!(picture_url(None, cells, font_size()), None);
+    }
+
+    /// `state`, on the Search section, with an artist (with or without a picture) open on top of
+    /// its stack.
+    fn opened_artist(picture: Option<&str>) -> app::State {
+        use crate::browse::{ArtistView, View};
+        let mut state = app::State::default();
+        state.sidebar.select(1, app::Section::ALL.len()); // Search
+        state.search_views.push(
+            0,
+            View::Artist(ArtistView::new(
+                "780".into(),
+                "Korn".into(),
+                picture.map(str::to_string),
+            )),
+        );
+        state
+    }
+
+    #[test]
+    fn wanted_also_names_an_open_artists_picture() {
+        let covers = Covers::new(Some(Picker::halfblocks()));
+        let area = Rect::new(0, 0, 100, 30);
+        let found = wanted(&opened_artist(Some(COVER_ID)), &covers, area).unwrap();
+        assert_eq!(found.cells, cover_size(area, font_size()).unwrap());
+        assert_eq!(
+            found.url,
+            picture_url(Some(COVER_ID), found.cells, font_size()).unwrap()
+        );
+        assert_eq!(
+            wanted(&opened_artist(None), &covers, area),
+            None,
+            "no picture: nothing wanted"
         );
     }
 }

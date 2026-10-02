@@ -1569,6 +1569,107 @@ mod tests {
     }
 
     #[test]
+    fn an_artists_picture_reserves_room_beside_the_header_and_draws_once_its_ready() {
+        use crate::browse::{ArtistView, View};
+        use crate::covers::{self, Outcome};
+        use ratatui_image::Resize;
+        use ratatui_image::picker::Picker;
+
+        let mut state = State::default();
+        press(&mut state, '2'); // Search
+        state.search_views.push(
+            0,
+            View::Artist(ArtistView::new(
+                "780".into(),
+                "Korn".into(),
+                Some("ca8a29d3-efcd-4cd2-8dea-a376e1c64b1e".into()),
+            )),
+        );
+
+        let (width, height) = (100, 30);
+        let theme = Theme::new(false);
+        let main = areas(Rect::new(0, 0, width, height)).main;
+        let inner = panel("x", false, &theme).inner(main);
+        let picker = Picker::halfblocks();
+        let cells = covers::cover_size(inner, picker.font_size()).unwrap();
+        let url = covers::picture_url(
+            Some("ca8a29d3-efcd-4cd2-8dea-a376e1c64b1e"),
+            cells,
+            picker.font_size(),
+        )
+        .unwrap();
+
+        let mut covers = Covers::new(Some(picker.clone()));
+        covers.start(&url);
+        let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            u32::from(cells.width) * 10,
+            u32::from(cells.height) * 20,
+            image::Rgb([20, 20, 220]),
+        ));
+        let protocol = picker
+            .new_protocol(image, cells, Resize::default())
+            .unwrap();
+        covers.finish(url, Outcome::Ready(protocol));
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| draw(&state, &theme, &covers, frame))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        let drawn = (inner.y..inner.y + cells.height).any(|y| {
+            (inner.x..inner.x + cells.width).any(|x| {
+                let style = buffer[(x, y)].style();
+                style.fg.is_some() || style.bg.is_some()
+            })
+        });
+        assert!(drawn, "no picture pixels found in the reserved area");
+
+        let text = (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Korn"), "{text}");
+    }
+
+    #[test]
+    fn an_artist_with_no_picture_or_with_covers_off_lays_out_as_before() {
+        use crate::browse::{ArtistView, View};
+
+        let with_picture = |picture: Option<&str>| {
+            let mut state = State::default();
+            press(&mut state, '2');
+            state.search_views.push(
+                0,
+                View::Artist(ArtistView::new(
+                    "780".into(),
+                    "Korn".into(),
+                    picture.map(str::to_string),
+                )),
+            );
+            state
+        };
+        let no_picture = screen_with(
+            &with_picture(None),
+            &Covers::new(Some(ratatui_image::picker::Picker::halfblocks())),
+            100,
+            30,
+        );
+        let covers_off = screen_with(
+            &with_picture(Some("ca8a29d3-efcd-4cd2-8dea-a376e1c64b1e")),
+            &Covers::disabled(),
+            100,
+            30,
+        );
+        assert_eq!(no_picture, screen(&with_picture(None), 100, 30));
+        assert_eq!(covers_off, screen(&with_picture(Some("x")), 100, 30));
+    }
+
+    #[test]
     fn switching_the_artists_tab_shows_its_albums() {
         let mut state = open_artist_view();
         press(&mut state, ']');

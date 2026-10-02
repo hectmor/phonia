@@ -23,7 +23,7 @@ pub fn draw(
 ) {
     match stack.top() {
         Some(View::TrackList(view)) => draw_track_list(state, view, theme, covers, frame, area),
-        Some(View::Artist(view)) => draw_artist(state, view, theme, frame, area),
+        Some(View::Artist(view)) => draw_artist(state, view, theme, covers, frame, area),
         None => {}
     }
 }
@@ -164,14 +164,51 @@ fn row_line<'a>(text: String, selected: bool, focused: bool, dim: bool, theme: &
     Line::styled(text, style)
 }
 
-fn draw_artist(state: &State, view: &ArtistView, theme: &Theme, frame: &mut Frame, area: Rect) {
+fn draw_artist(
+    state: &State,
+    view: &ArtistView,
+    theme: &Theme,
+    covers: &Covers,
+    frame: &mut Frame,
+    area: Rect,
+) {
     let header = artist_header_lines(view, theme);
-    let [header_area, tabs_area, list_area] = Layout::vertical([
-        Constraint::Length(header.len() as u16),
-        Constraint::Length(1),
-        Constraint::Min(0),
-    ])
-    .areas(area);
+    // Same rule as an album's or a playlist's header (see `draw_track_list`): reserved only when
+    // a picture could actually show here, never on whether it has arrived yet. The tabs stay full
+    // width, under the picture and the text alike.
+    let reserved = covers.picker().and_then(|picker| {
+        let cells = covers::cover_size(area, picker.font_size())?;
+        let url = covers::picture_url(view.picture.as_deref(), cells, picker.font_size())?;
+        Some((url, cells))
+    });
+    let (cover_area, header_area, tabs_area, list_area) = match reserved {
+        Some((url, cells)) => {
+            let [top, tabs_area, list_area] = Layout::vertical([
+                Constraint::Length(cells.height),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .areas(area);
+            let [cover_area, header_area] =
+                Layout::horizontal([Constraint::Length(cells.width), Constraint::Min(0)])
+                    .areas(top);
+            (Some((cover_area, url)), header_area, tabs_area, list_area)
+        }
+        None => {
+            let [header_area, tabs_area, list_area] = Layout::vertical([
+                Constraint::Length(header.len() as u16),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .areas(area);
+            (None, header_area, tabs_area, list_area)
+        }
+    };
+    if let Some((cover_area, url)) = &cover_area
+        && let Some(protocol) = covers.ready(url)
+    {
+        frame.render_widget(Image::new(protocol), *cover_area);
+    }
     frame.render_widget(Paragraph::new(header), header_area);
     if view.phase != Phase::Loading {
         frame.render_widget(Paragraph::new(tabs_line(view, theme)), tabs_area);

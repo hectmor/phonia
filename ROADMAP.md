@@ -50,7 +50,7 @@ desktop keyring, and TOML configuration.
 | #19 | Search (tracks, albums, artists, playlists) | Code complete (PRs #82–#87 merged); **issue left open on GitHub, worth closing by hand** |
 | #20 | Album and artist views, opened from a search result | Closed |
 | #21 | Library: favorite tracks/albums and the user's playlists | Code complete (PRs #95–#98) |
-| #24 | Covers in the terminal (`ratatui-image`) | In progress: catalog ids (#99), IPC/daemon (#100), the fetch/decode pipeline (#101), and the album/playlist header cover with `--covers` (#102) merged; the artist page and the queue's now-playing pane are left |
+| #24 | Covers in the terminal (`ratatui-image`) | In progress: catalog ids, IPC/daemon, the fetch/decode pipeline, the album/playlist header cover with `--covers` (#99–#102), and an artist's own picture (#103) merged; only the queue's now-playing pane is left |
 
 The catalog (search, an album, an artist, and now the library) is served by
 the **daemon**, not the TUI process: the TUI depends only on `phonia-ipc`, so
@@ -82,17 +82,19 @@ to be scoped with Opus when their turn comes.
 ## Right now
 
 #21 (library) is done; #24 (covers), the last of Phase 2, is in progress, as
-an approved 7-PR plan: core catalog ids (#99), IPC/daemon with the
-`phonia_ipc::image::url` helper (#100), the TUI's dependencies and
-fetch/decode/encode pipeline (#101), and the first visible part — an opened
-album's or a playlist's header shows its cover, with `phonia tui --covers
-auto|halfblocks|off` (#102) — are merged. What's left: the same cover on an
-artist page, and on the queue's now-playing pane (parts 5–7). The run loop's
-own wiring (the `--covers` flag, querying the terminal at startup, the
-channel a fetch answers on), which the plan as written put in part 3 ahead
-of any caller, landed instead with part 4, its first real one — the same
-"every PR compiles, nothing speculative" rule the rest of this project
-already follows.
+an approved 7-PR plan: core catalog ids, IPC/daemon with the
+`phonia_ipc::image::url` helper, the TUI's dependencies and
+fetch/decode/encode pipeline, the first visible part — an opened album's or
+a playlist's header shows its cover, with `phonia tui --covers
+auto|halfblocks|off` — and an opened artist's own picture, the same way
+(#99–#103), are merged. What's left: the same cover on the queue's
+now-playing pane (parts 6–7, now that the data to carry a track's own cover
+there is the only piece still missing). The run loop's own wiring (the
+`--covers` flag, querying the terminal at startup, the channel a fetch
+answers on), which the plan as written put in part 3 ahead of any caller,
+landed instead with part 4, its first real one — the same "every PR
+compiles, nothing speculative" rule the rest of this project already
+follows.
 
 The key architectural call: the **TUI fetches and decodes covers itself**,
 straight from TIDAL's public, unauthenticated image CDN; the daemon's only

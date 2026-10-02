@@ -73,10 +73,11 @@ chain works with real hardware (a Fosi Audio DS2 during development).
   track inside an opened list behaves elsewhere: `Enter` plays just that one track rather than
   queuing the rest of the list from there, since a list of favorites has no natural order and can
   run into the thousands. **`--covers auto|halfblocks|off`** (default `auto`) controls its covers
-  (#24): an opened album's or playlist's header shows its cover beside its title and copyright, at
-  whatever size fits (a third of the panel's height, square in pixels, never shown at all if the
-  panel is too small or the item has none), through a real graphics protocol (Kitty, Sixel,
-  iTerm2) when the terminal has one; `halfblocks` (24-bit colour, `▀`/`▄` characters) only when the
+  (#24): an opened album's or playlist's header, and an opened artist's own page, show their cover
+  or picture beside their text (the artist's tabs stay full width, under both), at whatever size
+  fits (a third of the panel's height, square in pixels, never shown at all if the panel is too
+  small or the item has none), through a real graphics protocol (Kitty, Sixel, iTerm2) when the
+  terminal has one; `halfblocks` (24-bit colour, `▀`/`▄` characters) only when the
   terminal says it has true colour, so `theme.rs`'s own 16-ANSI-colours rule is never broken by
   accident; with neither, no cover shows, rather than one that looks wrong. A cover is fetched
   straight from TIDAL's public image CDN, which needs no TIDAL session, so this is the one thing

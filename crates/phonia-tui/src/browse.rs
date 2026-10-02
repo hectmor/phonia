@@ -112,6 +112,10 @@ impl ArtistTab {
 pub struct ArtistView {
     pub id: String,
     pub name: String,
+    /// TIDAL's picture id (a UUID), to turn into an image URL with `phonia_ipc::image::url`;
+    /// known from the result the view was opened from, so it shows before anything has loaded,
+    /// the same as the name. Many artists have none.
+    pub picture: Option<String>,
     /// Plain text; absent when TIDAL has nothing to say, or once the artist has loaded if
     /// fetching it failed (a nicety, not worth failing the rest of the page over).
     pub bio: Option<String>,
@@ -123,12 +127,13 @@ pub struct ArtistView {
 }
 
 impl ArtistView {
-    /// `name` is already known from the result the view was opened from, so it (and the title)
-    /// show before anything has loaded.
-    pub fn new(id: String, name: String) -> Self {
+    /// `name` and `picture` are already known from the result the view was opened from, so they
+    /// (and the title) show before anything has loaded.
+    pub fn new(id: String, name: String, picture: Option<String>) -> Self {
         Self {
             id,
             name,
+            picture,
             bio: None,
             phase: Phase::Loading,
             tab: ArtistTab::default(),
@@ -272,7 +277,7 @@ mod tests {
     }
 
     fn artist_view(id: &str, name: &str) -> View {
-        View::Artist(ArtistView::new(id.into(), name.into()))
+        View::Artist(ArtistView::new(id.into(), name.into(), None))
     }
 
     #[test]
@@ -361,7 +366,7 @@ mod tests {
 
     #[test]
     fn an_artist_views_current_list_follows_its_tab() {
-        let mut view = ArtistView::new("780".into(), "Korn".into());
+        let mut view = ArtistView::new("780".into(), "Korn".into(), None);
         assert!(matches!(view.tracks_or_albums(), ListRef::Tracks(_)));
         view.tab = ArtistTab::Albums;
         assert!(matches!(view.tracks_or_albums(), ListRef::Albums(_)));

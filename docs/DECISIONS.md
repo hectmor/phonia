@@ -353,3 +353,31 @@ there. A few decisions this needed:
   threading the exact bordered, inner area out of the view layer into the
   run loop: close enough to pick a sane request size, not required to be
   exact, and avoids a second, parallel way to compute layout.
+
+## 2026-10-01 — The second cover: an artist's picture, and generalizing "what has a cover"
+
+An opened artist's page shows its picture the same way an opened album's or
+playlist's header shows its cover — same reservation rule, same fallback —
+but an artist is not a `Header` (only an album or a playlist is), so
+deciding "what cover does the thing on top of the stack have" had to stop
+being header-specific: `State::open_header() -> Option<&Header>` became
+`State::open_cover() -> Option<(image::Kind, &str)>`, which an `ArtistView`
+answers from its own new `picture` field (known from the search result that
+opened it, the same way its name already was, and refreshed once the full
+artist loads) and a `TrackListView` still answers from its `Header`. The
+drawing side (`view/browse.rs`) is unaffected, since it already had the
+specific view in hand either way; only `covers::wanted`, which has to work
+from `app::State` alone before anything is drawn, needed the more general
+shape.
+
+The artist page's tabs row stays full width, under the picture and the
+header text alike, rather than squeezed beside the picture the way the
+header text is: a navigation row split in two beside an image would read
+oddly, where an album's copyright and track count reading next to its own
+cover does not.
+
+The album cover's own first draft reserved space whenever a picker existed,
+regardless of whether the item had a cover id at all (see the entry just
+above) — this one was written to require an actual picture id from the
+start, and `an_artist_with_no_picture_or_with_covers_off_lays_out_as_before`
+pins that it does.
