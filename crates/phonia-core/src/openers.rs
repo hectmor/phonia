@@ -79,6 +79,9 @@ impl Source {
 pub struct SourceInfo {
     pub title: Option<String>,
     pub duration: Option<Duration>,
+    /// The track's album's cover id (a UUID); `None` for a local file, or a TIDAL track with no
+    /// album.
+    pub cover: Option<String>,
 }
 
 /// Why a source could not be described.
@@ -125,6 +128,7 @@ impl FileOpener {
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned()),
                 duration: decoder.duration(),
+                cover: None,
             })
         })
         .await
@@ -144,6 +148,7 @@ impl TrackOpener for FileOpener {
                     .map(|name| name.to_string_lossy().into_owned()),
                 duration: None,
                 quality: None,
+                cover: None,
             };
             let extension = path
                 .extension()
@@ -268,6 +273,7 @@ impl TidalOpener {
             Ok(track) => Ok(SourceInfo {
                 title: Some(format!("{} - {}", track.artist.name, track.title)),
                 duration: Some(Duration::from_secs(track.duration)),
+                cover: track.album.and_then(|album| album.cover),
             }),
             Err(error) => Err(classify_track_error(id, &error)),
         }
@@ -359,6 +365,7 @@ impl TrackOpener for TidalOpener {
                 title: None,
                 duration: None,
                 quality: Some(quality),
+                cover: None,
             };
             Ok(match info.manifest {
                 ManifestKind::Dash(dash) => {

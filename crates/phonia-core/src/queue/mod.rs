@@ -51,6 +51,9 @@ pub struct QueueTrack {
     pub source: TrackRef,
     pub title: Option<String>,
     pub duration: Option<Duration>,
+    /// The track's album's cover id (a UUID); `None` for a local file, or a TIDAL track with no
+    /// album.
+    pub cover: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -236,6 +239,7 @@ impl Queue {
             loaded.meta.track = id.track_ref();
             loaded.meta.title = loaded.meta.title.or(item.track.title);
             loaded.meta.duration = loaded.meta.duration.or(item.track.duration);
+            loaded.meta.cover = loaded.meta.cover.or(item.track.cover);
             if let Some(queue) = me.upgrade() {
                 queue.record_meta(id, &loaded.meta);
             }

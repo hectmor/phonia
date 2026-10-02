@@ -643,6 +643,7 @@ fn on_daemon_event(state: &mut State, event: Event) -> Effects {
             duration_ms,
             spec,
             quality,
+            cover,
             ..
         } => {
             set_status(state, |status| {
@@ -652,6 +653,7 @@ fn on_daemon_event(state: &mut State, event: Event) -> Effects {
                     title,
                     duration_ms,
                     quality,
+                    cover,
                 });
                 status.spec = Some(spec);
             });
@@ -2419,6 +2421,7 @@ mod tests {
                 source: format!("file:/t{n}.flac"),
                 title: None,
                 duration_ms: None,
+                cover: None,
             })
             .collect();
         let mut queue = queue();

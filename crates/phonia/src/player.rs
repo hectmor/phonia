@@ -433,6 +433,7 @@ mod tests {
                     source: TrackRef(format!("/music/{title}.flac")),
                     title: Some(title.to_string()),
                     duration: None,
+                    cover: None,
                 },
             })
             .collect();

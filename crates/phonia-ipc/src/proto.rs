@@ -409,6 +409,10 @@ pub enum Event {
         /// What TIDAL delivered, for a track streamed from TIDAL (since 1.5).
         #[serde(default)]
         quality: Option<StreamQuality>,
+        /// The track's album's cover id, to turn into a URL with [`crate::image::url`] (since
+        /// 1.6).
+        #[serde(default)]
+        cover: Option<String>,
     },
     TrackEnded {
         item_id: Option<ItemId>,

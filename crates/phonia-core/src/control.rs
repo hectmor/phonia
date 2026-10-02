@@ -121,6 +121,7 @@ mod tests {
                     title: None,
                     duration: None,
                     quality: None,
+                    cover: None,
                 };
                 Ok(LoadedTrack::new(
                     meta,
@@ -138,6 +139,7 @@ mod tests {
             source: TrackRef(frames.to_string()),
             title: Some(title.to_string()),
             duration: None,
+            cover: None,
         }
     }
 

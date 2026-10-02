@@ -205,8 +205,9 @@ gapless = true          # join a track to the next one of the same format with n
 - **Cover art**: albums, playlists and artists each carry an opaque TIDAL image id (`cover`/`picture`
   in the wire types, since protocol 1.6), not a URL -- `phonia_ipc::image::url(kind, id, min_px)` turns
   one into the actual URL, at the smallest of TIDAL's own fixed sizes for that kind that is at least
-  `min_px` (or the largest there is, if none is big enough). The CDN needs no TIDAL login. Nothing
-  renders an image yet; that is the terminal interface's job, coming with issue #24.
+  `min_px` (or the largest there is, if none is big enough). The CDN needs no TIDAL login. The TUI
+  renders these (see `--covers` above); the now-playing track's own cover id reaches the wire the
+  same way (`QueueItem`/`Track`'s `cover`) but nothing draws it yet -- that is the rest of #24.
 - **The library** (the requests `library` and `playlists` of protocol 1.6, and `phonia ctl library`):
   favorite tracks and favorite albums (`favorite_tracks`/`favorite_albums`, newest favorited first),
   and the playlists you created yourself, not ones you only follow (`/users/{id}/playlists`, kept

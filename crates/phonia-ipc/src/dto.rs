@@ -41,6 +41,10 @@ pub struct Track {
     /// What TIDAL delivered, for a track that is streamed from TIDAL (since 1.5).
     #[serde(default)]
     pub quality: Option<StreamQuality>,
+    /// The track's album's cover id, to turn into a URL with [`crate::image::url`]; absent for a
+    /// local file or a TIDAL track with no album (since 1.6).
+    #[serde(default)]
+    pub cover: Option<String>,
 }
 
 /// A TIDAL quality tier, worst to best: `low < high < lossless < hires`. `high` and `low` are
@@ -216,6 +220,10 @@ pub struct QueueItem {
     pub source: String,
     pub title: Option<String>,
     pub duration_ms: Option<u64>,
+    /// The track's album's cover id, to turn into a URL with [`crate::image::url`]; absent for a
+    /// local file or a TIDAL track with no album (since 1.6).
+    #[serde(default)]
+    pub cover: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

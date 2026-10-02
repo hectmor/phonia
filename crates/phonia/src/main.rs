@@ -306,6 +306,7 @@ async fn run_play_file(
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned()),
             duration: None,
+            cover: None,
         }]);
     }
     queue.set_shuffle(shuffle);
@@ -347,6 +348,7 @@ async fn run_play(
             source: TrackRef(Source::parse(&format!("tidal:{id}"))?.to_wire()),
             title: Some(id.clone()),
             duration: None,
+            cover: None,
         }]);
     }
     queue.set_shuffle(shuffle);

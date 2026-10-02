@@ -242,6 +242,7 @@ impl TestSupplier {
                 title: None,
                 duration: None,
                 quality: None,
+                cover: None,
             };
             let loaded = match test_track.media {
                 Media::Pcm { samples, spec } => {
@@ -737,6 +738,7 @@ fn load_results_nobody_asked_for_are_ignored() {
             title: None,
             duration: None,
             quality: None,
+            cover: None,
         },
         ramp(100),
         SPEC_48K,
