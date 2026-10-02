@@ -73,10 +73,11 @@ chain works with real hardware (a Fosi Audio DS2 during development).
   track inside an opened list behaves elsewhere: `Enter` plays just that one track rather than
   queuing the rest of the list from there, since a list of favorites has no natural order and can
   run into the thousands. **`--covers auto|halfblocks|off`** (default `auto`) controls its covers
-  (#24): an opened album's or playlist's header, and an opened artist's own page, show their cover
-  or picture beside their text (the artist's tabs stay full width, under both), at whatever size
-  fits (a third of the panel's height, square in pixels, never shown at all if the panel is too
-  small or the item has none), through a real graphics protocol (Kitty, Sixel, iTerm2) when the
+  (#24): an opened album's or playlist's header, an opened artist's own page, and the **Queue**
+  section's own currently playing track show their cover or picture beside their text (the
+  artist's tabs stay full width, under both), at whatever size fits (a third of the panel's
+  height, square in pixels, never shown at all if the panel is too small or the item has none),
+  through a real graphics protocol (Kitty, Sixel, iTerm2) when the
   terminal has one; `halfblocks` (24-bit colour, `▀`/`▄` characters) only when the
   terminal says it has true colour, so `theme.rs`'s own 16-ANSI-colours rule is never broken by
   accident; with neither, no cover shows, rather than one that looks wrong. A cover is fetched
@@ -206,8 +207,8 @@ gapless = true          # join a track to the next one of the same format with n
   in the wire types, since protocol 1.6), not a URL -- `phonia_ipc::image::url(kind, id, min_px)` turns
   one into the actual URL, at the smallest of TIDAL's own fixed sizes for that kind that is at least
   `min_px` (or the largest there is, if none is big enough). The CDN needs no TIDAL login. The TUI
-  renders these (see `--covers` above); the now-playing track's own cover id reaches the wire the
-  same way (`QueueItem`/`Track`'s `cover`) but nothing draws it yet -- that is the rest of #24.
+  renders all of these (see `--covers` above), including the now-playing track's own cover
+  (`QueueItem`/`Track`'s `cover`) above the Queue section's list -- the last piece of #24.
 - **The library** (the requests `library` and `playlists` of protocol 1.6, and `phonia ctl library`):
   favorite tracks and favorite albums (`favorite_tracks`/`favorite_albums`, newest favorited first),
   and the playlists you created yourself, not ones you only follow (`/users/{id}/playlists`, kept

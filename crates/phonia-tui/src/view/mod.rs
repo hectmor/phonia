@@ -11,12 +11,13 @@ pub fn help_overflow(rows: u16) -> usize {
 }
 
 use crate::app::{Connection, Focus, Section, State, seconds_left};
-use crate::covers::Covers;
+use crate::covers::{self, Covers};
 use crate::theme::Theme;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui_image::Image;
 
 /// The columns the sidebar takes: the longest section name and room for the border and the mark.
 const SIDEBAR_WIDTH: u16 = 14;
@@ -121,27 +122,102 @@ fn draw_main(state: &State, theme: &Theme, covers: &Covers, frame: &mut Frame, a
         }
         return;
     }
-    let (title, lines) = match (state.section(), &state.queue) {
-        (Section::Queue, Some(queue)) => {
-            let title = format!("Queue ({})", queue.items.len());
-            // The border takes a row above and one below.
-            let rows = usize::from(area.height.saturating_sub(2));
-            let cursor = focused.then(|| state.queue_cursor.selected());
-            (title, queue_lines(queue, cursor, rows, theme))
-        }
-        (Section::Queue, None) => (
-            "Queue".to_string(),
-            vec![Line::styled("Not connected yet.", theme.dim)],
-        ),
-        (section, _) => (
-            section.title().to_string(),
-            vec![Line::styled("Nothing to show yet.", theme.dim)],
-        ),
+    // The queue: the currently playing track's own cover, when there is one, above the list.
+    let title = match &state.queue {
+        Some(queue) => format!("Queue ({})", queue.items.len()),
+        None => "Queue".to_string(),
     };
+    let block = panel(&title, focused, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    draw_queue(state, theme, covers, frame, inner, focused);
+}
+
+/// The queue's entries, in play order; the currently playing track's own cover shows above the
+/// list when there is one, there is room, and the terminal can show one at all.
+fn draw_queue(
+    state: &State,
+    theme: &Theme,
+    covers: &Covers,
+    frame: &mut Frame,
+    area: Rect,
+    focused: bool,
+) {
+    let Some(queue) = &state.queue else {
+        frame.render_widget(
+            Paragraph::new(vec![Line::styled("Not connected yet.", theme.dim)]),
+            area,
+        );
+        return;
+    };
+    let cover = state
+        .status
+        .as_ref()
+        .and_then(|status| status.track.as_ref())
+        .and_then(|track| track.cover.as_deref());
+    // Same rule as an opened album's or playlist's header (see `browse::draw_track_list`):
+    // reserved only when a cover could actually show here, never on whether it has arrived yet.
+    let reserved = covers.picker().and_then(|picker| {
+        let cells = covers::cover_size(area, picker.font_size())?;
+        let url = covers::track_cover_url(cover, cells, picker.font_size())?;
+        Some((url, cells))
+    });
+    let (cover_area, header_area, list_area) = match reserved {
+        Some((url, cells)) => {
+            let [top, list_area] =
+                Layout::vertical([Constraint::Length(cells.height), Constraint::Min(0)])
+                    .areas(area);
+            let [cover_area, header_area] =
+                Layout::horizontal([Constraint::Length(cells.width), Constraint::Min(0)])
+                    .areas(top);
+            (Some((cover_area, url)), Some(header_area), list_area)
+        }
+        None => (None, None, area),
+    };
+    if let Some((cover_area, url)) = &cover_area
+        && let Some(protocol) = covers.ready(url)
+    {
+        frame.render_widget(Image::new(protocol), *cover_area);
+    }
+    if let Some(header_area) = header_area {
+        frame.render_widget(
+            Paragraph::new(now_playing_header(state, theme)),
+            header_area,
+        );
+    }
+    let rows = usize::from(list_area.height);
+    let cursor = focused.then(|| state.queue_cursor.selected());
     frame.render_widget(
-        Paragraph::new(lines).block(panel(&title, focused, theme)),
-        area,
+        Paragraph::new(queue_lines(queue, cursor, rows, theme)),
+        list_area,
     );
+}
+
+/// The currently playing track's name, and its quality tier when it is streamed from TIDAL, next
+/// to its cover. Only shown next to a cover that is itself only reserved when there is a track
+/// playing, so this is never called with nothing to show.
+fn now_playing_header<'a>(state: &State, theme: &Theme) -> Vec<Line<'a>> {
+    let Some(track) = state
+        .status
+        .as_ref()
+        .and_then(|status| status.track.as_ref())
+    else {
+        return Vec::new();
+    };
+    let name = track
+        .title
+        .clone()
+        .or_else(|| track.source.clone())
+        .unwrap_or_default();
+    let mut lines = vec![Line::styled(name, theme.accent)];
+    if let Some(quality) = track.quality {
+        lines.push(Line::styled(
+            phonia_ipc::fmt::stream_quality(&quality),
+            theme.dim,
+        ));
+    }
+    lines.push(Line::raw(""));
+    lines
 }
 
 /// The first row to show so that `cursor` is on screen among `rows`: the top of the list until the
@@ -1672,6 +1748,116 @@ mod tests {
         );
         assert_eq!(no_picture, screen(&with_picture(None), 100, 30));
         assert_eq!(covers_off, screen(&with_picture(Some("x")), 100, 30));
+    }
+
+    #[test]
+    fn the_now_playing_tracks_cover_reserves_room_above_the_queue_and_draws_once_its_ready() {
+        use crate::covers::{self, Outcome};
+        use ratatui_image::Resize;
+        use ratatui_image::picker::Picker;
+
+        let cover_id = "3c6247c7-d0d7-4978-91b1-0bddc13f45b5";
+        let mut state = connected();
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::TrackStarted {
+                item_id: None,
+                source: Some("tidal:1".into()),
+                title: Some("Aerodynamic".into()),
+                duration_ms: Some(343_000),
+                spec: phonia_ipc::Spec {
+                    sample_rate: 44_100,
+                    channels: 2,
+                    bits_per_sample: 16,
+                },
+                gapless: false,
+                quality: None,
+                cover: Some(cover_id.into()),
+            }),
+        );
+
+        let (width, height) = (100, 30);
+        let theme = Theme::new(false);
+        let main = areas(Rect::new(0, 0, width, height)).main;
+        let inner = panel("x", false, &theme).inner(main);
+        let picker = Picker::halfblocks();
+        let cells = covers::cover_size(inner, picker.font_size()).unwrap();
+        let url = covers::track_cover_url(Some(cover_id), cells, picker.font_size()).unwrap();
+
+        let mut covers = Covers::new(Some(picker.clone()));
+        covers.start(&url);
+        let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            u32::from(cells.width) * 10,
+            u32::from(cells.height) * 20,
+            image::Rgb([20, 220, 20]),
+        ));
+        let protocol = picker
+            .new_protocol(image, cells, Resize::default())
+            .unwrap();
+        covers.finish(url, Outcome::Ready(protocol));
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| draw(&state, &theme, &covers, frame))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        let drawn = (inner.y..inner.y + cells.height).any(|y| {
+            (inner.x..inner.x + cells.width).any(|x| {
+                let style = buffer[(x, y)].style();
+                style.fg.is_some() || style.bg.is_some()
+            })
+        });
+        assert!(drawn, "no cover pixels found in the reserved area");
+
+        let text = (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Aerodynamic"), "{text}");
+        assert!(
+            text.contains("Queue (0)"),
+            "the list is still shown below the cover: {text}"
+        );
+    }
+
+    #[test]
+    fn with_covers_off_or_nothing_playing_the_queue_layout_is_exactly_as_before() {
+        let not_playing = connected();
+        let playing_with_a_cover = || {
+            let mut state = connected();
+            update(
+                &mut state,
+                Msg::Daemon(phonia_ipc::Event::TrackStarted {
+                    item_id: None,
+                    source: Some("tidal:1".into()),
+                    title: Some("Aerodynamic".into()),
+                    duration_ms: None,
+                    spec: phonia_ipc::Spec {
+                        sample_rate: 44_100,
+                        channels: 2,
+                        bits_per_sample: 16,
+                    },
+                    gapless: false,
+                    quality: None,
+                    cover: Some("3c6247c7-d0d7-4978-91b1-0bddc13f45b5".into()),
+                }),
+            );
+            state
+        };
+        let picker = Some(ratatui_image::picker::Picker::halfblocks());
+
+        // Covers enabled, but nothing playing (and so nothing with a cover id).
+        let nothing_playing = screen_with(&not_playing, &Covers::new(picker.clone()), 100, 30);
+        assert_eq!(nothing_playing, screen(&not_playing, 100, 30));
+
+        // Something playing with a cover id, but covers are off.
+        let covers_off = screen_with(&playing_with_a_cover(), &Covers::disabled(), 100, 30);
+        assert_eq!(covers_off, screen(&playing_with_a_cover(), 100, 30));
     }
 
     #[test]
