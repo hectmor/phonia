@@ -12,6 +12,7 @@ use std::ffi::CString;
 use std::path::Path;
 use std::sync::Arc;
 
+use super::caps::{self, SampleFormat};
 use super::device;
 use super::reserve::{DeviceBusy, DeviceReserver, ReservationSlot, open_reserved};
 use super::{AudioSink, SinkFactory};
@@ -672,9 +673,9 @@ impl TailBuffer {
     }
 }
 
-/// Lists which sample formats and rates `device` accepts, using `HwParams::test_format` /
-/// `test_rate`. This opens the device in playback mode (without ever writing to it) purely to
-/// query its capabilities -- meant to be run by the user on their own hardware.
+/// Lists which sample formats and rates `device` accepts via [`caps::probe_with`], against the
+/// device's real `HwParams`. This opens the device in playback mode (without ever writing to it)
+/// purely to query its capabilities -- meant to be run by the user on their own hardware.
 ///
 /// With a `reserver` the card is reserved first, like playing would, so the probe works while the
 /// desktop is holding the card. Blocks on that reservation: don't call it from an async task.
@@ -701,26 +702,54 @@ pub fn probe_device(device: &str, reserver: Option<Arc<dyn DeviceReserver>>) -> 
         })
     })?;
     let hwp = HwParams::any(&pcm).context("could not get the default hw_params")?;
+    hwp.set_access(Access::RWInterleaved)
+        .context("the device does not support interleaved access (RWInterleaved)")?;
+    // Without this, a `plughw:`/`default` device answers "yes" to every format and rate: its plug
+    // layer resamples/converts transparently underneath, which is exactly what playback disables
+    // to stay bit-perfect. Probing with it on would just measure the plug layer, not the device.
+    hwp.set_rate_resample(false)
+        .context("could not disable automatic resampling")?;
 
-    println!("Formats supported on {device}:");
-    for format in [Format::S16LE, Format::S243LE, Format::S24LE, Format::S32LE] {
-        let ok = hwp.test_format(format).is_ok();
-        println!(
-            "  {:<10} {}",
-            format.to_string(),
-            if ok { "yes" } else { "no" }
-        );
-    }
-
-    println!("\nRates supported on {device}:");
-    for rate in [
-        44_100u32, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000,
-    ] {
-        let ok = hwp.test_rate(rate).is_ok();
-        println!("  {:>7} Hz  {}", rate, if ok { "yes" } else { "no" });
-    }
-
+    println!("Capabilities of {device}:");
+    println!("{}", probe(&hwp, &[])?.to_text());
     Ok(())
+}
+
+/// The real [`caps::probe_with`], against `hwp`'s actual `HwParams`. `hwp` should already have its
+/// access mode and `rate_resample(false)` set the way a real open would, so a `plughw:`/`default`
+/// device is probed honestly rather than through its own resampling plug layer. Channels are read
+/// from `hwp` as given, not narrowed first: the point is to find out what the device itself
+/// accepts, not to test one specific count.
+fn probe(hwp: &HwParams, extra_rates: &[u32]) -> Result<caps::Capabilities> {
+    let channels = (
+        hwp.get_channels_min()
+            .context("could not read the minimum channel count")?,
+        hwp.get_channels_max()
+            .context("could not read the maximum channel count")?,
+    );
+    Ok(caps::probe_with(
+        channels,
+        extra_rates,
+        |rate| hwp.test_rate(rate).is_ok(),
+        |rate, format| {
+            // Format and rate are joint constraints on real hardware (24-bit only up to 96 kHz is
+            // common), so the format is tested on a clone narrowed to exactly this rate, not on
+            // the unconstrained `hwp`.
+            let at_rate = hwp.clone();
+            at_rate.set_rate(rate, ValueOr::Nearest).is_ok()
+                && at_rate.test_format(to_alsa_format(format)).is_ok()
+        },
+    ))
+}
+
+/// The real ALSA format `format` stands for.
+fn to_alsa_format(format: SampleFormat) -> Format {
+    match format {
+        SampleFormat::S16Le => Format::S16LE,
+        SampleFormat::S24_3Le => Format::S243LE,
+        SampleFormat::S24Le => Format::S24LE,
+        SampleFormat::S32Le => Format::S32LE,
+    }
 }
 
 /// Picks the first ALSA format the device accepts, in the priority order the phase-0 spec
@@ -1020,6 +1049,42 @@ mod tests {
         tail.clear();
         assert_eq!(tail.len(), 0);
         assert!(tail.take_last(4).is_empty());
+    }
+
+    /// Needs a real DAC that nothing else (e.g. PipeWire) has open. Opens it only to query
+    /// `HwParams`, never writes to it, so nothing is audible. Run with:
+    /// `PHONIA_TEST_DEVICE=hw:DS2,0 cargo test -p phonia-core hardware -- --ignored --nocapture`
+    /// (the device may be named by card id, or be `auto`)
+    #[test]
+    #[ignore = "needs a real, free ALSA device"]
+    fn hardware_capabilities() {
+        let wanted = std::env::var("PHONIA_TEST_DEVICE").unwrap_or_else(|_| "auto".into());
+        let device = device::resolve(&wanted, Path::new(device::ASOUND))
+            .expect("finding the device")
+            .alsa_name();
+        let c_device = CString::new(device.clone()).unwrap();
+        let pcm = PCM::open(&c_device, Direction::Playback, false).expect("opening the device");
+        let hwp = HwParams::any(&pcm).unwrap();
+        hwp.set_access(Access::RWInterleaved).unwrap();
+        hwp.set_rate_resample(false).unwrap();
+        let caps = probe(&hwp, &[]).expect("probing the device");
+        println!("{device}:\n{}", caps.to_text());
+
+        // Every rate TIDAL is known to serve, in both formats a 16-bit or 24-bit track needs: a
+        // real hi-res DAC (this is written against the Fosi Audio DS2) should offer all of them.
+        for &rate in &caps::STANDARD_RATES {
+            let formats = caps
+                .formats_at(rate)
+                .unwrap_or_else(|| panic!("{device} did not accept {rate} Hz at all"));
+            assert!(
+                formats.contains(&SampleFormat::S16Le),
+                "{device} at {rate} Hz: expected S16_LE among {formats:?}"
+            );
+            assert!(
+                formats.contains(&SampleFormat::S24_3Le),
+                "{device} at {rate} Hz: expected S24_3LE among {formats:?}"
+            );
+        }
     }
 
     /// Needs a real DAC that nothing else (e.g. PipeWire) has open. Writes silence only, so

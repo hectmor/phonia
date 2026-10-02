@@ -7,6 +7,7 @@ use anyhow::Result;
 use std::sync::Arc;
 
 pub mod alsa;
+pub mod caps;
 pub mod catalog;
 pub mod dbus;
 pub mod device;
