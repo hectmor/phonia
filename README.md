@@ -644,8 +644,8 @@ more importantly, *why* it was chosen.
   the audio thread drives them with **`futures-executor`**'s `block_on`.
 
 - **[`anyhow`](https://docs.rs/anyhow)** -- error handling with contextual, human-readable
-  messages at every fallible step, from "no saved session, run `phonia login`" to "the device
-  doesn't support any lossless integer format for a 24-bit source."
+  messages at every fallible step, from "no saved session, run `phonia login`" to "hw:0,0 (DS2)
+  cannot play 352800 Hz natively; for 24-bit audio it can do 44100, 48000, ... Hz" (#25).
 
 ## Development
 
