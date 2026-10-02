@@ -577,3 +577,63 @@ CI). Because this DAC accepts everything TIDAL can send it, the *refusal*
 path cannot be exercised against real hardware and is covered by unit
 tests (`caps.rs`'s own suite, joint rate/format constraints modelled with
 fake closures) and, in part 3, engine tests against a refusing fake sink.
+
+## 2026-10-02 — #25 part 2: `AlsaSink::open` probes before it commits, and refuses precisely
+
+`caps::choose(source, &capabilities) -> Result<SampleFormat, Missing>`
+picks the tightest lossless container a device actually offers at a
+track's exact rate, replacing the old `pick_format`, which just tried a
+hardcoded priority list against the device with no idea beforehand
+whether any of it would work. `Missing` is one of `Depth` (the source's
+own bit depth is not 1–32 bits: not a device limitation at all),
+`Channels`, `Rate`, or `DepthAtRate { offered }` (the rate is accepted,
+but every format offered there is narrower than the source needs) —
+checked in that order, since an invalid depth is wrong regardless of any
+device, and a depth that doesn't fit at an otherwise-accepted rate is the
+most specific thing to say. A typed `Unsupported` error (device, source,
+`Missing`, and the `Capabilities` that produced the verdict) carries
+enough to format a precise message naming exactly what the device offers
+instead of a bare refusal, e.g. "hw:0,0 (DS2) cannot play 352800 Hz
+natively; for 24-bit audio it can do 44100, ..., 192000 Hz. phonia does
+not resample in exclusive mode; to hear it resampled, play through the
+sound server (`phonia ctl output set shared:default`)."
+
+`AlsaSink::open`'s new order: set access and disable resampling, probe
+the device's real capabilities (the track's own rate is added to the
+probe's standard list, in case it is an unusual one), `choose` a format
+or fail with the precise `Unsupported` right there — *before* touching
+`set_channels`/`set_rate`/`set_format`/`hw_params` at all. Only once
+`choose` has succeeded are those actually committed. The old post-hoc
+"does not support N Hz" read-back check (which, it turns out, almost
+never fired — `HwParams::set_rate(_, ValueOr::Nearest)` requests an exact
+rate under the hood despite the name) stays as a defensive check: `choose`
+already knows the rate is accepted, so by the time `hw_params` runs this
+should be unreachable, but a stale answer must never silently play at the
+wrong rate regardless.
+
+This also generalizes which depths a device can play at all: padding a
+narrower source into a wider lossless container (16-bit into `S24_3LE`,
+which already happened for 24-into-`S32LE`) is not resampling, so
+`SampleFormat::ALL`'s significant-bits check accepts any format wide
+enough, not just a hardcoded per-depth list — a 20-bit FLAC now plays
+correctly on a 24-bit-capable device, and a 16-bit track is no longer
+refused by a device that only offers 24-bit containers.
+
+One simplification from the plan as written: `AlsaSink::open` does not
+do a separate upfront `test_channels` step before probing (as the plan's
+own step-by-step sketch suggested) — `choose`'s own `Missing::Channels`
+check, against the channel range `probe` already reads via
+`get_channels_min`/`get_channels_max`, covers exactly the same case with
+one less step, so there is no second, parallel channel check to keep in
+sync. `caps` is also not stored on the sink yet (the plan's step 7): #28
+is the first thing that will actually read it, so it is added then rather
+than carried as an unread field in the meantime.
+
+Not done here, on purpose: the engine does not yet report a refused
+track's `TrackEnded` event (part 3), and the device label in `Unsupported`
+messages is the raw device string `AlsaSink::open` already had (e.g.
+`hw:1,0`), not the nicer `hw:1,0 (DS2)` form `probe_device` prints —
+threading that label in would mean the `open_pcm`/resolve deduplication
+the plan sketched for part 1, deliberately deferred (see that entry):
+still not needed, since this PR touches none of that resolve/reserve
+boilerplate.

@@ -80,20 +80,30 @@ impl AlsaSink {
             let hwp = HwParams::any(&pcm).context("could not get the default hw_params")?;
             hwp.set_access(Access::RWInterleaved)
                 .context("the device does not support interleaved access (RWInterleaved)")?;
-            hwp.set_channels(source.channels).with_context(|| {
-                format!("the device does not support {} channel(s)", source.channels)
-            })?;
-
             // Never let ALSA (or a plug layer above it) resample under us: bit-perfect means
             // the hardware runs at exactly the source's rate, or we fail loudly.
             hwp.set_rate_resample(false)
                 .context("could not disable automatic resampling")?;
+
+            // Probed before anything is committed, so a mismatch is reported precisely (what the
+            // device actually offers) instead of surfacing as a raw ALSA error partway through.
+            let device_caps = probe(&hwp, &[source.sample_rate])
+                .with_context(|| format!("probing the capabilities of device '{device}'"))?;
+            let format = caps::choose(source, &device_caps).map_err(|missing| {
+                anyhow::Error::new(caps::Unsupported {
+                    device: device.to_string(),
+                    source,
+                    missing,
+                    caps: device_caps,
+                })
+            })?;
+
+            hwp.set_channels(source.channels).with_context(|| {
+                format!("the device does not support {} channel(s)", source.channels)
+            })?;
             hwp.set_rate(source.sample_rate, ValueOr::Nearest)
                 .with_context(|| format!("could not request {} Hz", source.sample_rate))?;
-
-            let format = pick_format(source.bits_per_sample, |f| hwp.test_format(f).is_ok())
-                .with_context(|| format!("negotiating format for device '{device}'"))?;
-            hwp.set_format(format)
+            hwp.set_format(to_alsa_format(format))
                 .context("could not set the negotiated format")?;
 
             hwp.set_period_time_near(PERIOD_TIME_US, ValueOr::Nearest)
@@ -104,9 +114,9 @@ impl AlsaSink {
             pcm.hw_params(&hwp)
                 .context("could not apply the hw_params")?;
 
-            // Verify the rate that actually got committed to the hardware, since
-            // ValueOr::Nearest may silently pick something else if the exact rate isn't
-            // supported.
+            // Defensive: `choose` was just told this rate is accepted, so this should never
+            // trigger, but a stale (freshly-probed-but-since-changed) answer must never silently
+            // play back at the wrong rate.
             let committed = pcm
                 .hw_params_current()
                 .context("could not read back the applied hw_params")?;
@@ -130,7 +140,7 @@ impl AlsaSink {
                 .context("could not read the applied buffer size")?;
 
             (
-                format,
+                to_alsa_format(format),
                 period_frames.max(1) as usize,
                 buffer_frames.max(1) as usize,
                 committed.can_pause(),
@@ -752,39 +762,13 @@ fn to_alsa_format(format: SampleFormat) -> Format {
     }
 }
 
-/// Picks the first ALSA format the device accepts, in the priority order the phase-0 spec
-/// requires for each source bit depth. Takes `test_format` as a closure so this can be unit
-/// tested without opening a real device (the hard rule for this phase is: never open the
-/// hardware ourselves).
-fn pick_format(
-    bits_per_sample: u32,
-    mut test_format: impl FnMut(Format) -> bool,
-) -> Result<Format> {
-    let candidates: &[Format] = match bits_per_sample {
-        24 => &[Format::S243LE, Format::S32LE, Format::S24LE],
-        16 => &[Format::S16LE, Format::S32LE],
-        other => bail!("unsupported bit depth in phase 0: {other} bits (only 16/24)"),
-    };
-
-    candidates
-        .iter()
-        .copied()
-        .find(|f| test_format(*f))
-        .ok_or_else(|| {
-            anyhow!(
-                "the device does not accept any lossless integer format for a {bits_per_sample}-bit source \
-                 (tried: {candidates:?})"
-            )
-        })
-}
-
 fn bytes_per_sample(format: Format) -> usize {
     match format {
         Format::S16LE => 2,
         Format::S243LE => 3,
         Format::S24LE => 4,
         Format::S32LE => 4,
-        other => unreachable!("pick_format should never choose {other}"),
+        other => unreachable!("to_alsa_format should never produce {other}"),
     }
 }
 
@@ -796,7 +780,7 @@ fn pack_sample(format: Format, sample: i32, out: &mut Vec<u8>) {
         Format::S243LE => out.extend_from_slice(&pack_s24_3le(sample)),
         Format::S24LE => out.extend_from_slice(&pack_s24le(sample)),
         Format::S32LE => out.extend_from_slice(&pack_s32le(sample)),
-        other => unreachable!("pick_format should never choose {other}"),
+        other => unreachable!("to_alsa_format should never produce {other}"),
     }
 }
 
@@ -893,24 +877,6 @@ mod tests {
         assert_eq!(pack_s24le(left_justified), [0x56, 0x34, 0x12, 0x00]);
     }
 
-    #[test]
-    fn pick_format_prefers_s24_3le_for_24_bit_sources() {
-        let format = pick_format(24, |_f| true).unwrap();
-        assert_eq!(format, Format::S243LE);
-    }
-
-    #[test]
-    fn pick_format_falls_back_when_preferred_formats_are_rejected() {
-        let format = pick_format(24, |f| f == Format::S24LE).unwrap();
-        assert_eq!(format, Format::S24LE);
-    }
-
-    #[test]
-    fn pick_format_for_16_bit_prefers_s16le() {
-        let format = pick_format(16, |_f| true).unwrap();
-        assert_eq!(format, Format::S16LE);
-    }
-
     fn route(sink: &str, kind: &str, codec: Option<&str>, lossy: bool, rate: u32) -> SharedRoute {
         SharedRoute {
             sink: sink.into(),
@@ -978,16 +944,6 @@ mod tests {
                 .contains("SBC codec loses information")
         );
         assert_eq!(report.device, "Soundcore Life P2");
-    }
-
-    #[test]
-    fn pick_format_errors_on_unsupported_bit_depth() {
-        assert!(pick_format(20, |_f| true).is_err());
-    }
-
-    #[test]
-    fn pick_format_errors_when_device_accepts_nothing() {
-        assert!(pick_format(24, |_f| false).is_err());
     }
 
     #[test]

@@ -8,6 +8,7 @@
 //! opening real hardware; `output/alsa.rs` adapts the real `HwParams` API to the closures
 //! [`probe_with`] takes.
 
+use crate::decode::SourceSpec;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -148,6 +149,135 @@ pub fn probe_with(
     Capabilities { channels, rates }
 }
 
+/// Why a track does not fit what [`probe_with`] found, in [`choose`]'s own order of checking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Missing {
+    /// The source's bit depth is not one phonia knows how to pack into any container (0, or more
+    /// than 32): not a device limitation, a track that cannot be played at all.
+    Depth,
+    /// The device does not accept the source's channel count at any rate.
+    Channels,
+    /// The device accepts the source's channel count, but not its exact sample rate, at all.
+    Rate,
+    /// The device accepts the rate, but every format it offers there is narrower than the
+    /// source's bit depth, so playing it would mean dropping bits.
+    DepthAtRate { offered: Vec<SampleFormat> },
+}
+
+/// A track a device cannot play losslessly, with what was actually found to decide it: precise
+/// enough to tell someone exactly what to expect from their hardware, never a bare "try again".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unsupported {
+    /// The device, for people (`hw:0,0 (DS2)`).
+    pub device: String,
+    pub source: SourceSpec,
+    pub missing: Missing,
+    pub caps: Capabilities,
+}
+
+impl std::error::Error for Unsupported {}
+
+impl fmt::Display for Unsupported {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Unsupported {
+            device,
+            source,
+            missing,
+            caps,
+        } = self;
+        match missing {
+            Missing::Depth => write!(
+                f,
+                "a {}-bit source has no lossless container phonia knows how to use (only 1 to 32 \
+                 bits are)",
+                source.bits_per_sample
+            ),
+            Missing::Channels => write!(
+                f,
+                "{device} accepts {}; this track has {} channel(s)",
+                channel_range_text(caps.channels),
+                source.channels
+            ),
+            Missing::Rate => write!(
+                f,
+                "{device} cannot play {} Hz natively; for {}-bit audio it can do {} Hz. phonia \
+                 does not resample in exclusive mode; to hear it resampled, play through the \
+                 sound server (`phonia ctl output set shared:default`).",
+                source.sample_rate,
+                source.bits_per_sample,
+                rates_text(rates_fitting(caps, source.bits_per_sample)),
+            ),
+            Missing::DepthAtRate { offered } => write!(
+                f,
+                "{device} at {} Hz only takes {}, which would drop bits from a {}-bit source",
+                source.sample_rate,
+                rates_text_formats(offered),
+                source.bits_per_sample
+            ),
+        }
+    }
+}
+
+fn channel_range_text(range: (u32, u32)) -> String {
+    if range.0 == range.1 {
+        format!("{} channel(s)", range.0)
+    } else {
+        format!("{} to {} channels", range.0, range.1)
+    }
+}
+
+/// The rates, in order, at which `caps` offers at least one format wide enough for `bits`.
+fn rates_fitting(caps: &Capabilities, bits: u32) -> Vec<u32> {
+    caps.rates
+        .iter()
+        .filter(|(_, formats)| {
+            formats
+                .iter()
+                .any(|format| format.significant_bits() >= bits)
+        })
+        .map(|(&rate, _)| rate)
+        .collect()
+}
+
+fn rates_text(rates: Vec<u32>) -> String {
+    rates
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn rates_text_formats(formats: &[SampleFormat]) -> String {
+    formats
+        .iter()
+        .map(SampleFormat::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The tightest lossless container `caps` offers for `source`, or precisely what is missing.
+/// Checked in the order a cause is most useful to know about: an invalid depth is wrong
+/// regardless of any device, a channel mismatch and a missing rate are each one fact about the
+/// device, and a depth that does not fit at an otherwise-accepted rate is the most specific.
+pub fn choose(source: SourceSpec, caps: &Capabilities) -> Result<SampleFormat, Missing> {
+    if source.bits_per_sample == 0 || source.bits_per_sample > 32 {
+        return Err(Missing::Depth);
+    }
+    if source.channels < caps.channels.0 || source.channels > caps.channels.1 {
+        return Err(Missing::Channels);
+    }
+    let Some(formats) = caps.formats_at(source.sample_rate) else {
+        return Err(Missing::Rate);
+    };
+    formats
+        .iter()
+        .copied()
+        .find(|format| format.significant_bits() >= source.bits_per_sample)
+        .ok_or_else(|| Missing::DepthAtRate {
+            offered: formats.to_vec(),
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,6 +389,175 @@ mod tests {
         assert_eq!(
             caps.to_text(),
             "Channels: 1-8\nNo rate was accepted with any lossless format."
+        );
+    }
+
+    // ---- choose ------------------------------------------------------------------------------
+
+    fn source(rate: u32, bits: u32, channels: u32) -> SourceSpec {
+        SourceSpec {
+            sample_rate: rate,
+            channels,
+            bits_per_sample: bits,
+        }
+    }
+
+    /// A device that only has `S24_3LE`, at every TIDAL rate.
+    fn ds2_like() -> Capabilities {
+        probe_with(
+            (2, 2),
+            &[],
+            |_rate| true,
+            |_rate, format| format == SampleFormat::S24_3Le,
+        )
+    }
+
+    #[test]
+    fn a_24_bit_source_picks_the_3_byte_container() {
+        assert_eq!(
+            choose(source(96_000, 24, 2), &ds2_like()),
+            Ok(SampleFormat::S24_3Le)
+        );
+    }
+
+    #[test]
+    fn a_16_bit_source_is_padded_into_the_only_container_offered() {
+        // Padding into a wider container is lossless (see `SampleFormat::significant_bits`), so a
+        // 16-bit source plays on a 24-bit-only device instead of being refused.
+        assert_eq!(
+            choose(source(96_000, 16, 2), &ds2_like()),
+            Ok(SampleFormat::S24_3Le)
+        );
+    }
+
+    #[test]
+    fn a_20_bit_source_also_fits_the_24_bit_container() {
+        assert_eq!(
+            choose(source(96_000, 20, 2), &ds2_like()),
+            Ok(SampleFormat::S24_3Le)
+        );
+    }
+
+    #[test]
+    fn a_24_bit_source_falls_back_to_s32le_when_s24_3le_is_not_offered() {
+        let caps = probe_with(
+            (2, 2),
+            &[],
+            |_rate| true,
+            |_rate, format| format == SampleFormat::S32Le,
+        );
+        assert_eq!(
+            choose(source(96_000, 24, 2), &caps),
+            Ok(SampleFormat::S32Le)
+        );
+    }
+
+    #[test]
+    fn a_rate_the_device_does_not_have_at_all_is_missing_rate() {
+        let caps = probe_with(
+            (2, 2),
+            &[],
+            |rate| rate <= 192_000,
+            |_rate, format| format == SampleFormat::S24_3Le,
+        );
+        assert_eq!(choose(source(352_800, 24, 2), &caps), Err(Missing::Rate));
+    }
+
+    #[test]
+    fn a_channel_count_outside_the_devices_range_is_missing_channels() {
+        assert_eq!(
+            choose(source(96_000, 24, 6), &ds2_like()),
+            Err(Missing::Channels)
+        );
+    }
+
+    #[test]
+    fn an_accepted_rate_with_only_a_narrower_format_is_missing_depth_at_rate() {
+        // 192 kHz only in S16_LE: a real joint constraint (24-bit limited to 96 kHz), the 24-bit
+        // source cannot be played there without dropping bits.
+        let caps = probe_with(
+            (2, 2),
+            &[],
+            |_rate| true,
+            |rate, format| format == SampleFormat::S16Le || rate <= 96_000,
+        );
+        assert_eq!(
+            choose(source(192_000, 24, 2), &caps),
+            Err(Missing::DepthAtRate {
+                offered: vec![SampleFormat::S16Le]
+            })
+        );
+    }
+
+    #[test]
+    fn a_depth_of_zero_or_over_32_bits_is_missing_depth_before_anything_about_the_device() {
+        let caps = probe_with((2, 2), &[], |_rate| false, |_rate, _format| false);
+        assert_eq!(choose(source(96_000, 0, 2), &caps), Err(Missing::Depth));
+        assert_eq!(choose(source(96_000, 33, 2), &caps), Err(Missing::Depth));
+    }
+
+    // ---- Unsupported::Display, pinned ---------------------------------------------------------
+
+    #[test]
+    fn an_unsupported_rate_names_what_the_device_can_do_at_that_depth() {
+        let unsupported = Unsupported {
+            device: "hw:0,0 (DS2)".into(),
+            source: source(352_800, 24, 2),
+            missing: Missing::Rate,
+            caps: ds2_like(),
+        };
+        assert_eq!(
+            unsupported.to_string(),
+            "hw:0,0 (DS2) cannot play 352800 Hz natively; for 24-bit audio it can do 44100, \
+             48000, 88200, 96000, 176400, 192000, 352800, 384000 Hz. phonia does not resample in \
+             exclusive mode; to hear it resampled, play through the sound server (`phonia ctl \
+             output set shared:default`)."
+        );
+    }
+
+    #[test]
+    fn an_unsupported_depth_at_a_supported_rate_names_the_narrower_format_offered() {
+        let unsupported = Unsupported {
+            device: "hw:0,0 (DS2)".into(),
+            source: source(192_000, 24, 2),
+            missing: Missing::DepthAtRate {
+                offered: vec![SampleFormat::S16Le],
+            },
+            caps: ds2_like(),
+        };
+        assert_eq!(
+            unsupported.to_string(),
+            "hw:0,0 (DS2) at 192000 Hz only takes S16_LE, which would drop bits from a 24-bit \
+             source"
+        );
+    }
+
+    #[test]
+    fn unsupported_channels_names_the_devices_own_range() {
+        let unsupported = Unsupported {
+            device: "hw:0,0 (DS2)".into(),
+            source: source(96_000, 24, 6),
+            missing: Missing::Channels,
+            caps: ds2_like(),
+        };
+        assert_eq!(
+            unsupported.to_string(),
+            "hw:0,0 (DS2) accepts 2 channel(s); this track has 6 channel(s)"
+        );
+    }
+
+    #[test]
+    fn unsupported_depth_names_no_device_at_all() {
+        let unsupported = Unsupported {
+            device: "hw:0,0 (DS2)".into(),
+            source: source(96_000, 33, 2),
+            missing: Missing::Depth,
+            caps: ds2_like(),
+        };
+        assert_eq!(
+            unsupported.to_string(),
+            "a 33-bit source has no lossless container phonia knows how to use (only 1 to 32 \
+             bits are)"
         );
     }
 }
