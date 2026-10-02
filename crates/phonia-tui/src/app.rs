@@ -135,14 +135,17 @@ impl State {
         usize::from(self.size.1 / 2).max(1)
     }
 
-    /// The cover (or picture) of whatever is open on top of the current section's stack (search
-    /// or the library), if there is one and it has one: an opened album's or playlist's cover, or
-    /// an opened artist's picture. `None` with nothing open, or with the queue section.
+    /// The cover (or picture) the main panel's current section wants to show: an opened album's
+    /// or playlist's cover, an opened artist's picture, or, in the queue section, the currently
+    /// playing track's own album cover. `None` with nothing open, nothing playing, or no cover.
     pub fn open_cover(&self) -> Option<(phonia_ipc::image::Kind, &str)> {
         let stack = match self.section() {
+            Section::Queue => {
+                let cover = self.status.as_ref()?.track.as_ref()?.cover.as_deref()?;
+                return Some((phonia_ipc::image::Kind::AlbumCover, cover));
+            }
             Section::Search => &self.search_views,
             Section::Library => &self.library_views,
-            Section::Queue => return None,
         };
         match stack.top()? {
             browse::View::TrackList(view) => {

@@ -418,3 +418,48 @@ loaded.meta.title.or(item.track.title)`, and the same for duration) — a
 track opened fresh always knows its own cover from TIDAL already, so the
 same `.or()` pattern was the natural fit for `cover` too, rather than a
 special case.
+
+## 2026-10-01 — The last cover: the now-playing track, above the Queue section's list
+
+Part 7 of 7, the last of #24's plan: the Queue section's own panel shows
+the currently playing track's album cover the same way an opened album's
+or playlist's header, or an opened artist's page, shows theirs — the same
+reservation rule (space is reserved only when a picker exists, the
+daemon's last-reported track has a cover id, and the panel is big enough;
+never on whether the fetch has actually finished), the same `cover_size`
+formula, the same fallback to no cover at all rather than a layout that
+could jump.
+
+Fitting this into the existing shape took two small generalizations,
+both in favor of reusing what #24 already built rather than parallel
+code paths:
+
+- **`app::State::open_cover`**, which already answered "what does the main
+  panel's current section want to show a cover of" for the search and
+  library sections' stacks, grew a third arm for `Section::Queue`: the
+  daemon's last-reported `status.track.cover`, as a `Kind::AlbumCover`
+  (it *is* one — a track's own album cover — regardless of whether the
+  track came from a search result, the library, or a bare `queue add
+  tidal:<id>`). This one function already drives the run loop's own
+  proactive fetching (`covers::wanted`, called from `lib.rs` after every
+  state update), so the Queue section's cover is fetched the same way,
+  with no separate wiring needed there.
+- **`covers::track_cover_url`**, a third URL-builder alongside `cover_url`
+  (for a `Header`) and `picture_url` (for an artist), taking a raw
+  `Option<&str>` cover id the same way `picture_url` does, since "the
+  now-playing track" has no header or view type of its own to read a
+  `cover()` method from — it is just whatever `phonia_ipc::Status::track`
+  says right now.
+
+The drawing itself (`view::draw_queue`, replacing the Queue section's old
+inline `(title, lines)` match in `draw_main`) follows `browse.rs`'s own
+layout exactly: a reserved rectangle at the top-left for the cover, the
+track's name (and its quality tier, when it is streamed from TIDAL) beside
+it, and the queue's list filling the rest — restructured, like the search
+and library sections already were, so the panel's block is rendered once
+in `draw_main` and the inner area is handed down, rather than building the
+whole bordered `Paragraph` in one call the way the old Queue-only code
+did.
+
+`#24` is now code-complete: all 7 parts merged (#99–#105). True color
+stays deliberately out of scope, same as every entry above has said.

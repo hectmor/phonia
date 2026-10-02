@@ -178,9 +178,9 @@ pub struct Wanted {
     pub cells: Size,
 }
 
-/// Which cover, if any, the main panel's current header or picture wants, given its own area.
-/// `None` when there is no picker (covers off, or none detected), nothing open with a cover to
-/// show, or `header_area` is too small to fit one.
+/// Which cover, if any, the main panel's current header, picture or now-playing track wants,
+/// given its own area. `None` when there is no picker (covers off, or none detected), nothing to
+/// show a cover of, or `header_area` is too small to fit one.
 pub fn wanted(state: &app::State, covers: &Covers, header_area: Rect) -> Option<Wanted> {
     let picker = covers.picker()?;
     let (kind, id) = state.open_cover()?;
@@ -204,6 +204,17 @@ pub fn picture_url(picture: Option<&str>, cells: Size, font_size: FontSize) -> O
     url_at(
         phonia_ipc::image::Kind::ArtistPicture,
         picture?,
+        cells,
+        font_size,
+    )
+}
+
+/// The URL for the now-playing track's own album `cover`, at a size that fits `cells`, if there
+/// is one at all.
+pub fn track_cover_url(cover: Option<&str>, cells: Size, font_size: FontSize) -> Option<String> {
+    url_at(
+        phonia_ipc::image::Kind::AlbumCover,
+        cover?,
         cells,
         font_size,
     )

@@ -50,7 +50,7 @@ desktop keyring, and TOML configuration.
 | #19 | Search (tracks, albums, artists, playlists) | Code complete (PRs #82–#87 merged); **issue left open on GitHub, worth closing by hand** |
 | #20 | Album and artist views, opened from a search result | Closed |
 | #21 | Library: favorite tracks/albums and the user's playlists | Code complete (PRs #95–#98) |
-| #24 | Covers in the terminal (`ratatui-image`) | In progress: catalog ids, IPC/daemon, the fetch/decode pipeline, the album/playlist header cover, an artist's own picture (#99–#103), and the now-playing track's cover reaching the wire (PR 6) merged; only the queue pane's own drawing is left |
+| #24 | Covers in the terminal (`ratatui-image`) | Code complete (PRs #99–#105, all 7 parts); **issue left open on GitHub, worth closing by hand** |
 
 The catalog (search, an album, an artist, and now the library) is served by
 the **daemon**, not the TUI process: the TUI depends only on `phonia-ipc`, so
@@ -58,8 +58,8 @@ it builds and is tested without ALSA, and the daemon is the single owner of
 the TIDAL session. See `docs/DECISIONS.md` for why.
 
 True color is a deliberate, deferred option: the TUI uses only the terminal's
-16 ANSI colors today, on purpose, until the rest of Phase 2 (and its covers)
-are done.
+16 ANSI colors today, on purpose, even now that Phase 2 (and its covers) are
+done — it is its own product decision, not a leftover.
 
 ### Phase 3 — Audio quality
 
@@ -81,23 +81,21 @@ to be scoped with Opus when their turn comes.
 
 ## Right now
 
-#21 (library) is done; #24 (covers), the last of Phase 2, is in progress, as
-an approved 7-PR plan: core catalog ids, IPC/daemon with the
-`phonia_ipc::image::url` helper, the TUI's dependencies and
-fetch/decode/encode pipeline, the first visible part — an opened album's or
-a playlist's header shows its cover, with `phonia tui --covers
-auto|halfblocks|off` — an opened artist's own picture, the same way
-(#99–#103), and the now-playing track's own cover id now reaching
-`QueueItem`/`Track` on the wire (`SourceInfo`/`TrackMeta`/`QueueTrack` all
-carry it; `TidalOpener::describe` and `queue_add_from` fill it from TIDAL's
-own `album.cover`) are merged. What's left: part 7, drawing that cover on the
-queue's now-playing pane — the data to do it is now in place. The run loop's
-own wiring (the
-`--covers` flag, querying the terminal at startup, the channel a fetch
-answers on), which the plan as written put in part 3 ahead of any caller,
-landed instead with part 4, its first real one — the same "every PR
-compiles, nothing speculative" rule the rest of this project already
-follows.
+#21 (library) and #24 (covers, the last of Phase 2) are both done: all 7
+parts of #24's approved plan are merged (#99–#105) — core catalog ids,
+IPC/daemon with the `phonia_ipc::image::url` helper, the TUI's dependencies
+and fetch/decode/encode pipeline, an opened album's or playlist's header
+cover, an opened artist's own picture, the now-playing track's cover id
+reaching the wire, and finally that same cover shown above the Queue
+section's own list, with `phonia tui --covers auto|halfblocks|off`
+controlling all of them. The run loop's own wiring (the `--covers` flag,
+querying the terminal at startup, the channel a fetch answers on), which the
+plan as written put in part 3 ahead of any caller, landed instead with part
+4, its first real one — the same "every PR compiles, nothing speculative"
+rule the rest of this project already follows.
+
+Phase 2 is now fully closed, except for #19 and #21 showing open on GitHub
+(both code-complete; close by hand).
 
 The key architectural call: the **TUI fetches and decodes covers itself**,
 straight from TIDAL's public, unauthenticated image CDN; the daemon's only
@@ -118,9 +116,9 @@ this account; they are TIDAL's other clients' own choices, unverified here.
 
 ## After #24
 
-Phase 2 closes with #24. Then Phase 3's remaining issues (#25, #26, #28,
-#30, #31), planned one at a time with Opus as they come up, unless the
-person redirects.
+Phase 2 is closed. Next: Phase 3's remaining issues (#25, #26, #28, #30,
+#31), planned one at a time with Opus as they come up, unless the person
+redirects.
 
 ## Conventions this file assumes
 
