@@ -67,7 +67,7 @@ done — it is its own product decision, not a leftover.
 |---|---|---|
 | #27 | Gapless playback | Closed (verified bit-exact against real TIDAL over `snd-aloop`) |
 | #29 | Quality tiers, a floor, and automatic fallback | Closed (parts 1–3); an optional part 4 (AAC decode for the lossy tiers) is not started and not blocking |
-| #25 | DAC capability detection | In progress: approved 4-PR plan; parts 1–2 merged (probing, `caps::choose`, precise refusals in `AlsaSink::open`) |
+| #25 | DAC capability detection | In progress: approved 4-PR plan; parts 1–3 merged (probing, `caps::choose`, precise refusals in `AlsaSink::open`, and the engine reporting a refused track correctly); only the optional part 4 (`phonia devices` shows what a USB DAC advertises) is left |
 | #26 | Per-track sample rate switching | In progress, same plan as #25 (see below) |
 | #28 | Signal path indicator in the TUI | Not started |
 | #30 | ReplayGain in shared mode | Not started |
@@ -112,14 +112,17 @@ decisions as the person settled them.
 
 Part 1 (`output/caps.rs`: pure, unit-tested capability types and probing;
 `phonia probe-device` fixed — it used to report "yes" to everything on a
-`plughw:`/`default` device, since it never disabled automatic resampling)
-and part 2 (`caps::choose` picks the tightest lossless container a device
+`plughw:`/`default` device, since it never disabled automatic resampling),
+part 2 (`caps::choose` picks the tightest lossless container a device
 actually offers at a track's exact rate; `AlsaSink::open` now probes before
 committing anything and refuses precisely, naming what it found, instead of
-surfacing a raw ALSA error; the old hardcoded `pick_format` is gone) are
-merged. Remaining: part 3 (the engine reports a refused track's
-`TrackEnded` correctly — the bug mentioned above), part 4 (`phonia devices`
-shows what a USB DAC advertises via `stream0`, passively).
+surfacing a raw ALSA error; the old hardcoded `pick_format` is gone), and
+part 3 (`start_track` now emits the refused track's own `TrackEnded
+{ Failed }` before the error reaches `fail()` — previously, a track refused
+with nothing playing before it left no trace at all beyond a bare
+`Event::Error`, since neither `self.current` nor `self.outgoing` ever held
+it) are merged. Only the optional part 4 is left: `phonia devices` showing
+what a USB DAC advertises via `stream0`, passively.
 
 Verified against the real Fosi Audio DS2: it accepts every TIDAL rate in
 `S16_LE`, `S24_3LE` and `S32_LE` (not `S24_LE`) — confirmed both via the new
