@@ -135,18 +135,28 @@ impl State {
         usize::from(self.size.1 / 2).max(1)
     }
 
-    /// The header of whatever album or playlist is open on top of the current section's stack
-    /// (search or the library), if that is what is open there (an artist page has none, and
-    /// neither does the queue).
-    pub fn open_header(&self) -> Option<&browse::Header> {
+    /// The cover (or picture) of whatever is open on top of the current section's stack (search
+    /// or the library), if there is one and it has one: an opened album's or playlist's cover, or
+    /// an opened artist's picture. `None` with nothing open, or with the queue section.
+    pub fn open_cover(&self) -> Option<(phonia_ipc::image::Kind, &str)> {
         let stack = match self.section() {
             Section::Search => &self.search_views,
             Section::Library => &self.library_views,
             Section::Queue => return None,
         };
         match stack.top()? {
-            browse::View::TrackList(view) => Some(view.header()),
-            browse::View::Artist(_) => None,
+            browse::View::TrackList(view) => {
+                let header = view.header();
+                let kind = match header {
+                    browse::Header::Album(_) => phonia_ipc::image::Kind::AlbumCover,
+                    browse::Header::Playlist(_) => phonia_ipc::image::Kind::PlaylistCover,
+                };
+                Some((kind, header.cover()?))
+            }
+            browse::View::Artist(artist) => Some((
+                phonia_ipc::image::Kind::ArtistPicture,
+                artist.picture.as_deref()?,
+            )),
         }
     }
 }
@@ -520,6 +530,7 @@ fn on_view_response(state: &mut State, serial: u64, result: Result<Payload, Stri
                     singles,
                 }) if opening => {
                     artist.name = summary.name;
+                    artist.picture = summary.picture;
                     artist.bio = bio;
                     artist.top_tracks = crate::list::Found::from_page(top_tracks);
                     artist.albums = crate::list::Found::from_page(albums);
@@ -1253,7 +1264,12 @@ fn act_on_result(state: &mut State, action: Action) -> Effects {
                 );
             }
             Selected::Artist(artist) => {
-                return open_artist_view(state, artist.id.clone(), artist.name.clone());
+                return open_artist_view(
+                    state,
+                    artist.id.clone(),
+                    artist.name.clone(),
+                    artist.picture.clone(),
+                );
             }
             Selected::Track(_) => {}
         }
@@ -1491,14 +1507,19 @@ fn next_serial(state: &mut State) -> u64 {
     serial
 }
 
-fn open_artist_view(state: &mut State, id: String, name: String) -> Effects {
+fn open_artist_view(
+    state: &mut State,
+    id: String,
+    name: String,
+    picture: Option<String>,
+) -> Effects {
     if !require_browsable(state, "artists") {
         return Effects::redraw();
     }
     let serial = next_serial(state);
     state.search_views.push(
         serial,
-        browse::View::Artist(browse::ArtistView::new(id.clone(), name)),
+        browse::View::Artist(browse::ArtistView::new(id.clone(), name, picture)),
     );
     Effects {
         redraw: true,
