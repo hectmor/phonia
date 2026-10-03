@@ -2,6 +2,7 @@
 
 use crate::config::Quality;
 use crate::decode::SourceSpec;
+use crate::replaygain::Loudness;
 use std::time::Duration;
 
 /// An opaque reference to a track, meaningful only to the [`super::TrackSupplier`] that hands it
@@ -19,6 +20,9 @@ pub struct TrackMeta {
     /// The track's album's cover id (a UUID), to turn into an image URL with
     /// `phonia_ipc::image::url`; `None` for a local file, or a TIDAL track with no album.
     pub cover: Option<String>,
+    /// TIDAL's loudness measurement for the track (and its album, if any); `None` for a local
+    /// file, or a TIDAL track TIDAL hasn't measured.
+    pub loudness: Option<Loudness>,
 }
 
 /// The quality tier a streamed track was asked for, and the one TIDAL actually gave.

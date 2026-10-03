@@ -65,6 +65,7 @@ impl TrackOpener for TestOpener {
                 duration: None,
                 quality: None,
                 cover: None,
+                loudness: None,
             };
             Ok(match media {
                 Media::Pcm(frames) => LoadedTrack::new(

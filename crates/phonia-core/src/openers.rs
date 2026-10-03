@@ -149,6 +149,7 @@ impl TrackOpener for FileOpener {
                 duration: None,
                 quality: None,
                 cover: None,
+                loudness: None,
             };
             let extension = path
                 .extension()
@@ -366,6 +367,7 @@ impl TrackOpener for TidalOpener {
                 duration: None,
                 quality: Some(quality),
                 cover: None,
+                loudness: crate::replaygain::Loudness::from_playback_info(&info),
             };
             Ok(match info.manifest {
                 ManifestKind::Dash(dash) => {
@@ -661,6 +663,54 @@ mod tests {
             frames, declared_frames,
             "the decoded length differs from the manifest's"
         );
+    }
+
+    /// Confirms TIDAL's real `playbackinfopostpaywall` response actually carries the four
+    /// loudness fields `Loudness::from_playback_info` reads, and that they land on plausible
+    /// values, at both a lossless and a HiRes tier.
+    #[tokio::test]
+    #[ignore = "needs a TIDAL login and network"]
+    async fn a_real_tidal_track_carries_plausible_loudness_data() {
+        use crate::auth::{Interaction, open_store};
+        use crate::config::SessionStoreKind;
+
+        let id = std::env::var("TIDAL_TRACK").unwrap_or_else(|_| "233059491".to_string());
+        for quality in [Quality::Lossless, Quality::Hires] {
+            let store = open_store(SessionStoreKind::default(), Interaction::Allow).unwrap();
+            let opener =
+                TidalOpener::from_store(crate::tidal::build_http_client().unwrap(), store, quality);
+            let loaded = opener
+                .open(TrackRef(id.clone()), Duration::ZERO)
+                .await
+                .unwrap();
+            let loudness = loaded
+                .meta
+                .loudness
+                .unwrap_or_else(|| panic!("track {id} at {quality} has no loudness data"));
+            eprintln!("track {id} at {quality}: {loudness:?}");
+            assert!(
+                (-20.0..=20.0).contains(&loudness.track_db),
+                "implausible track gain: {loudness:?}"
+            );
+            if let Some(peak) = loudness.track_peak {
+                assert!(
+                    (0.0..=1.5).contains(&peak),
+                    "implausible track peak: {loudness:?}"
+                );
+            }
+            if let Some(album_db) = loudness.album_db {
+                assert!(
+                    (-20.0..=20.0).contains(&album_db),
+                    "implausible album gain: {loudness:?}"
+                );
+            }
+            if let Some(peak) = loudness.album_peak {
+                assert!(
+                    (0.0..=1.5).contains(&peak),
+                    "implausible album peak: {loudness:?}"
+                );
+            }
+        }
     }
 
     fn session_with(store: Option<Arc<MemoryStore>>) -> TidalSession {

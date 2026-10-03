@@ -77,6 +77,16 @@ pub struct PlaybackInfo {
     pub manifest_mime_type: String,
     pub bit_depth: Option<u32>,
     pub sample_rate: Option<u32>,
+    /// TIDAL's own loudness measurement for the track, in dB (the gain to apply to reach its
+    /// reference level); `None` on older responses or a track TIDAL hasn't measured.
+    pub track_replay_gain: Option<f64>,
+    /// The track's true peak sample amplitude (linear, typically close to but not over 1.0).
+    pub track_peak_amplitude: Option<f64>,
+    /// Loudness measurement for the album the track is on, in dB; `None` when TIDAL has no album
+    /// measurement (a single, or an album it hasn't measured).
+    pub album_replay_gain: Option<f64>,
+    /// The album's true peak sample amplitude (linear).
+    pub album_peak_amplitude: Option<f64>,
     pub manifest: ManifestKind,
 }
 
@@ -103,6 +113,14 @@ struct RawPlaybackInfo {
     bit_depth: Option<u32>,
     #[serde(rename = "sampleRate", default)]
     sample_rate: Option<u32>,
+    #[serde(rename = "trackReplayGain", default)]
+    track_replay_gain: Option<f64>,
+    #[serde(rename = "trackPeakAmplitude", default)]
+    track_peak_amplitude: Option<f64>,
+    #[serde(rename = "albumReplayGain", default)]
+    album_replay_gain: Option<f64>,
+    #[serde(rename = "albumPeakAmplitude", default)]
+    album_peak_amplitude: Option<f64>,
     manifest: String,
 }
 
@@ -310,6 +328,10 @@ async fn fetch_at(
         manifest_mime_type: raw.manifest_mime_type,
         bit_depth: raw.bit_depth,
         sample_rate: raw.sample_rate,
+        track_replay_gain: raw.track_replay_gain,
+        track_peak_amplitude: raw.track_peak_amplitude,
+        album_replay_gain: raw.album_replay_gain,
+        album_peak_amplitude: raw.album_peak_amplitude,
         manifest,
     })
 }
@@ -356,6 +378,30 @@ pub fn print_playback_info(info: &PlaybackInfo) {
     );
     println!("Manifest MIME:   {}", info.manifest_mime_type);
     println!("Codecs:          {}", info.codecs().unwrap_or("?"));
+    println!(
+        "Track gain:      {}",
+        info.track_replay_gain
+            .map(|db| format!("{db:.2} dB"))
+            .unwrap_or_else(|| "?".to_string())
+    );
+    println!(
+        "Track peak:      {}",
+        info.track_peak_amplitude
+            .map(|peak| format!("{peak:.6}"))
+            .unwrap_or_else(|| "?".to_string())
+    );
+    println!(
+        "Album gain:      {}",
+        info.album_replay_gain
+            .map(|db| format!("{db:.2} dB"))
+            .unwrap_or_else(|| "?".to_string())
+    );
+    println!(
+        "Album peak:      {}",
+        info.album_peak_amplitude
+            .map(|peak| format!("{peak:.6}"))
+            .unwrap_or_else(|| "?".to_string())
+    );
 }
 
 #[cfg(test)]
@@ -442,6 +488,17 @@ mod tests {
     fn playbackinfo_with_manifest(audio_quality: &str, manifest: &str) -> (u16, String) {
         let body = format!(
             r#"{{"trackId":1,"audioMode":"STEREO","audioQuality":"{audio_quality}","manifestMimeType":"application/vnd.tidal.bts","manifest":"{}"}}"#,
+            BASE64.encode(manifest)
+        );
+        (200, body)
+    }
+
+    /// Like [`playbackinfo`], but with TIDAL's four loudness fields also present, as a real
+    /// response includes them.
+    fn playbackinfo_with_gain(audio_quality: &str) -> (u16, String) {
+        let manifest = r#"{"mimeType":"audio/flac","codecs":"flac","urls":["http://cdn/a.flac"]}"#;
+        let body = format!(
+            r#"{{"trackId":1,"audioMode":"STEREO","audioQuality":"{audio_quality}","manifestMimeType":"application/vnd.tidal.bts","trackReplayGain":-6.5,"trackPeakAmplitude":0.98,"albumReplayGain":-7.2,"albumPeakAmplitude":0.99,"manifest":"{}"}}"#,
             BASE64.encode(manifest)
         );
         (200, body)
@@ -548,6 +605,26 @@ mod tests {
             .unwrap();
         assert_eq!(info.audio_quality, "LOSSLESS");
         assert_eq!(asked.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_older_or_unmeasured_track_has_no_loudness_fields() {
+        let (base, _) = serve_playbackinfo(|_| playbackinfo("LOSSLESS")).await;
+        let info = fetch(&base, Quality::Lossless, Quality::Low).await.unwrap();
+        assert_eq!(info.track_replay_gain, None);
+        assert_eq!(info.track_peak_amplitude, None);
+        assert_eq!(info.album_replay_gain, None);
+        assert_eq!(info.album_peak_amplitude, None);
+    }
+
+    #[tokio::test]
+    async fn loudness_fields_are_parsed_when_tidal_sends_them() {
+        let (base, _) = serve_playbackinfo(|_| playbackinfo_with_gain("LOSSLESS")).await;
+        let info = fetch(&base, Quality::Lossless, Quality::Low).await.unwrap();
+        assert_eq!(info.track_replay_gain, Some(-6.5));
+        assert_eq!(info.track_peak_amplitude, Some(0.98));
+        assert_eq!(info.album_replay_gain, Some(-7.2));
+        assert_eq!(info.album_peak_amplitude, Some(0.99));
     }
 
     #[tokio::test]

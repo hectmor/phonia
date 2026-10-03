@@ -936,3 +936,98 @@ replaces it, and a long message is truncated with `…` rather than wrapped
 or silently cut).
 
 This closes #28: all 3 parts of the approved plan are merged.
+
+## 2026-10-03 — #30: ReplayGain is scaled in the shared sink only, never server-side
+
+Picked after #28 shipped. A read-only investigation found TIDAL already
+sends everything needed: `playbackinfopostpaywall` (fetched on every
+track open already) carries `trackReplayGain`/`trackPeakAmplitude`/
+`albumReplayGain`/`albumPeakAmplitude`; phonia's own `RawPlaybackInfo` in
+`tidal.rs` simply didn't declare those four fields, so they were silently
+dropped from JSON already being parsed.
+
+**Central question: where does the gain actually get applied?** The
+investigation's own leaning — fold it into shared mode's existing
+PipeWire cvolume call, the same path volume/mute already use — was
+rejected by the plan in favor of **scaling samples in process, confined
+entirely to `SharedSink`**, for a concrete reason the investigation had
+not considered: shared mode's buffer is roughly 0.65s deep (the ring
+holds a quarter-second, the server itself targets another 2/5s), so a
+volume command issued at a track boundary would land on audio from
+*around* that boundary, not at it — misapplying the outgoing track's gain
+to a few hundred milliseconds of the incoming track during a gapless
+join, and vice versa. Server volume would also move the desktop mixer's
+displayed percentage (polluting a control the person didn't touch),
+fight with phonia's own echo-suppression for its own volume readback, and
+needs new math regardless, since PipeWire's "raw" volume is cubic in
+amplitude, not linear.
+
+Exclusive mode gets **no new code at all**: a new `AudioSink::set_gain(&mut
+self, linear: f64)` trait method defaults to a no-op body, and `AlsaSink`
+never overrides it. Bit-perfect-or-refuse stays true by construction —
+there is no runtime flag that could be left in the wrong state — rather
+than by every call site remembering not to apply gain in exclusive mode.
+
+**Track gain vs. album gain** follows play order, not queue order: album
+gain applies when shuffle is off and the adjacent entry in play order
+shares the same `album_id`; track gain otherwise, since shuffle breaks
+album sequencing and an album-wide gain would be meaningless applied to
+songs from different albums back to back. This needs a new
+`album_id: Option<String>` threaded from `SourceInfo` to `QueueTrack`,
+mirroring the `cover` field's own precedent exactly (#21/#24) — nothing
+existing carries album identity this far; gapless (#27) is purely
+format-based and has no concept of an album at all.
+
+**Clip protection is always on, with no setting to disable it**: the
+final applied gain is capped at `-20·log10(peak)` so a positive (boost)
+gain can never clip a track whose true peak TIDAL reported; negative
+gains are never touched by the cap, and a missing peak caps a boost at
+0 dB (never silently trusted to be safe).
+
+**Config defaults to `off`.** This is the first feature where phonia
+alters a sample's value at all — on by default would contradict every
+prior "never degrade without being told" choice in this project (DAC
+reservation, bit-perfect-or-refuse, shared mode's own explicit
+not-bit-perfect labelling). `[playback] replaygain = off|track|album|auto`
+is file-only, like `gapless`, with no CLI flag.
+
+**Displayed only when actually applied** (shared mode, gain != 0): the
+TUI's flags area and `phonia ctl status`'s new `Gain:` line show it;
+nothing is added to exclusive mode or to #28's own signal-path line — the
+`BIT-PERFECT` verdict there already says everything worth saying, and a
+redundant "not applied" note would just be noise.
+
+**Wire protocol 1.8** (additive): a new `phonia_ipc::ReplayGain { kind:
+GainKind, millibels: i32 }`, carried on both `dto::Track` and
+`Event::TrackStarted` (so a gapless album's per-track gain updates
+through the existing `TrackStarted` handler, no new plumbing). Millibels,
+not a float, because every IPC type derives `Eq` and floats don't. No new
+`Status` field: the value is fully derivable from `track.replay_gain` +
+`status.route.mode`.
+
+**PR split (4 parts, approved up front):** part 1 (this entry) — TIDAL's
+loudness data reaches `TrackMeta`, no behavior change at all. Part 2 —
+album identity, the `choose()` decision logic (track vs. album, peak
+capping), and the config key; decided but not yet audibly applied. Part
+3 — the first audible change: `AudioSink::set_gain`, `SharedSink`
+applying it per write with the lead-in/outgoing-tail crossing rule for
+gapless joins. Part 4 — protocol 1.8, `ctl`'s `Gain:` line, the TUI's
+flags display.
+
+**This part:** `RawPlaybackInfo`/`PlaybackInfo` in `tidal.rs` gained the
+four optional fields (default-missing, for older responses); a new
+`replaygain.rs` module holds just `Loudness` (a pure data type) and
+`Loudness::from_playback_info`, which returns `None` when TIDAL sends no
+track gain at all (the one field that's never absent when there's
+anything to report). `TrackMeta` gained `loudness: Option<Loudness>`,
+filled by `TidalOpener::open` from the playback info already being
+fetched; `FileOpener` leaves it `None` (the seam is ready for reading
+local-file ReplayGain tags later, out of scope for #30). Verified against
+a real TIDAL track at both LOSSLESS and HI_RES_LOSSLESS (`-10.78 dB`
+track / `-11.24 dB` album, `0.988553` peak both ways, same track measured
+once per tier) via a new `#[ignore]`d test, run by hand.
+
+Out of scope for #30: ReplayGain tags in local files, a runtime IPC
+setter for the replaygain mode, and applying gain through a DAC's
+hardware mixer in exclusive mode (left for a future issue if ever
+wanted).
