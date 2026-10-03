@@ -41,6 +41,13 @@ fn ramp(frames: usize) -> Vec<i32> {
     (0..frames * 2).map(|i| i as i32).collect()
 }
 
+fn gain_of(db: f32) -> crate::replaygain::AppliedGain {
+    crate::replaygain::AppliedGain {
+        kind: crate::replaygain::Kind::Track,
+        db,
+    }
+}
+
 #[derive(Clone)]
 enum Media {
     Pcm {
@@ -65,6 +72,7 @@ struct TestTrack {
     seek: SeekMode,
     /// Opening this track anywhere but the start fails, to exercise a failed seek.
     fail_reopen: bool,
+    gain: Option<crate::replaygain::AppliedGain>,
 }
 
 impl TestTrack {
@@ -75,6 +83,7 @@ impl TestTrack {
             open_delay: Duration::ZERO,
             seek: SeekMode::None,
             fail_reopen: false,
+            gain: None,
         }
     }
 
@@ -122,6 +131,11 @@ impl TestTrack {
 
     fn failing_reopen(mut self) -> Self {
         self.fail_reopen = true;
+        self
+    }
+
+    fn with_gain(mut self, gain: crate::replaygain::AppliedGain) -> Self {
+        self.gain = Some(gain);
         self
     }
 }
@@ -244,6 +258,7 @@ impl TestSupplier {
                 quality: None,
                 cover: None,
                 loudness: None,
+                gain: test_track.gain,
             };
             let loaded = match test_track.media {
                 Media::Pcm { samples, spec } => {
@@ -526,6 +541,34 @@ fn plays_a_track_to_the_end_and_reports_the_whole_lifecycle() {
         ramp(10_000),
         "every sample, in order, exactly once"
     );
+}
+
+#[test]
+fn a_tracks_own_gain_scales_every_sample_the_sink_sees() {
+    let gain = gain_of(-6.0);
+    let mut h = Harness::new(
+        vec![TestTrack::pcm("a", 10_000).with_gain(gain)],
+        FakeSinkFactory::autoplay(),
+    );
+    h.play("a");
+    h.events_until(is_stopped);
+
+    assert_eq!(
+        h.sink(0).played(),
+        crate::output::scale_samples(&ramp(10_000), gain.linear()),
+        "the sink receives the track's samples already scaled"
+    );
+}
+
+#[test]
+fn no_configured_gain_leaves_samples_untouched() {
+    let mut h = Harness::new(
+        vec![TestTrack::pcm("a", 1_000)],
+        FakeSinkFactory::autoplay(),
+    );
+    h.play("a");
+    h.events_until(is_stopped);
+    assert_eq!(h.sink(0).played(), ramp(1_000));
 }
 
 #[test]
@@ -819,6 +862,7 @@ fn load_results_nobody_asked_for_are_ignored() {
             quality: None,
             cover: None,
             loudness: None,
+            gain: None,
         },
         ramp(100),
         SPEC_48K,
@@ -2447,6 +2491,29 @@ fn two_tracks_of_the_same_format_are_one_unbroken_stream_with_no_drain_between()
 }
 
 #[test]
+fn a_gapless_join_switches_gain_exactly_at_the_boundary() {
+    let (gain_a, gain_b) = (gain_of(-6.0), gain_of(3.0));
+    let (mut h, sink) = play_and_prefetch(
+        vec![
+            TestTrack::pcm("a", 30_000).with_gain(gain_a),
+            TestTrack::pcm("b", 10_000).with_gain(gain_b),
+        ],
+        "b",
+        gapless_options(),
+    );
+    sink.set_blocking(false);
+    h.events_until(is_stopped);
+
+    let mut expected = crate::output::scale_samples(&ramp(30_000), gain_a.linear());
+    expected.extend(crate::output::scale_samples(&ramp(10_000), gain_b.linear()));
+    assert_eq!(
+        sink.played(),
+        expected,
+        "a's tail at a's gain, b's head at b's gain, joined with no frame at the wrong one"
+    );
+}
+
+#[test]
 fn the_next_track_is_announced_when_it_is_heard_not_when_it_is_written() {
     let (mut h, sink) = play_and_prefetch(
         vec![TestTrack::pcm("a", 4_000), TestTrack::pcm("b", 30_000)],
@@ -2688,6 +2755,43 @@ fn switching_the_output_while_the_next_track_is_joined_loses_and_repeats_nothing
     assert_eq!(
         played, expected,
         "a then b, exactly, across the two outputs"
+    );
+}
+
+#[test]
+fn switching_output_mid_crossing_still_gives_each_track_its_own_gain() {
+    // The switch happens while some of b is already written behind a but neither has been heard
+    // yet (nothing was `advance`d): `set_aside_unheard` must then carry the still-unheard tail of
+    // a and the head of b into the new sink's `pending` as one buffer, split at `lead_in` so each
+    // half keeps being written with its own track's gain rather than whichever is `current` by
+    // the time the rewrite happens.
+    let (gain_a, gain_b) = (gain_of(-6.0), gain_of(3.0));
+    let (mut h, sink) = play_and_prefetch(
+        vec![
+            TestTrack::pcm("a", 4_000).with_gain(gain_a),
+            TestTrack::pcm("b", 30_000).with_gain(gain_b),
+        ],
+        "b",
+        gapless_options(),
+    );
+    wait_until("b is written behind a", || {
+        sink.queued_frames() > 4_000 - PERIOD
+    });
+    let second = FakeSinkFactory::blocking();
+    switch_output(&h, &sink, &second);
+    wait_until("playing on the new output", || {
+        second.handles().len() == 1 && h.engine.status().state == State::Playing
+    });
+    second.handles()[0].set_blocking(false);
+    let _ = h.events_until(is_stopped);
+
+    let mut played = h.sink(0).played();
+    played.extend(second.handles()[0].played());
+    let mut expected = crate::output::scale_samples(&ramp(4_000), gain_a.linear());
+    expected.extend(crate::output::scale_samples(&ramp(30_000), gain_b.linear()));
+    assert_eq!(
+        played, expected,
+        "a's samples at a's gain, b's at b's, even though the switch rewrote a mixed buffer"
     );
 }
 

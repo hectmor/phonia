@@ -1086,3 +1086,59 @@ Still nothing audible: no sink reads `AppliedGain`, no sample is scaled.
 That is part 3. Verified with `phonia config show` and a real
 `config.toml` carrying `replaygain = "auto"` (`(config file)` shown, not
 `(default)`) in addition to the unit test suite.
+
+## 2026-10-03 — #30 part 3 (first audible change): gain is scaled inside `SharedSink` only
+
+Adds `AudioSink::set_gain(&mut self, linear: f32)` with a **default body that does nothing**, not
+a flag `AlsaSink` has to remember to check. `alsa::AlsaSink` does not override it at all — zero new
+lines in that file — so exclusive mode stays bit-perfect-or-refuse by construction: there is no
+runtime state anywhere that could be left wrong and silently degrade a bit-perfect stream. Only
+`shared::SharedSink` overrides it, scaling samples in `write` with a new `scale_samples(samples,
+gain)` helper (`output/mod.rs`, `pub(crate)`, shared with `fake.rs`): rounds to the nearest integer
+and clamps to `i32::MIN..=i32::MAX`, so a boost near full scale saturates instead of wrapping to a
+huge negative value.
+
+**Where `TrackMeta.gain` gets its value**: not computed by the engine at all. `Queue::open_entry`
+(the same place `cover` is already filled in from the queue item, and `record_meta` is already
+called) now also does `loaded.meta.gain = loaded.meta.loudness.as_ref().and_then(|loudness|
+queue.applied_gain(id, loudness))` — reusing #30 part 2's `Queue::applied_gain` directly. This
+means the engine's own code never has to know about `Mode`, album context, or even that a `Queue`
+exists: by the time a `TrackMeta` reaches `audio_thread.rs`, its `gain` is already the final,
+settled answer, exactly the same layering already used for `cover`/`loudness`.
+
+**The subtle part: which track's gain applies to a given `write` call.** Normally the answer is
+trivial — `playing.pending` is always `self.current`'s own decoded audio, so `playing.meta`'s gain
+applies to every write, full stop. The one real exception is `set_aside_unheard` (called when the
+device is reopened mid-track: an output switch, a release): during a gapless crossing, it rebuilds
+`pending` from `recent` (the rolling buffer of what was already written to the old sink but not
+yet heard) plus whatever hadn't been sent yet. If the reopen happens while the listener is still
+inside the *previous* track's tail — `playing.lead_in` tracks exactly where, in the frame-counter
+space, the previous track's audio ends and the current one's begins — that rebuilt buffer can
+genuinely mix both tracks' samples in one `Vec`. `play_step` handles this by comparing
+`playing.frames_written` against `playing.lead_in` before every write: while still short of it, the
+write is capped at the boundary (so a single `write()` call is never split across two gains) and
+uses `outgoing.meta`'s gain; once past it, `playing.meta`'s gain applies as normal. Caught early by
+writing the regression test first (`switching_output_mid_crossing_still_gives_each_track_its_own_gain`,
+modeled directly on the pre-existing `switching_the_output_while_the_next_track_is_joined_...`
+test) rather than discovering the mixed-buffer case by inspection alone — the test reuses that
+existing scenario's exact timing (switching while "b is written behind a") specifically because
+that is what forces `set_aside_unheard` to run with `self.outgoing` still `Some`.
+
+**`FakeSink` gained the same scaling `SharedSink` has** (recording which gain was in effect for
+each write, the way a real `SharedSink` would convert it to louder or quieter samples), purely so
+the engine's own gain-selection and lead-in-splitting logic has a test double to run against — it
+does **not** mean `AlsaSink`-backed (exclusive) playback scales anything for real; `FakeSink` here
+is standing in for "whatever the write ends up doing," the same way it already stands in for ALSA's
+blocking/period behavior in every other engine test. No change needed to the non-gapless case or to
+`recent`'s own bookkeeping: `recent` already stored pre-gain (raw, as-decoded) samples before this
+part, which turns out to be exactly right — re-scaling them on replay, per the rule above, is
+correct precisely because they were never scaled going in.
+
+**Verified for real against PipeWire** (a null sink loaded and torn down by the test itself, `parec`
+recording its monitor): `set_gain_scales_every_sample_written_after_it` writes a known ramp with
+`set_gain(0.5)` and confirms the exact halved sequence appears in what was recorded;
+`a_gain_change_lands_on_the_exact_frame_boundary` writes unscaled audio, then calls `set_gain(0.5)`
+mid-stream and writes more, confirming the unscaled-then-exactly-halved sequence appears joined
+with no sample caught at the wrong gain. Both ignored by default (`needs a sound server, pactl and
+parec`), run by hand like every other test in this file's "against the real sound server" section.
+No real ALSA/DAC hardware test is needed: exclusive mode has no new code to verify.

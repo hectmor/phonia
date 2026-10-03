@@ -62,6 +62,8 @@ pub struct SharedSink<T: Transport> {
     server_target_frames: u64,
     /// Told what the sink is doing when the first audio goes in.
     report: Option<(ReportHandler, SinkReport)>,
+    /// What `write` scales samples by; see [`AudioSink::set_gain`].
+    gain: f32,
 }
 
 impl<T: Transport> SharedSink<T> {
@@ -83,6 +85,7 @@ impl<T: Transport> SharedSink<T> {
             needs_silence: false,
             server_target_frames,
             report,
+            gain: 1.0,
         }
     }
 
@@ -121,10 +124,21 @@ impl<T: Transport> AudioSink for SharedSink<T> {
             + u64::from(self.spec.sample_rate)
     }
 
+    fn set_gain(&mut self, linear: f32) {
+        self.gain = linear;
+    }
+
     fn write(&mut self, samples: &[i32]) -> Result<usize> {
         if self.needs_silence {
             self.add_silence();
         }
+        let scaled;
+        let samples = if self.gain == 1.0 {
+            samples
+        } else {
+            scaled = super::scale_samples(samples, self.gain);
+            &scaled[..]
+        };
         let frames = self.ring.write(samples)?;
         if frames > 0
             && let Some((handler, report)) = self.report.take()

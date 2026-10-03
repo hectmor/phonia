@@ -70,7 +70,7 @@ done — it is its own product decision, not a leftover.
 | #25 | DAC capability detection | Code complete (PRs #106–#109, all 4 parts); **issue left open on GitHub, worth closing by hand** |
 | #26 | Per-track sample rate switching | Code complete, same plan and PRs as #25; **issue left open on GitHub, worth closing by hand** |
 | #28 | Signal path indicator in the TUI | Code complete (PRs #110–#112, all 3 parts); **issue left open on GitHub, worth closing by hand** |
-| #30 | ReplayGain in shared mode | In progress (approved 4-PR plan; parts 1–2 done) |
+| #30 | ReplayGain in shared mode | In progress (approved 4-PR plan; parts 1–3 done) |
 | #31 | Hardware mixer volume | Not started |
 
 ### Phases 4 and 5
@@ -242,7 +242,29 @@ shuffled, whatever the shuffled order happens to put next to what.
 `Queue::set_replay_gain(mode)` is called once at daemon startup from
 config; there is no runtime IPC setter, on purpose (#30's own scope
 excludes one). `Queue::applied_gain(id, loudness)` is what the engine
-will call in part 3 to get the final `AppliedGain` for a track.
+calls (from `Queue::open_entry`, once per open, alongside the existing
+`cover`/`record_meta` fill-ins) to decide `TrackMeta.gain`.
+
+Part 3 (merged) is the first audible change. A new `AudioSink::set_gain`
+defaults to doing nothing, so `alsa::AlsaSink` needs no changes at all —
+exclusive mode stays bit-perfect by construction, not by a flag someone
+has to remember. Only `shared::SharedSink` overrides it, scaling every
+sample in `write` by the gain in force. `engine::audio_thread::play_step`
+calls `sink.set_gain` before every write, from `TrackMeta.gain_linear()`
+of whichever track that write's samples actually belong to — normally
+the one playing, except right after a device reopen interrupts a gapless
+crossing (an output switch, a release): `set_aside_unheard` can then hand
+back a buffer that mixes the tail of the outgoing track with the head of
+the next one, so `play_step` caps that write at the `lead_in` boundary
+and picks the outgoing track's gain for the part before it. A new
+`a_boost_saturates_instead_of_wrapping`-style `scale_samples` helper
+(`output/mod.rs`) rounds and clamps so a boost near full scale saturates
+instead of wrapping; `FakeSink` gained the same scaling (recording what
+gain was in effect, like a real `SharedSink` would) so the engine's own
+gain-selection logic is unit-tested without a real sound server. Verified
+for real against PipeWire (a null sink, `parec`): a known ramp halved
+exactly by `set_gain(0.5)`, and a gain change landing on the exact frame
+boundary between an unscaled and a scaled half.
 
 **#31 (hardware mixer volume)** is not started.
 

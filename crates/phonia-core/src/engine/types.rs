@@ -23,6 +23,16 @@ pub struct TrackMeta {
     /// TIDAL's loudness measurement for the track (and its album, if any); `None` for a local
     /// file, or a TIDAL track TIDAL hasn't measured.
     pub loudness: Option<Loudness>,
+    /// The gain decided for this track by `replaygain::choose` (via `Queue::applied_gain`, at the
+    /// moment it was opened); `None` if ReplayGain is off, or there is nothing to apply it to.
+    pub gain: Option<crate::replaygain::AppliedGain>,
+}
+
+impl TrackMeta {
+    /// [`TrackMeta::gain`] as a linear multiplier: 1.0 (no change) when there is none.
+    pub fn gain_linear(&self) -> f32 {
+        self.gain.map_or(1.0, |gain| gain.linear())
+    }
 }
 
 /// The quality tier a streamed track was asked for, and the one TIDAL actually gave.

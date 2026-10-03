@@ -53,6 +53,9 @@ pub struct FakeSink {
     period_frames: usize,
     capacity_frames: usize,
     shared: Arc<Shared>,
+    /// What `write` scales samples by, set by `AudioSink::set_gain`; lets tests verify exactly
+    /// what the engine asked to have scaled and when, the same way a real `SharedSink` would.
+    gain: f32,
 }
 
 /// A view onto a [`FakeSink`] that stays usable from the test thread while the sink itself has
@@ -90,6 +93,7 @@ impl FakeSink {
                 period_frames,
                 capacity_frames,
                 shared,
+                gain: 1.0,
             },
             handle,
         )
@@ -174,10 +178,21 @@ impl AudioSink for FakeSink {
         self.capacity_frames as u64
     }
 
+    fn set_gain(&mut self, linear: f32) {
+        self.gain = linear;
+    }
+
     fn write(&mut self, samples: &[i32]) -> Result<usize> {
         let channels = self.spec.channels as usize;
         let frames = (samples.len() / channels).min(self.period_frames);
         let samples = &samples[..frames * channels];
+        let scaled;
+        let samples = if self.gain == 1.0 {
+            samples
+        } else {
+            scaled = super::scale_samples(samples, self.gain);
+            &scaled[..]
+        };
         let capacity = self.capacity_frames * channels;
 
         let deadline = Instant::now() + BLOCKED_WRITE_TIMEOUT;

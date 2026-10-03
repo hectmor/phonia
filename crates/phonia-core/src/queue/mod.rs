@@ -261,6 +261,11 @@ impl Queue {
             loaded.meta.duration = loaded.meta.duration.or(item.track.duration);
             loaded.meta.cover = loaded.meta.cover.or(item.track.cover);
             if let Some(queue) = me.upgrade() {
+                loaded.meta.gain = loaded
+                    .meta
+                    .loudness
+                    .as_ref()
+                    .and_then(|loudness| queue.applied_gain(id, loudness));
                 queue.record_meta(id, &loaded.meta);
             }
             Ok(loaded)

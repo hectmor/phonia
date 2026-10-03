@@ -91,6 +91,55 @@ pub trait AudioSink {
     /// Blocks until everything queued has been played. The sink can be written to again
     /// afterwards: the engine reuses it for the next track of the same format.
     fn drain(&mut self) -> Result<()>;
+
+    /// Sets the linear gain (1.0 = unity) applied to every sample from the next [`AudioSink::write`]
+    /// on. The default does nothing: a sink that never overrides it (`alsa::AlsaSink`) stays
+    /// bit-perfect by construction, with no flag anywhere that could be left wrong. Only
+    /// `shared::SharedSink` overrides it — scaling a sample is already what shared mode's
+    /// resampling and format conversion do, so it costs this mode nothing it didn't already give up
+    /// (see #30 in `docs/DECISIONS.md`).
+    fn set_gain(&mut self, _linear: f32) {}
+}
+
+/// Scales left-justified `i32` PCM by a linear gain, rounding to the nearest value and clamping so
+/// a boost that would push a sample past full scale saturates instead of wrapping.
+pub(crate) fn scale_samples(samples: &[i32], gain: f32) -> Vec<i32> {
+    samples
+        .iter()
+        .map(|&sample| {
+            let scaled = (f64::from(sample) * f64::from(gain)).round();
+            scaled.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unity_gain_changes_nothing() {
+        let samples = [100, -200, i32::MAX, i32::MIN];
+        assert_eq!(scale_samples(&samples, 1.0), samples);
+    }
+
+    #[test]
+    fn a_fractional_gain_scales_and_rounds() {
+        assert_eq!(scale_samples(&[1000, -1000, 3], 0.5), [500, -500, 2]);
+    }
+
+    #[test]
+    fn a_boost_saturates_instead_of_wrapping() {
+        assert_eq!(
+            scale_samples(&[i32::MAX, i32::MIN], 2.0),
+            [i32::MAX, i32::MIN]
+        );
+    }
+
+    #[test]
+    fn zero_gain_is_silence() {
+        assert_eq!(scale_samples(&[123, -456], 0.0), [0, 0]);
+    }
 }
 
 /// Opens sinks for the engine, which decides when (a new track with a different format needs a
