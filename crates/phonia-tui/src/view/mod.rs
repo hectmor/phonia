@@ -456,6 +456,14 @@ fn flags(state: &State) -> String {
             format!("vol {}%", volume.percent)
         });
     }
+    if let Some(gain) = state.status.as_ref().and_then(|status| {
+        status
+            .track
+            .as_ref()
+            .and_then(|track| phonia_ipc::fmt::replay_gain(track, status.route.as_ref()))
+    }) {
+        flags.push(gain);
+    }
     if let Some(queue) = &state.queue {
         if queue.shuffle {
             flags.push("shuffle".to_string());
@@ -677,6 +685,7 @@ mod tests {
                 gapless: false,
                 quality: None,
                 cover: None,
+                replay_gain: None,
             }),
         );
         update(
@@ -852,6 +861,48 @@ mod tests {
     }
 
     #[test]
+    fn a_gain_actually_applied_in_shared_mode_is_shown_next_to_the_volume() {
+        use phonia_ipc::{GainKind, OutputMode, ReplayGain, Route, Track};
+        let mut state = connected();
+        let gained_track = Track {
+            item_id: None,
+            source: Some("tidal:1".into()),
+            title: Some("Song".into()),
+            duration_ms: None,
+            quality: None,
+            cover: None,
+            replay_gain: Some(ReplayGain {
+                kind: GainKind::Track,
+                millibels: -600,
+            }),
+        };
+        state.status.as_mut().unwrap().track = Some(gained_track.clone());
+        assert_eq!(
+            flags(&state),
+            "",
+            "no route yet: never shown without knowing the output is shared"
+        );
+
+        state.status.as_mut().unwrap().route = Some(Route {
+            id: "exclusive:hw:1,0".into(),
+            mode: OutputMode::Exclusive,
+            description: "DS2".into(),
+        });
+        assert_eq!(
+            flags(&state),
+            "",
+            "decided but never applied in exclusive mode: not shown"
+        );
+
+        state.status.as_mut().unwrap().route = Some(Route {
+            id: "shared:default".into(),
+            mode: OutputMode::Shared,
+            description: "Speakers".into(),
+        });
+        assert_eq!(flags(&state), "RG -6.0 dB (track)");
+    }
+
+    #[test]
     fn the_controls_are_listed_in_the_bar() {
         let text = screen(&connected(), 140, 12);
         for wanted in [
@@ -888,6 +939,7 @@ mod tests {
                     delivered: phonia_ipc::Quality::Lossless,
                 }),
                 cover: None,
+                replay_gain: None,
             }),
         );
         let text = screen(&state, 120, 12);
@@ -912,6 +964,7 @@ mod tests {
                 gapless: false,
                 quality: None,
                 cover: None,
+                replay_gain: None,
             }),
         );
         state
@@ -1047,6 +1100,7 @@ mod tests {
                 gapless: false,
                 quality: None,
                 cover: None,
+                replay_gain: None,
             }),
         );
         let text = screen(&state, 120, 12);
@@ -2206,6 +2260,7 @@ mod tests {
                 gapless: false,
                 quality: None,
                 cover: Some(cover_id.into()),
+                replay_gain: None,
             }),
         );
 
@@ -2278,6 +2333,7 @@ mod tests {
                     gapless: false,
                     quality: None,
                     cover: Some("3c6247c7-d0d7-4978-91b1-0bddc13f45b5".into()),
+                    replay_gain: None,
                 }),
             );
             state

@@ -9,6 +9,7 @@ use phonia_core::engine::{self, Delivered, EndReason, OutputState, ReleaseReason
 use phonia_core::output::alsa::{ProcReading, SinkReport};
 use phonia_core::output::catalog::{self, Entry};
 use phonia_core::queue::{self, ItemId, QueueSnapshot};
+use phonia_core::replaygain;
 use phonia_ipc as ipc;
 use std::time::Duration;
 
@@ -229,6 +230,16 @@ pub fn catalog_error(error: &CatalogError) -> (ipc::ErrorCode, String) {
     (code, error.to_string())
 }
 
+fn replay_gain(gain: replaygain::AppliedGain) -> ipc::ReplayGain {
+    ipc::ReplayGain {
+        kind: match gain.kind {
+            replaygain::Kind::Track => ipc::GainKind::Track,
+            replaygain::Kind::Album => ipc::GainKind::Album,
+        },
+        millibels: (gain.db * 100.0).round() as i32,
+    }
+}
+
 pub fn status_dto(
     status: &engine::Status,
     queue: &QueueSnapshot,
@@ -247,6 +258,7 @@ pub fn status_dto(
                 duration_ms: meta.duration.map(ms),
                 quality: meta.quality.as_ref().map(stream_quality),
                 cover: meta.cover.clone(),
+                replay_gain: meta.gain.map(replay_gain),
             }
         }),
         spec: status.spec.map(spec),
@@ -344,6 +356,7 @@ pub fn event(event: &engine::Event, queue: &QueueSnapshot) -> ipc::Event {
                 gapless: *gapless,
                 quality: meta.quality.as_ref().map(stream_quality),
                 cover: meta.cover.clone(),
+                replay_gain: meta.gain.map(replay_gain),
             }
         }
         engine::Event::TrackEnded { meta, reason } => ipc::Event::TrackEnded {

@@ -45,6 +45,28 @@ pub struct Track {
     /// local file or a TIDAL track with no album (since 1.6).
     #[serde(default)]
     pub cover: Option<String>,
+    /// The gain ReplayGain decided for this track, if `replaygain` is not `off` and TIDAL has
+    /// loudness data for it; absent otherwise. This is decided the same way whatever the output,
+    /// but only actually applied to the audio in shared mode: a client shows it only when
+    /// `route.mode` is `shared` too (since 1.8).
+    #[serde(default)]
+    pub replay_gain: Option<ReplayGain>,
+}
+
+/// The gain [`crate::fmt::replay_gain`] decided on, as millibels (hundredths of a dB) rather than
+/// a float, so this type (and everything that contains it) can derive `Eq`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayGain {
+    pub kind: GainKind,
+    pub millibels: i32,
+}
+
+/// Which of a track's two possible gains was actually used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GainKind {
+    Track,
+    Album,
 }
 
 /// A TIDAL quality tier, worst to best: `low < high < lossless < hires`. `high` and `low` are

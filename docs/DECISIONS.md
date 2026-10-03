@@ -1142,3 +1142,44 @@ mid-stream and writes more, confirming the unscaled-then-exactly-halved sequence
 with no sample caught at the wrong gain. Both ignored by default (`needs a sound server, pactl and
 parec`), run by hand like every other test in this file's "against the real sound server" section.
 No real ALSA/DAC hardware test is needed: exclusive mode has no new code to verify.
+
+## 2026-10-03 — #30 part 4 (last): a gain is shown only where it was actually applied
+
+Wire protocol 1.8: `dto::Track` and `Event::TrackStarted` both gain `replay_gain:
+Option<ReplayGain>`, where `ReplayGain { kind: GainKind, millibels: i32 }` — millibels, not a
+float, for the same reason `SinkReport`'s own numeric fields are integers: every IPC type derives
+`Eq`, and `f32`/`f64` don't. `GainKind` mirrors `replaygain::Kind` (`Track`/`Album`). No new
+`Status` field: the value is fully derivable from `track.replay_gain` and `status.route`, so there
+is nothing to keep in sync between two places. `convert::replay_gain` is the one conversion point
+(`AppliedGain { kind, db }` → `ReplayGain { kind, millibels }`, `db * 100.0` rounded), called from
+both `status_dto` and `event` wherever `meta.gain` already is.
+
+**The one real design decision here**: a new `phonia_ipc::fmt::replay_gain(track, route) ->
+Option<String>` decides whether to show anything at all, and it checks *two* things, not one —
+`track.replay_gain.is_some()` **and** `route.mode == Shared`. A gain is decided by
+`Queue::applied_gain` the same way regardless of which sink ends up playing the track (the
+decision doesn't know about exclusive vs. shared at all), but it is only ever actually scaled into
+the audio inside `SharedSink` (part 3). Showing `RG -2.9 dB` next to an exclusive-mode track would
+therefore claim an effect that never happened — the number would be real, but misleading about
+what the listener is actually hearing. This is exactly the same reasoning #25/#26 already applied
+to `catalog.rs`'s `bit_perfect` flag (describe what the route actually does, not what was merely
+computed), reused here rather than re-derived.
+
+Display text: `RG {millibels/100:+.1} dB ({kind})`, e.g. `RG -2.9 dB (album)` or `RG +1.2 dB
+(track)` — always signed, since a boost is the rarer and more surprising case and deserves to be
+unambiguous at a glance. `phonia ctl status` gained a `Gain:` line, placed right after `Quality:`
+(both describe the track, not the output). The TUI's bar shows the same text next to the volume in
+`flags()`, so it appears exactly when there is something to say and nothing otherwise — no empty
+line, no placeholder. Nothing was added to #28's own signal-path line: that line already answers
+"what format, through what device, bit-perfect or not," and a loudness adjustment is a different
+question from format fidelity: conflating them would make that line's one job less clear, not more
+complete.
+
+Tested the way `ctl.rs` and the TUI already test everything else: `format_status` gets a
+shared-with-gain case (shows the line) and an exclusive-with-the-same-gain case (does not),
+confirming the route check actually gates the display and not just the data's presence. The TUI's
+`flags()` gets the same three-state progression (no route yet → exclusive → shared) as a single
+test, matching the existing `TestBackend`-based verification style used for every other display
+decision in this codebase.
+
+This closes #30: all 4 parts of the approved plan are merged.
