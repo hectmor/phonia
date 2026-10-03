@@ -458,9 +458,15 @@ samples changes, so it is as bit-perfect as before.
 the track's when TIDAL has none for the album) or `auto` (the album's gain when the track sits
 next to another entry of the same album in play order and shuffle is off, the track's own
 otherwise). A boost is capped so the track's own reported true peak never clips; a cut is never
-capped. This is decided per track already (`phonia play --info` prints what TIDAL sent), but not
-yet audibly applied to any output -- that is the next part of #30, confined to shared mode only,
-since exclusive mode stays bit-perfect-or-refuse.
+capped.
+
+The gain is applied **in shared mode only**, by scaling samples before they reach the sound
+server -- exactly the one mode that already isn't bit-perfect. Exclusive mode gets no new code at
+all: `AudioSink::set_gain` defaults to doing nothing, and `AlsaSink` never overrides it, so a
+sound card phonia owns outright stays bit-perfect-or-refuse exactly as before, whatever
+`replaygain` says. A gapless join between two tracks with different gains switches exactly at the
+sample boundary between them, even if the output is switched mid-join. There is no indicator yet
+for what gain is in effect -- that's the last part of #30.
 
 ## Shared mode: any output, not bit-perfect
 

@@ -1270,8 +1270,8 @@ mod tests {
             Recorder { child, path }
         }
 
-        /// The runs `(first frame, length)` of the ramp in what was recorded, ignoring silence.
-        fn runs(mut self) -> Vec<(i64, usize)> {
+        /// Every sample recorded, in order, including any leading or trailing silence.
+        fn raw(mut self) -> Vec<i32> {
             std::thread::sleep(Duration::from_millis(500));
             // SIGINT makes parec flush what it has buffered before it exits; a kill would lose it.
             // SAFETY: signalling a child process we started and still hold.
@@ -1279,12 +1279,17 @@ mod tests {
             let _ = self.child.wait();
             let bytes = std::fs::read(&self.path).unwrap();
             let _ = std::fs::remove_file(&self.path);
-            let samples: Vec<i32> = bytes
+            bytes
                 .as_chunks::<4>()
                 .0
                 .iter()
                 .map(|c| i32::from_le_bytes(*c))
-                .collect();
+                .collect()
+        }
+
+        /// The runs `(first frame, length)` of the ramp in what was recorded, ignoring silence.
+        fn runs(self) -> Vec<(i64, usize)> {
+            let samples = self.raw();
             let mut runs: Vec<(i64, usize)> = Vec::new();
             for frame in samples
                 .as_chunks::<2>()
@@ -1344,6 +1349,72 @@ mod tests {
             recorder.runs(),
             [(0, 24_000)],
             "every frame, in order, none lost at the start (the silence prefix)"
+        );
+    }
+
+    #[test]
+    #[ignore = "needs a sound server, pactl and parec"]
+    fn set_gain_scales_every_sample_written_after_it() {
+        let sink_name = "phonia_test_gain";
+        let _null = NullSink::load(sink_name);
+        let recorder = Recorder::start("gain", sink_name);
+        let spec = SourceSpec {
+            sample_rate: 48_000,
+            channels: 2,
+            bits_per_sample: 24,
+        };
+        let factory = SharedSinkFactory::new(Target::Named(sink_name.into()));
+        let mut sink = factory.open(spec).unwrap();
+
+        let audio = ramp(4_800);
+        sink.set_gain(0.5);
+        write_all(&mut *sink, &audio, 2);
+        sink.drain().unwrap();
+        drop(sink);
+
+        let expected = crate::output::scale_samples(&audio, 0.5);
+        let recorded = recorder.raw();
+        assert!(
+            recorded
+                .windows(expected.len())
+                .any(|window| window == expected.as_slice()),
+            "the exact halved ramp should appear somewhere in what was recorded"
+        );
+    }
+
+    #[test]
+    #[ignore = "needs a sound server, pactl and parec"]
+    fn a_gain_change_lands_on_the_exact_frame_boundary() {
+        let sink_name = "phonia_test_gain_boundary";
+        let _null = NullSink::load(sink_name);
+        let recorder = Recorder::start("gain_boundary", sink_name);
+        let spec = SourceSpec {
+            sample_rate: 48_000,
+            channels: 2,
+            bits_per_sample: 24,
+        };
+        let factory = SharedSinkFactory::new(Target::Named(sink_name.into()));
+        let mut sink = factory.open(spec).unwrap();
+
+        // One continuous ramp, written in two halves at two different gains, the way `play_step`
+        // writes a track's own unity audio up to a crossing and another track's scaled audio
+        // after it.
+        let whole = ramp(4_800);
+        let (first, second) = whole.split_at(2_400 * 2);
+        write_all(&mut *sink, first, 2);
+        sink.set_gain(0.5);
+        write_all(&mut *sink, second, 2);
+        sink.drain().unwrap();
+        drop(sink);
+
+        let mut expected = first.to_vec();
+        expected.extend(crate::output::scale_samples(second, 0.5));
+        let recorded = recorder.raw();
+        assert!(
+            recorded
+                .windows(expected.len())
+                .any(|window| window == expected.as_slice()),
+            "unscaled audio then exactly-halved audio, joined with no sample at the wrong gain"
         );
     }
 

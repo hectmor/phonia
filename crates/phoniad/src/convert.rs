@@ -433,6 +433,7 @@ mod tests {
                 quality: None,
                 cover: Some("cover-uuid".into()),
                 loudness: None,
+                gain: None,
             }),
             spec: Some(SourceSpec {
                 sample_rate: 96_000,
@@ -477,6 +478,7 @@ mod tests {
             quality: Some(delivered),
             cover: None,
             loudness: None,
+            gain: None,
         };
         let started = engine::Event::TrackStarted {
             meta: meta.clone(),
@@ -516,6 +518,7 @@ mod tests {
             quality: None,
             cover: None,
             loudness: None,
+            gain: None,
         };
         let spec = SourceSpec {
             sample_rate: 96_000,
@@ -565,6 +568,7 @@ mod tests {
             quality: None,
             cover: None,
             loudness: None,
+            gain: None,
         };
         let event = event(
             &engine::Event::TrackEnded {

@@ -155,6 +155,7 @@ impl TrackOpener for FileOpener {
                 quality: None,
                 cover: None,
                 loudness: None,
+                gain: None,
             };
             let extension = path
                 .extension()
@@ -374,6 +375,7 @@ impl TrackOpener for TidalOpener {
                 quality: Some(quality),
                 cover: None,
                 loudness: crate::replaygain::Loudness::from_playback_info(&info),
+                gain: None,
             };
             Ok(match info.manifest {
                 ManifestKind::Dash(dash) => {

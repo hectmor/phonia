@@ -123,6 +123,7 @@ mod tests {
                     quality: None,
                     cover: None,
                     loudness: None,
+                    gain: None,
                 };
                 Ok(LoadedTrack::new(
                     meta,

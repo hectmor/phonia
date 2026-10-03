@@ -552,7 +552,22 @@ impl AudioThread {
         }
 
         let channels = playing.spec.channels as usize;
-        let frames = sink.write(&playing.pending[playing.offset..])?;
+        let mut chunk = &playing.pending[playing.offset..];
+        // Normally every write is this track's own audio, so `playing.meta`'s gain applies. The
+        // one exception is right after `set_aside_unheard` reopens the sink mid-crossing: what it
+        // put back in `pending` starts with the tail of the previous (`outgoing`) track, up to
+        // `lead_in` frames in, so that stretch still needs the *outgoing* track's gain, and the
+        // write is capped there so one write is never split across two gains.
+        let gain = match &self.outgoing {
+            Some(outgoing) if playing.frames_written < playing.lead_in => {
+                let remaining = ((playing.lead_in - playing.frames_written) as usize) * channels;
+                chunk = &chunk[..chunk.len().min(remaining)];
+                outgoing.meta.gain_linear()
+            }
+            _ => playing.meta.gain_linear(),
+        };
+        sink.set_gain(gain);
+        let frames = sink.write(chunk)?;
         // A sink that takes nothing from a partial frame would otherwise spin forever.
         if frames > 0 {
             let written_to = playing.offset + frames * channels;
