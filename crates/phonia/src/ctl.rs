@@ -43,9 +43,10 @@ pub enum CtlCommand {
     /// Pauses and hands the DAC back to the desktop, so another program can use it. `resume`
     /// takes it again and carries on from the same place.
     Release,
-    /// Shows or sets the volume of a shared output: `volume 60` sets 60%, `volume +5` and
-    /// `volume -5` change it. The scale is the desktop mixer's (100% is unity gain, 50% about
-    /// -18 dB), never above 100%. An exclusive card has no volume: the audio is not scaled.
+    /// Shows or sets the volume: `volume 60` sets 60%, `volume +5` and `volume -5` change it. The
+    /// scale is the desktop mixer's (100% is unity gain, 50% about -18 dB), never above 100%. A
+    /// shared output always has one; an exclusive card has one only if its DAC exposes a hardware
+    /// mixer control, which phonia then drives directly (the stream itself is never scaled).
     Volume {
         #[arg(allow_hyphen_values = true)]
         change: Option<String>,
@@ -95,7 +96,8 @@ pub enum CtlCommand {
         #[arg(long)]
         limit: Option<u32>,
     },
-    /// Mutes (`on`), unmutes (`off`) or flips (`toggle`, the default) a shared output; the level is kept.
+    /// Mutes (`on`), unmutes (`off`) or flips (`toggle`, the default) an output that has a volume
+    /// of its own (shared, or exclusive with a hardware mixer control); the level is kept.
     Mute {
         mode: Option<MuteMode>,
     },
@@ -456,8 +458,8 @@ async fn current_volume(client: &Client) -> Result<Volume> {
     }
     client.status().await?.volume.ok_or_else(|| {
         anyhow!(
-            "this output has no volume to set: an exclusive card plays the audio unscaled. Use the DAC's own \
-             volume, or `phonia ctl output set` a shared output"
+            "this output has no volume to set: it's an exclusive card with no hardware mixer \
+             control of its own. Use the DAC's own knob, or `phonia ctl output set` a shared output"
         )
     })
 }

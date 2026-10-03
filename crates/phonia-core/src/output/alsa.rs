@@ -14,8 +14,9 @@ use std::sync::Arc;
 
 use super::caps::{self, SampleFormat};
 use super::device;
+use super::mixer::HardwareVolume;
 use super::reserve::{DeviceBusy, DeviceReserver, ReservationSlot, open_reserved};
-use super::{AudioSink, SinkFactory};
+use super::{AudioSink, SinkFactory, VolumeControl};
 use crate::decode::SourceSpec;
 
 /// Target period/buffer sizes. Chosen as a reasonable phase-1-will-tune-this default: short
@@ -585,12 +586,15 @@ pub struct AlsaSinkFactory {
     device: String,
     on_report: Option<ReportHandler>,
     reservation: Option<ReservationSlot>,
+    hw_volume: Arc<HardwareVolume>,
 }
 
 impl AlsaSinkFactory {
     pub fn new(device: impl Into<String>) -> Self {
+        let device = device.into();
         Self {
-            device: device.into(),
+            hw_volume: Arc::new(HardwareVolume::new(device.clone())),
+            device,
             on_report: None,
             reservation: None,
         }
@@ -641,6 +645,16 @@ impl SinkFactory for AlsaSinkFactory {
         if let Some(slot) = &self.reservation {
             slot.on_release_request(handler);
         }
+    }
+
+    /// `Some` only if the card actually has a usable hardware mixer control right now, checked
+    /// fresh every time (not cached): a replugged card may be a different model with a different
+    /// control, or none at all. A card with none stays locked at 100%, exactly as before #31.
+    fn volume(&self) -> Option<Arc<dyn VolumeControl>> {
+        self.hw_volume
+            .probe()
+            .is_some()
+            .then(|| self.hw_volume.clone() as Arc<dyn VolumeControl>)
     }
 }
 

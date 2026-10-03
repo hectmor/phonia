@@ -42,7 +42,9 @@ chain works with real hardware (a Fosi Audio DS2 during development).
   bar with the times, and the volume and the shuffle and repeat modes when they are on. Playback
   keys: `Space` pauses or resumes, `n`/`p` skip, `<`/`>` seek 10 s back or forward, `+`/`-`
   change the volume by 5%, `m` mutes, `s` turns shuffle on or off and `r` goes round off, all,
-  one. Volume needs a shared output; on an exclusive card the bar says why instead of pretending.
+  one. A shared output always has a volume; an exclusive card has one only if its DAC exposes a
+  hardware mixer control (#31), which phonia then drives directly -- the bar says why instead of
+  pretending when there is none.
   It connects by itself, and if the daemon is not there yet, or goes away, it keeps trying (after
   0.25 s, then twice as long each time up to 5 s) and shows a countdown; `R` tries at once. It
   stops trying only when what answers is not a compatible phonia daemon, and says why. `/`, from
@@ -296,7 +298,7 @@ phonia ctl queue list
 phonia ctl play                              # or `play 3` for entry 3
 phonia ctl pause | resume | toggle | next | prev | stop
 phonia ctl output                            # the outputs; `output set <n>` plays through another one
-phonia ctl volume 60 | +5 | -5   /   phonia ctl mute   # shared outputs only
+phonia ctl volume 60 | +5 | -5   /   phonia ctl mute   # shared outputs, or an exclusive card with a hardware mixer control
 phonia ctl quality                           # the tiers asked for and what the playing track got; `quality lossless` sets the best
 phonia ctl search nu metal --kind albums     # search TIDAL; tracks print the `tidal:<id>` that `queue add` takes
 phonia ctl queue add album:33723912          # a whole album (or `playlist:<uuid>`), from what `search` printed
@@ -521,16 +523,21 @@ sink = "bluez_output.AA_BB_CC_DD_EE_FF.1"   # from `phonia devices`; or "default
 - One limit: while phonia holds a card in exclusive mode the desktop has no output for it, so the
   card's shared output is not in the list. `phonia ctl release` gives the card back and it
   reappears.
-- **Volume and mute** (shared mode only): `phonia ctl volume` shows it, `phonia ctl volume 60` sets
-  60%, `volume +5` / `volume -5` change it, and `phonia ctl mute [on|off|toggle]` mutes without
-  losing the level. It is digital and applies to phonia's own stream before the sound server
-  mixes it, so it never touches the hardware volume of the card or of the Bluetooth speaker. The
+- **Volume and mute**: `phonia ctl volume` shows it, `phonia ctl volume 60` sets 60%, `volume +5` /
+  `volume -5` change it, and `phonia ctl mute [on|off|toggle]` mutes without losing the level. The
   scale is the one the desktop's mixers show: 100% is unity gain (never more) and it is cubic in
-  amplitude, so 50% is about -18 dB. The volume you set stays across tracks (a new format is a new
-  stream), across pauses and when you switch to another shared output; and if you move phonia's
-  slider in the desktop's mixer, `phonia ctl status` and `watch` follow. **An exclusive card has
-  no volume**: the audio reaches the DAC unscaled, which is the point, so `volume` there says to use
-  the DAC's own control or to switch to a shared output.
+  amplitude, so 50% is about -18 dB -- the same curve whichever of the two mechanisms below applies.
+  - In **shared mode** it is digital: it scales phonia's own stream before the sound server mixes
+    it, never touching any hardware. The level stays across tracks (a new format is a new stream),
+    across pauses, and when you switch to another shared output; and if you move phonia's slider in
+    the desktop's mixer, `phonia ctl status` and `watch` follow.
+  - In **exclusive mode**, phonia drives the DAC's **own hardware mixer control** directly when it
+    has one (#31) -- the stream itself stays untouched and bit-perfect either way. A card with no
+    such control stays fixed at 100%, and `volume`/`mute` say so, suggesting the DAC's own knob or a
+    shared output instead. A hardware volume is never carried in from a previous output, or seeded
+    to any particular value: it is read fresh and only ever changed when you explicitly ask, so
+    `phonia ctl status` always shows whatever the card's own control is *actually* set to, even if
+    something else (the DAC's own knob, or the desktop) changed it since.
 
 ## Project status
 

@@ -691,7 +691,9 @@ fn on_daemon_event(state: &mut State, event: Event) -> Effects {
         }
         Event::OutputChanged { route } => {
             set_status(state, |status| {
-                // An exclusive card plays the audio unscaled: it has no volume to show.
+                // Cleared pre-emptively: most exclusive cards have no hardware volume of their
+                // own, and the daemon's own VolumeChanged (published right after, when the new
+                // output does have one) fills it back in immediately.
                 if route.mode == phonia_ipc::OutputMode::Exclusive {
                     status.volume = None;
                 }
@@ -1138,8 +1140,8 @@ fn request_for(state: &State, action: Action) -> Result<Request, String> {
             .as_ref()
             .and_then(|status| status.volume)
             .ok_or_else(|| {
-                "this output has no volume to set: an exclusive card plays the audio unscaled. Use \
-                 the DAC's own volume, or switch to a shared output"
+                "this output has no volume to set: it's an exclusive card with no hardware mixer \
+                 control of its own. Use the DAC's own knob, or switch to a shared output"
                     .to_string()
             })
     };
