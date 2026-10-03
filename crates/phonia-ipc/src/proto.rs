@@ -3,7 +3,7 @@
 use crate::dto::{
     AlbumListRef, AlbumSummary, ArtistSummary, CatalogKind, CatalogRef, EndReason, ItemId,
     OutputInfo, Page, PlaylistListRef, PlaylistSummary, Quality, Queue, ReleaseReason, Repeat,
-    Route, SinkReport, Spec, State, Status, StreamQuality, TrackSummary,
+    ReplayGain, Route, SinkReport, Spec, State, Status, StreamQuality, TrackSummary,
 };
 use serde::{Deserialize, Serialize};
 
@@ -29,7 +29,7 @@ pub const CAP_QUALITY: &str = "quality";
 pub const CAP_CATALOG: &str = "catalog";
 
 /// The protocol version this crate speaks.
-pub const PROTOCOL: Version = Version { major: 1, minor: 7 };
+pub const PROTOCOL: Version = Version { major: 1, minor: 8 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Version {
@@ -416,6 +416,10 @@ pub enum Event {
         /// 1.6).
         #[serde(default)]
         cover: Option<String>,
+        /// The gain ReplayGain decided for this track; see [`crate::dto::Track::replay_gain`]
+        /// (since 1.8).
+        #[serde(default)]
+        replay_gain: Option<ReplayGain>,
     },
     TrackEnded {
         item_id: Option<ItemId>,

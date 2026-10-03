@@ -1102,6 +1102,9 @@ fn format_status(status: &Status) -> String {
                 phonia_ipc::fmt::stream_quality(quality)
             ));
         }
+        if let Some(gain) = phonia_ipc::fmt::replay_gain(track, status.route.as_ref()) {
+            text.push_str(&format!("\nGain:     {gain}"));
+        }
     }
     if let Some(route) = &status.route {
         let how = match route.mode {
@@ -1259,7 +1262,7 @@ fn format_event(event: &Event) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phonia_ipc::{QueueItem, Spec, Track};
+    use phonia_ipc::{GainKind, QueueItem, ReplayGain, Route, Spec, Track};
 
     #[test]
     fn seek_positions() {
@@ -1377,6 +1380,7 @@ mod tests {
                 duration_ms: Some(348_680),
                 quality: None,
                 cover: None,
+                replay_gain: None,
             }),
             spec: Some(Spec {
                 sample_rate: 192_000,
@@ -1418,6 +1422,36 @@ mod tests {
         assert_eq!(
             format_status(&with_verdict),
             "State:    playing\nTrack:    Song\nPosition: 1:23 / 5:48\nFormat:   24-bit / 192000 Hz / 2 ch\nVerdict:  S24_3LE BIT-PERFECT"
+        );
+        let gained_track = Track {
+            replay_gain: Some(ReplayGain {
+                kind: GainKind::Album,
+                millibels: -290,
+            }),
+            ..status.track.clone().unwrap()
+        };
+        let shared_route = Route {
+            id: "shared:default".into(),
+            mode: OutputMode::Shared,
+            description: "Speakers".into(),
+        };
+        let with_gain = Status {
+            track: Some(gained_track.clone()),
+            route: Some(shared_route),
+            ..status.clone()
+        };
+        assert_eq!(
+            format_status(&with_gain),
+            "State:    playing\nTrack:    Song\nPosition: 1:23 / 5:48\nGain:     RG -2.9 dB (album)\nOutput:   Speakers [shared, not bit-perfect]\nFormat:   24-bit / 192000 Hz / 2 ch",
+        );
+        let exclusive_with_gain = Status {
+            track: Some(gained_track),
+            ..status.clone()
+        };
+        assert_eq!(
+            format_status(&exclusive_with_gain),
+            "State:    playing\nTrack:    Song\nPosition: 1:23 / 5:48\nFormat:   24-bit / 192000 Hz / 2 ch",
+            "a gain decided for an exclusive-mode track is never shown: it was never applied"
         );
         let idle = Status {
             state: State::Stopped,
@@ -1752,6 +1786,7 @@ mod tests {
             gapless,
             quality: None,
             cover: None,
+            replay_gain: None,
         };
         assert_eq!(
             format_event(&started(false)),
@@ -1783,6 +1818,7 @@ mod tests {
             gapless: true,
             quality: Some(quality),
             cover: None,
+            replay_gain: None,
         };
         assert_eq!(
             format_event(&started(fell)),
@@ -1810,6 +1846,7 @@ mod tests {
                     delivered: Quality::Lossless,
                 }),
                 cover: None,
+                replay_gain: None,
             }),
             spec: None,
             position_ms: 0,

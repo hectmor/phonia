@@ -70,7 +70,7 @@ done — it is its own product decision, not a leftover.
 | #25 | DAC capability detection | Code complete (PRs #106–#109, all 4 parts); **issue left open on GitHub, worth closing by hand** |
 | #26 | Per-track sample rate switching | Code complete, same plan and PRs as #25; **issue left open on GitHub, worth closing by hand** |
 | #28 | Signal path indicator in the TUI | Code complete (PRs #110–#112, all 3 parts); **issue left open on GitHub, worth closing by hand** |
-| #30 | ReplayGain in shared mode | In progress (approved 4-PR plan; parts 1–3 done) |
+| #30 | ReplayGain in shared mode | Code complete (all 4 parts); **issue left open on GitHub, worth closing by hand** |
 | #31 | Hardware mixer volume | Not started |
 
 ### Phases 4 and 5
@@ -266,10 +266,26 @@ for real against PipeWire (a null sink, `parec`): a known ramp halved
 exactly by `set_gain(0.5)`, and a gain change landing on the exact frame
 boundary between an unscaled and a scaled half.
 
+Part 4 (merged, last) is wire protocol 1.8: `dto::Track` and
+`Event::TrackStarted` both gain `replay_gain: Option<ReplayGain>`
+(`{ kind, millibels }`, an integer since every IPC type derives `Eq` and
+floats don't), filled by a new `convert::replay_gain` from
+`TrackMeta.gain`. A new `phonia_ipc::fmt::replay_gain(track, route)`
+decides whether to show anything at all: `None` unless the track has a
+gain *and* `route.mode` is `Shared` — a gain is decided the same way
+whatever the output, but only actually applied in shared mode, so
+showing it for an exclusive-mode track would claim an effect that never
+happened. `phonia ctl status` gained a `Gain:` line next to `Quality:`;
+the TUI's bar shows the same text next to the volume. Nothing was added
+to #28's own signal-path line, on purpose — that line is about the
+format and the device, not about loudness.
+
+This closes #30: all 4 parts of the approved plan are merged.
+
 **#31 (hardware mixer volume)** is not started.
 
-#25, #26 and #28 are all code-complete but still open on GitHub (see
-"Conventions" below) — close them by hand when convenient.
+#25, #26, #28 and #30 are all code-complete but still open on GitHub
+(see "Conventions" below) — close them by hand when convenient.
 
 ## Conventions this file assumes
 

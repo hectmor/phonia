@@ -1,8 +1,8 @@
 //! Turning wire values into short text, shared by every client that prints them.
 
 use crate::dto::{
-    AlbumKind, AlbumSummary, ArtistRef, ArtistSummary, OutputMode, PlaylistSummary, SinkReport,
-    StreamQuality, TrackSummary,
+    AlbumKind, AlbumSummary, ArtistRef, ArtistSummary, GainKind, OutputMode, PlaylistSummary,
+    Route, SinkReport, StreamQuality, Track, TrackSummary,
 };
 
 /// `1:30`, or `1:02:05` from an hour on.
@@ -45,6 +45,24 @@ pub fn verdict(report: &SinkReport) -> String {
         },
         _ => format!("CONVERTED ({})", report.problem.as_deref().unwrap_or("?")),
     }
+}
+
+/// `RG -2.9 dB (album)`, or `None` when there is nothing to show: `track` has no gain, or `route`
+/// is not shared (a gain can be decided for an exclusive-mode track too, but it is never actually
+/// applied there, so showing it would claim an effect that isn't real).
+pub fn replay_gain(track: &Track, route: Option<&Route>) -> Option<String> {
+    let gain = track.replay_gain?;
+    if route.map(|route| route.mode) != Some(OutputMode::Shared) {
+        return None;
+    }
+    let kind = match gain.kind {
+        GainKind::Track => "track",
+        GainKind::Album => "album",
+    };
+    Some(format!(
+        "RG {:+.1} dB ({kind})",
+        f64::from(gain.millibels) / 100.0
+    ))
 }
 
 /// `44.1 kHz`, `96 kHz`; the plain number of hertz for a rate that isn't a round tenth of a kHz.

@@ -451,7 +451,7 @@ samples changes, so it is as bit-perfect as before.
   not trim.
 - `gapless = false` gives the old behaviour: drain, then load the next track.
 
-## ReplayGain (#30, in progress)
+## ReplayGain
 
 `[playback] replaygain` decides whether TIDAL's own loudness measurement is applied: `off`
 (default), `track` (always the track's own gain), `album` (always the album's, falling back to
@@ -465,8 +465,13 @@ server -- exactly the one mode that already isn't bit-perfect. Exclusive mode ge
 all: `AudioSink::set_gain` defaults to doing nothing, and `AlsaSink` never overrides it, so a
 sound card phonia owns outright stays bit-perfect-or-refuse exactly as before, whatever
 `replaygain` says. A gapless join between two tracks with different gains switches exactly at the
-sample boundary between them, even if the output is switched mid-join. There is no indicator yet
-for what gain is in effect -- that's the last part of #30.
+sample boundary between them, even if the output is switched mid-join.
+
+When a gain is actually in effect (shared mode, and `replaygain` is not `off`), `phonia ctl status`
+shows a `Gain:` line (`RG -2.9 dB (album)`) and the TUI's bar shows it next to the volume. Nothing
+is shown in exclusive mode, even though the same gain is still *decided* for an exclusive-mode
+track (TIDAL's loudness data doesn't depend on the output) -- showing it there would claim an
+effect that was never applied.
 
 ## Shared mode: any output, not bit-perfect
 

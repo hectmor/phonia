@@ -660,6 +660,7 @@ fn on_daemon_event(state: &mut State, event: Event) -> Effects {
             spec,
             quality,
             cover,
+            replay_gain,
             ..
         } => {
             set_status(state, |status| {
@@ -670,6 +671,7 @@ fn on_daemon_event(state: &mut State, event: Event) -> Effects {
                     duration_ms,
                     quality,
                     cover,
+                    replay_gain,
                 });
                 status.spec = Some(spec);
                 // Only reached once a track has actually started, which `start_track` only
@@ -2518,6 +2520,7 @@ mod tests {
                 gapless: false,
                 quality: None,
                 cover: None,
+                replay_gain: None,
             }),
         );
         assert_eq!(
@@ -2575,6 +2578,7 @@ mod tests {
                 gapless: false,
                 quality: None,
                 cover: None,
+                replay_gain: None,
             }),
         );
         assert_eq!(state.playback_error, None);
