@@ -132,6 +132,10 @@ pub struct Status {
     /// The tiers the daemon asks TIDAL for (since 1.5).
     #[serde(default)]
     pub quality_range: Option<QualityRange>,
+    /// The verdict for the sink that is open right now, if one has been reported: absent until
+    /// the first write after an output opens, and cleared once it closes (since 1.7).
+    #[serde(default)]
+    pub sink_report: Option<SinkReport>,
 }
 
 /// How loud, as the desktop's mixers show it: 100 is unity gain, and the scale is cubic in
@@ -273,6 +277,26 @@ pub struct SinkReport {
     /// For shared mode: whether the way to the speaker loses information.
     #[serde(default)]
     pub lossy: bool,
+    /// The route id (`exclusive:hw:DS2,0`, `shared:default`) of the output whose sink produced
+    /// this report, when the daemon knows it (since 1.7).
+    #[serde(default)]
+    pub output: Option<String>,
+}
+
+impl SinkReport {
+    /// Whether this report still describes what `status` says is playing now: the same audio
+    /// format, and -- when both sides know it -- the same output. A report never outlives the
+    /// sink it was taken from, but nothing announces that a sink closed or changed on its own, so
+    /// a stale report has to be recognized this way instead of cleared directly.
+    pub fn applies_to(&self, status: &Status) -> bool {
+        if status.spec != Some(self.source) {
+            return false;
+        }
+        match (&self.output, &status.route) {
+            (Some(report_output), Some(route)) => *report_output == route.id,
+            _ => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -472,4 +496,86 @@ pub enum PlaylistListRef {
     /// A list a newer daemon has and this version does not know.
     #[serde(other)]
     Unknown,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SPEC_96K: Spec = Spec {
+        sample_rate: 96_000,
+        channels: 2,
+        bits_per_sample: 24,
+    };
+    const SPEC_48K: Spec = Spec {
+        sample_rate: 48_000,
+        channels: 2,
+        bits_per_sample: 16,
+    };
+
+    fn report(source: Spec, output: Option<&str>) -> SinkReport {
+        SinkReport {
+            device: "hw:1,0".into(),
+            source,
+            negotiated_format: "S24_3LE".into(),
+            bit_perfect: true,
+            problem: None,
+            hw_params: None,
+            mode: Some(OutputMode::Exclusive),
+            resampled_to: None,
+            codec: None,
+            lossy: false,
+            output: output.map(str::to_string),
+        }
+    }
+
+    fn status_with(spec: Option<Spec>, route: Option<&str>) -> Status {
+        Status {
+            state: State::Playing,
+            track: None,
+            spec,
+            position_ms: 0,
+            duration_ms: None,
+            output: Output::Open,
+            route: route.map(|id| Route {
+                id: id.to_string(),
+                mode: OutputMode::Exclusive,
+                description: "Fosi Audio DS2".into(),
+            }),
+            volume: None,
+            quality_range: None,
+            sink_report: None,
+        }
+    }
+
+    #[test]
+    fn a_report_applies_when_the_format_matches_and_neither_side_names_an_output() {
+        let report = report(SPEC_96K, None);
+        assert!(report.applies_to(&status_with(Some(SPEC_96K), None)));
+    }
+
+    #[test]
+    fn a_report_does_not_apply_once_the_format_has_changed() {
+        let report = report(SPEC_96K, None);
+        assert!(!report.applies_to(&status_with(Some(SPEC_48K), None)));
+        assert!(!report.applies_to(&status_with(None, None)));
+    }
+
+    #[test]
+    fn a_report_does_not_apply_to_a_different_output() {
+        let report = report(SPEC_96K, Some("exclusive:hw:1,0"));
+        assert!(report.applies_to(&status_with(Some(SPEC_96K), Some("exclusive:hw:1,0"))));
+        assert!(!report.applies_to(&status_with(Some(SPEC_96K), Some("shared:default"))));
+    }
+
+    #[test]
+    fn the_output_check_is_skipped_when_either_side_does_not_know_it() {
+        // An older daemon's report, or a status with no route yet: the format match is all there
+        // is to go on, so it is not refused just because the output can't be compared.
+        let unlabelled = report(SPEC_96K, None);
+        assert!(unlabelled.applies_to(&status_with(Some(SPEC_96K), Some("exclusive:hw:1,0"))));
+
+        let labelled = report(SPEC_96K, Some("exclusive:hw:1,0"));
+        assert!(labelled.applies_to(&status_with(Some(SPEC_96K), None)));
+    }
 }

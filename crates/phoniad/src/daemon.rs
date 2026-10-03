@@ -50,11 +50,19 @@ const DESCRIBE_CONCURRENCY: usize = 8;
 /// Events held for a slow subscriber before it is told to resync.
 const EVENT_BACKLOG: usize = 1024;
 
+/// A bit-perfect report, stamped with the route id of the output whose sink produced it (see
+/// `convert::sink_report`'s own doc comment for why that has to happen where the sink is built,
+/// not later).
+pub struct OutputReport {
+    pub output: String,
+    pub report: SinkReport,
+}
+
 pub struct DaemonParts {
     pub sinks: Arc<dyn SinkFactory>,
     pub opener: Arc<DispatchOpener>,
     /// Bit-perfect reports from the sinks, to be announced to clients.
-    pub reports: mpsc::UnboundedReceiver<SinkReport>,
+    pub reports: mpsc::UnboundedReceiver<OutputReport>,
     pub engine: engine::Options,
     /// Which output the daemon is on and how to move it.
     pub outputs: Outputs,
@@ -80,6 +88,10 @@ pub struct Daemon {
     control_lock: tokio::sync::Mutex<()>,
     shutdown: watch::Sender<bool>,
     info: ipc::ServerInfo,
+    /// The verdict for the sink that is open right now, if one has been reported since it opened.
+    /// Gated against the rest of a status with `SinkReport::applies_to` before it is shown, since
+    /// nothing announces a sink closing or changing on its own.
+    last_report: Mutex<Option<ipc::SinkReport>>,
 }
 
 impl Daemon {
@@ -114,6 +126,7 @@ impl Daemon {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 pid: std::process::id(),
             },
+            last_report: Mutex::new(None),
         });
 
         // The volume can be changed from the desktop's mixer too; the daemon follows and announces it.
@@ -131,7 +144,7 @@ impl Daemon {
 
     /// Everything that happens (engine events, queue changes, sink reports) in one place, where
     /// each gets its sequence number.
-    async fn fan_in(self: Arc<Self>, mut reports: mpsc::UnboundedReceiver<SinkReport>) {
+    async fn fan_in(self: Arc<Self>, mut reports: mpsc::UnboundedReceiver<OutputReport>) {
         let mut engine_events = self.controller.subscribe_events();
         let mut queue_changes = self.controller.queue().subscribe();
         let mut shutdown = self.shutdown.subscribe();
@@ -139,6 +152,17 @@ impl Daemon {
             tokio::select! {
                 event = engine_events.recv() => match event {
                     Ok(event) => {
+                        // The two events that mean the sink is gone: nothing else announces that,
+                        // so the stale verdict has to be dropped here, not left for `applies_to`
+                        // to catch (it can only compare against a *new* format or output, not "no
+                        // sink at all").
+                        if matches!(
+                            event,
+                            engine::Event::OutputReleased { .. }
+                                | engine::Event::StateChanged(engine::State::Stopped)
+                        ) {
+                            *self.last_report.lock().unwrap() = None;
+                        }
                         let queue = self.controller.snapshot();
                         self.publish(|_| convert::event(&event, &queue));
                     }
@@ -154,8 +178,10 @@ impl Daemon {
                     let queue = queue_changes.borrow_and_update().clone();
                     self.publish(|_| ipc::Event::QueueChanged { queue: convert::queue_dto(&queue) });
                 }
-                Some(report) = reports.recv() => {
-                    self.publish(|_| ipc::Event::SinkReport(convert::sink_report(&report)));
+                Some(OutputReport { output, report }) = reports.recv() => {
+                    let dto = convert::sink_report(&report, &output);
+                    *self.last_report.lock().unwrap() = Some(dto.clone());
+                    self.publish(|_| ipc::Event::SinkReport(dto));
                 }
                 _ = shutdown.changed() => break,
             }
@@ -172,16 +198,20 @@ impl Daemon {
 
     fn state(&self) -> (ipc::Status, ipc::Queue) {
         let queue = self.controller.snapshot();
-        (
-            convert::status_dto(
-                &self.controller.status(),
-                &queue,
-                Some(self.outputs.route()),
-                self.outputs.volume(),
-                self.quality_range(),
-            ),
-            convert::queue_dto(&queue),
-        )
+        let mut status = convert::status_dto(
+            &self.controller.status(),
+            &queue,
+            Some(self.outputs.route()),
+            self.outputs.volume(),
+            self.quality_range(),
+        );
+        status.sink_report = self
+            .last_report
+            .lock()
+            .unwrap()
+            .clone()
+            .filter(|report| report.applies_to(&status));
+        (status, convert::queue_dto(&queue))
     }
 
     fn quality_range(&self) -> Option<ipc::QualityRange> {

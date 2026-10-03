@@ -1123,6 +1123,13 @@ fn format_status(status: &Status) -> String {
             spec.bits_per_sample, spec.sample_rate, spec.channels
         ));
     }
+    if let Some(report) = &status.sink_report {
+        text.push_str(&format!(
+            "\nVerdict:  {} {}",
+            report.negotiated_format,
+            phonia_ipc::fmt::verdict(report)
+        ));
+    }
     text
 }
 
@@ -1219,18 +1226,7 @@ fn format_event(event: &Event) -> String {
             "output {}: {} {}",
             report.device,
             report.negotiated_format,
-            match (report.mode, report.bit_perfect) {
-                (_, true) => "BIT-PERFECT".to_string(),
-                (Some(OutputMode::Shared), false) => match (&report.codec, report.lossy) {
-                    (Some(codec), true) => format!("SHARED, LOSSY CODEC ({codec})"),
-                    (None, true) => "SHARED, LOSSY".to_string(),
-                    _ => match report.resampled_to {
-                        Some(rate) => format!("SHARED (not bit-perfect, resampled to {rate} Hz)"),
-                        None => "SHARED (not bit-perfect)".to_string(),
-                    },
-                },
-                _ => format!("CONVERTED ({})", report.problem.as_deref().unwrap_or("?")),
-            }
+            phonia_ipc::fmt::verdict(report)
         ),
         Event::OutputReleased { by, reason } => {
             let why = match reason {
@@ -1393,10 +1389,35 @@ mod tests {
             route: None,
             volume: None,
             quality_range: None,
+            sink_report: None,
         };
         assert_eq!(
             format_status(&status),
             "State:    playing\nTrack:    Song\nPosition: 1:23 / 5:48\nFormat:   24-bit / 192000 Hz / 2 ch"
+        );
+        let with_verdict = Status {
+            sink_report: Some(phonia_ipc::SinkReport {
+                device: "hw:1,0".into(),
+                source: Spec {
+                    sample_rate: 192_000,
+                    channels: 2,
+                    bits_per_sample: 24,
+                },
+                negotiated_format: "S24_3LE".into(),
+                bit_perfect: true,
+                problem: None,
+                hw_params: None,
+                mode: Some(OutputMode::Exclusive),
+                resampled_to: None,
+                codec: None,
+                lossy: false,
+                output: Some("exclusive:hw:1,0".into()),
+            }),
+            ..status.clone()
+        };
+        assert_eq!(
+            format_status(&with_verdict),
+            "State:    playing\nTrack:    Song\nPosition: 1:23 / 5:48\nFormat:   24-bit / 192000 Hz / 2 ch\nVerdict:  S24_3LE BIT-PERFECT"
         );
         let idle = Status {
             state: State::Stopped,
@@ -1408,6 +1429,7 @@ mod tests {
             route: None,
             volume: None,
             quality_range: None,
+            sink_report: None,
         };
         assert_eq!(format_status(&idle), "State:    stopped");
 
@@ -1600,6 +1622,7 @@ mod tests {
                 muted: false,
             }),
             quality_range: None,
+            sink_report: None,
         };
         assert_eq!(
             format_status(&status),
@@ -1643,6 +1666,7 @@ mod tests {
                 resampled_to: resampled,
                 codec: codec.map(str::to_string),
                 lossy,
+                output: None,
             })
         };
         assert_eq!(
@@ -1797,6 +1821,7 @@ mod tests {
                 max: Quality::Hires,
                 min: Quality::Lossless,
             }),
+            sink_report: None,
         };
         assert_eq!(
             format_quality_status(&status),

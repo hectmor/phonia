@@ -1,7 +1,8 @@
 //! Turning wire values into short text, shared by every client that prints them.
 
 use crate::dto::{
-    AlbumKind, AlbumSummary, ArtistRef, ArtistSummary, PlaylistSummary, StreamQuality, TrackSummary,
+    AlbumKind, AlbumSummary, ArtistRef, ArtistSummary, OutputMode, PlaylistSummary, SinkReport,
+    StreamQuality, TrackSummary,
 };
 
 /// `1:30`, or `1:02:05` from an hour on.
@@ -25,6 +26,24 @@ pub fn stream_quality(quality: &StreamQuality) -> String {
         format!("{} (asked for {})", quality.delivered, quality.requested)
     } else {
         quality.delivered.to_string()
+    }
+}
+
+/// `BIT-PERFECT`, `CONVERTED (reason)`, or shared mode's own wording (`SHARED (not bit-perfect[,
+/// resampled to N Hz])`, `SHARED, LOSSY[ CODEC (codec)]`): the verdict alone, with no mention of
+/// the device or the negotiated format, which the caller already has from the same [`SinkReport`].
+pub fn verdict(report: &SinkReport) -> String {
+    match (report.mode, report.bit_perfect) {
+        (_, true) => "BIT-PERFECT".to_string(),
+        (Some(OutputMode::Shared), false) => match (&report.codec, report.lossy) {
+            (Some(codec), true) => format!("SHARED, LOSSY CODEC ({codec})"),
+            (None, true) => "SHARED, LOSSY".to_string(),
+            _ => match report.resampled_to {
+                Some(rate) => format!("SHARED (not bit-perfect, resampled to {rate} Hz)"),
+                None => "SHARED (not bit-perfect)".to_string(),
+            },
+        },
+        _ => format!("CONVERTED ({})", report.problem.as_deref().unwrap_or("?")),
     }
 }
 
@@ -183,6 +202,69 @@ mod tests {
         assert_eq!(sample_rate(192_000), "192 kHz");
         assert_eq!(sample_rate(176_400), "176.4 kHz");
         assert_eq!(sample_rate(22_050), "22050 Hz");
+    }
+
+    fn report(mode: Option<OutputMode>) -> SinkReport {
+        SinkReport {
+            device: "hw:1,0".into(),
+            source: crate::dto::Spec {
+                sample_rate: 96_000,
+                channels: 2,
+                bits_per_sample: 24,
+            },
+            negotiated_format: "S24_3LE".into(),
+            bit_perfect: false,
+            problem: Some("the card reports 48000 Hz instead of 96000 Hz".into()),
+            hw_params: None,
+            mode,
+            resampled_to: None,
+            codec: None,
+            lossy: false,
+            output: None,
+        }
+    }
+
+    #[test]
+    fn a_bit_perfect_report_says_so_regardless_of_mode() {
+        let mut report = report(Some(OutputMode::Exclusive));
+        report.bit_perfect = true;
+        assert_eq!(verdict(&report), "BIT-PERFECT");
+    }
+
+    #[test]
+    fn an_exclusive_report_that_is_not_bit_perfect_names_the_problem() {
+        assert_eq!(
+            verdict(&report(Some(OutputMode::Exclusive))),
+            "CONVERTED (the card reports 48000 Hz instead of 96000 Hz)"
+        );
+        // No mode at all (an old daemon) reads the same way: not bit-perfect, so converted.
+        assert_eq!(
+            verdict(&report(None)),
+            "CONVERTED (the card reports 48000 Hz instead of 96000 Hz)"
+        );
+    }
+
+    #[test]
+    fn shared_mode_names_the_codec_the_resampling_or_just_says_shared() {
+        let mut plain = report(Some(OutputMode::Shared));
+        plain.problem = None;
+        assert_eq!(verdict(&plain), "SHARED (not bit-perfect)");
+
+        let mut resampled = plain.clone();
+        resampled.resampled_to = Some(48_000);
+        assert_eq!(
+            verdict(&resampled),
+            "SHARED (not bit-perfect, resampled to 48000 Hz)"
+        );
+
+        let mut lossy = plain.clone();
+        lossy.lossy = true;
+        assert_eq!(verdict(&lossy), "SHARED, LOSSY");
+
+        let mut codec = plain;
+        codec.lossy = true;
+        codec.codec = Some("SBC".into());
+        assert_eq!(verdict(&codec), "SHARED, LOSSY CODEC (SBC)");
     }
 
     #[test]
