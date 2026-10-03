@@ -1183,3 +1183,105 @@ test, matching the existing `TestBackend`-based verification style used for ever
 decision in this codebase.
 
 This closes #30: all 4 parts of the approved plan are merged.
+
+## 2026-10-03 — #31: a hardware volume belongs to the card, not to phonia
+
+Picked after #30 shipped. The issue is one line: "ALSA control if it exists; lock at 100% if not."
+A read-only investigation found #30 had already named this exact feature and explicitly deferred
+it ("applying gain through a DAC's hardware mixer in exclusive mode, left for a future issue if
+ever wanted") — #31 is that issue. Exclusive mode has had no volume at all until now:
+`SinkFactory::volume()` defaults to `None`, and the CLI's own refusal message tells the person to
+go use the DAC's own knob by hand. #31 does that programmatically, through ALSA's Selem (simple
+mixer) API — already safely wrapped by the `alsa` crate phonia depends on, no new dependency.
+
+**This is a different mechanism from #30's `AudioSink::set_gain` entirely.** ReplayGain scales
+samples in process, inside `SharedSink` only; a hardware volume attenuates inside the DAC itself,
+after the stream leaves phonia untouched. `AlsaSink` never overrides `set_gain`, and nothing here
+changes that: exclusive mode stays bit-perfect by construction, the same way it always has.
+
+**Central principle, settled during planning rather than left implicit: a hardware volume belongs
+to the card, not to phonia.** phonia reads it and sets it only when the person explicitly asks —
+it never seeds a value, never restores one, and never carries a level *into* a hardware control on
+startup or an output switch. This one rule is what the rest of the plan falls out of, and it fixes
+two real bugs the plan's own research found in `phoniad/src/outputs.rs` before any code was
+written: `Outputs.level` seeded a fresh output at `Volume::default()` (100%) instead of reading the
+hardware's actual level, so the first relative change (`+5`) would be computed from the wrong base
+and could jump the DAC hard; and `switched_to` wrote the carried level into *any* newly attached
+output, which on a DAC already driven by PipeWire (shared mode uses the same hardware control)
+would double-attenuate, and on a fresh exclusive attach could push it straight to 0 dB. Fixed by
+simply never writing a hardware control except on an explicit `set`, not by a special case for
+either bug — both follow from the one rule.
+
+**Real checks run during planning, not left to implementation time**: the development machine's own
+Fosi Audio DS2 does have a usable control — a `PCM` Selem (a UAC Feature Unit, so the attenuation
+happens inside the DAC after the USB stream), raw range 0..63 mapping to an exact -63..0 dB in 1 dB
+steps — currently driven by WirePlumber for its own shared-mode volume (found already set to a
+non-default value, confirming something else actively uses it). The internal `sof-hda-dsp` card
+exposes a `Master` Selem, a second real "has a control" subject; an NVidia HDMI output has only
+switch-only `IEC958` controls, a real "locked" subject. Also found: the `alsa` crate's `Mixer` is
+`Send` but explicitly not `Sync` — ruling out holding one open inside an `Arc<dyn VolumeControl>`,
+which independently supports re-opening the mixer fresh per call rather than caching anything.
+
+**Decisions (user confirmed all four as recommended):**
+
+- **Re-probe the control on every `get`/`set`, with no cached state.** Resilient to a replug (a
+  different physical card, possibly with a different control entirely, under the same configured
+  `hw:DS2,0`), the same by-id precedent `AlsaSink` itself follows for the PCM device (2026-09-23).
+  Also sidesteps the `Mixer: !Sync` constraint above. The cost (opening the control device, a few
+  syscalls) is well under a millisecond and not a hot path.
+- **Map percent to hardware through the control's own dB range, on the same cubic-in-amplitude
+  curve already implied by shared mode's own percent semantics** (`Volume`'s doc: "50% is about
+  -18 dB"): `dB = 60·log10(p/100)`, rounded always toward quieter. This is also the curve alsamixer
+  and pavucontrol themselves use, so phonia's percentage agrees with the rest of the desktop — the
+  alternative (ALSA's raw linear range) does not: 50% raw on the DS2 is actually -31 dB. 100% is
+  capped at the lower of the control's maximum or unity (0 dB): phonia never selects a gain above
+  unity even on a control that offers headroom. 0% always means the control's *exact* reported
+  minimum, never a computed figure (the curve's own value there, -∞, is meaningless, and a control
+  shallower than 60 dB would otherwise be asked for something unreachable). A control with no
+  usable dB data falls back to its raw linear range, the same fallback alsamixer itself uses.
+- **Mute uses the control's own playback switch when it has one** (the DS2 does). A control with
+  volume but no switch **refuses** a mute request outright, rather than faking it by dropping to
+  the minimum: the minimum is often not silence (the DS2's is -63 dB, not -∞), and faking it would
+  need phonia to remember a level to restore on unmute — exactly the cached, card-could-have-moved
+  state the "belongs to the card" principle rules out.
+- **The live outside-change watcher (`alsamixer` run concurrently, or WirePlumber rewriting the
+  control after reclaiming the card) ships as part 3 of #31 itself, not deferred to a separate
+  issue** — justified as a real, not hypothetical, case: the DS2's control was found already at a
+  value something else had set. Until part 3 lands, `on_change` only stores the handler and never
+  calls it, which is an accepted, temporary gap (the symptom is a stale TUI display until the next
+  full status, nothing worse) rather than a reason to block part 1 on it.
+- **"No control, locked at 100%" stays communicated by rewording the existing refusal message, with
+  no protocol change.** `Status.volume` stays `None` exactly as today; the message explains why
+  rather than the wire format gaining a `fixed: bool` for what would be a purely cosmetic gain.
+
+**Other decisions, adopted as recommended without a separate question:** control preference order
+when a card exposes several volume-capable Selems — `"Master"`, then `"PCM"`, then the single
+remaining one *only if there is exactly one*, else none (no config override in v1; the DS2 resolves
+to `"PCM"`, `sof-hda-dsp` to `"Master"`, confirmed against both real cards); carry the digital
+volume across an output switch only shared→shared, never into or out of a hardware control, which
+is really the same "belongs to the card" rule stated once more, not a separate case; include a
+passive `phonia devices` hint (the control's name and range) as part of part 3, alongside the
+watcher, the same spirit as #25/#26 part 4's passive `stream0` display.
+
+**3-part split:** Part 1 (this entry) — `output/mixer.rs`: pure, unit-tested percent↔dB and
+control-selection functions, plus `HardwareVolume` (the `VolumeControl` impl), not wired into
+`AlsaSinkFactory` yet. Part 2 (first audible change) — wire `AlsaSinkFactory::volume()` to return
+`Some` conditionally; fix both `Outputs` hazards above; publish `VolumeChanged` after `OutputChanged`
+when the new output has one; reword every stale "exclusive has no volume" message across
+`mod.rs`/`proto.rs`/`daemon.rs`/`ctl.rs`/the TUI. Part 3 — the live watcher thread and the `phonia
+devices` hint.
+
+**Verified for real against three physical cards, no fakes needed for either branch**: the DS2's
+`PCM` control (read at its actual live value, -10 dB/68% — not a throwaway default — round-tripped
+down to silence and back in several steps never louder than that starting point, muted and
+unmuted, restored to the exact original raw value and switch state afterward, confirmed with
+`amixer` before and after); the `sof-hda-dsp` card's `Master` control (confirming `choose_control`
+picks the right name on a second, differently-shaped real control); and an NVidia HDMI output
+(confirmed to correctly report no usable control, read-only, nothing audible — the reservation
+system is irrelevant here, since the mixer control device has nothing to do with the PCM's
+reservation and can be read/set whether or not phonia currently holds the card).
+
+Out of scope for #31: a config override for control-name selection, a `fixed: bool` protocol field,
+showing the hardware dB value on #28's own signal-path line, and hardware volume for shared outputs
+(PipeWire already owns that). Software volume in exclusive mode of any kind remains out of the
+question — it would break bit-perfectness, which is the one thing this project never trades away.

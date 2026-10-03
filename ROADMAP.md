@@ -71,7 +71,7 @@ done — it is its own product decision, not a leftover.
 | #26 | Per-track sample rate switching | Code complete, same plan and PRs as #25; **issue left open on GitHub, worth closing by hand** |
 | #28 | Signal path indicator in the TUI | Code complete (PRs #110–#112, all 3 parts); **issue left open on GitHub, worth closing by hand** |
 | #30 | ReplayGain in shared mode | Code complete (all 4 parts); **issue left open on GitHub, worth closing by hand** |
-| #31 | Hardware mixer volume | Not started |
+| #31 | Hardware mixer volume | In progress (approved 3-PR plan; part 1 done) |
 
 ### Phases 4 and 5
 
@@ -282,7 +282,44 @@ format and the device, not about loudness.
 
 This closes #30: all 4 parts of the approved plan are merged.
 
-**#31 (hardware mixer volume)** is not started.
+**#31 (hardware mixer volume)** is next, planned with Opus as an
+approved 3-PR plan. Exclusive mode has had no volume at all until now —
+the DAC's own hardware mixer applies, phonia never scales the audio.
+#31 drives that hardware control programmatically when a card has one,
+through ALSA's Selem (simple mixer) API, which the `alsa` crate already
+wraps safely (no new dependency); a card with none stays locked at
+100%, exactly as today. This is a completely different mechanism from
+#30's `AudioSink::set_gain` (an in-process sample scaler): the stream
+itself is never touched, so exclusive mode stays fully bit-perfect.
+Central design principle: **a hardware volume belongs to the card, not
+to phonia** — it is read and set only when the user explicitly asks,
+never seeded, restored, or carried into a control on startup or an
+output switch. Real checks run during planning found the development
+machine's own Fosi Audio DS2 does have a usable control (a `PCM` Selem,
+-63..0 dB in exact 1 dB steps, currently driven by WirePlumber for
+shared mode), and that `phoniad`'s `Outputs` had two real hazards this
+work needed to fix: it seeded a fresh output at 100% instead of reading
+the hardware's actual level (risking a loud jump on the first relative
+volume change), and it carried a level into *any* newly attached
+output, which would double-attenuate a card already driven by
+PipeWire. See `docs/DECISIONS.md` for the full plan and reasoning.
+
+Part 1 (merged) adds `output/mixer.rs`: pure, unit-tested functions
+(percent↔dB curve — the same cubic-in-amplitude one shared mode's own
+percent already implies, so a number means the same loudness change
+wherever it came from — and which control to prefer when a card
+offers several) plus `HardwareVolume`, an ALSA Selem-backed
+`VolumeControl` that re-resolves the card and re-opens the mixer on
+every call (replug-safe, the same by-id precedent `AlsaSink` itself
+follows for the PCM device; also sidesteps the `alsa` crate's `Mixer`
+not being `Sync`). Not wired into `AlsaSinkFactory` yet — no behavior
+change in this part. Verified for real against three physical cards:
+the DS2's `PCM` control (read, round-tripped down to silence and back,
+muted and unmuted, restored to its exact starting point afterward —
+it was genuinely in use, at -10 dB, not a throwaway default), the
+internal `sof-hda-dsp` card's `Master` control (a second real "has a
+control" case), and an NVidia HDMI output (confirmed to correctly
+report no usable control at all, read-only, nothing audible).
 
 #25, #26, #28 and #30 are all code-complete but still open on GitHub
 (see "Conventions" below) — close them by hand when convenient.

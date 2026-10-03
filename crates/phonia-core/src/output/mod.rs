@@ -12,6 +12,7 @@ pub mod catalog;
 pub mod dbus;
 pub mod device;
 pub mod fake;
+pub mod mixer;
 pub mod reserve;
 pub mod shared;
 
