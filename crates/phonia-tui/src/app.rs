@@ -100,6 +100,11 @@ pub struct State {
     pub queue: Option<Queue>,
     /// Why the last request sent (a playback key) did not work, until the next one is tried.
     pub last_error: Option<String>,
+    /// Why playback itself just failed (the daemon's own `Event::Error`, e.g. a track the DAC
+    /// refuses): shown on the signal-path line, not cleared by a key the way `last_error` is,
+    /// since this was not caused by one. Cleared once something newer replaces it: a track
+    /// starting, or a fresh `SinkReport`.
+    pub playback_error: Option<String>,
     /// A line of good news ("Added 12 tracks"), shown in the bar until the next key.
     pub notice: Option<String>,
     pub search: SearchState,
@@ -671,6 +676,9 @@ fn on_daemon_event(state: &mut State, event: Event) -> Effects {
                 // reports once its sink opened successfully.
                 status.output = phonia_ipc::Output::Open;
             });
+            // A track starting means whatever failed before it is no longer the latest word on
+            // the signal path.
+            state.playback_error = None;
             Effects::redraw()
         }
         Event::VolumeChanged { percent, muted } => {
@@ -709,6 +717,13 @@ fn on_daemon_event(state: &mut State, event: Event) -> Effects {
         }
         Event::SinkReport(report) => {
             set_status(state, |status| status.sink_report = Some(report));
+            // A sink actually opening (reports only ever come from one that did) means any
+            // earlier refusal is stale.
+            state.playback_error = None;
+            Effects::redraw()
+        }
+        Event::Error { message } => {
+            state.playback_error = Some(message);
             Effects::redraw()
         }
         Event::OutputReleased { by, .. } => {
@@ -2509,6 +2524,77 @@ mod tests {
             state.status.as_ref().unwrap().output,
             phonia_ipc::Output::Open
         );
+    }
+
+    #[test]
+    fn a_playback_error_is_kept_until_a_track_actually_starts() {
+        // The shape of a real refusal: the track ends (TrackEnded already clears status.track),
+        // then the engine's own Error follows.
+        let mut state = playing_with_volume(None, &[]);
+        update(
+            &mut state,
+            Msg::Daemon(Event::TrackEnded {
+                item_id: None,
+                reason: phonia_ipc::EndReason::Failed,
+            }),
+        );
+        update(
+            &mut state,
+            Msg::Daemon(Event::Error {
+                message: "hw:1,0 cannot play 352800 Hz natively".into(),
+            }),
+        );
+        assert_eq!(
+            state.playback_error.as_deref(),
+            Some("hw:1,0 cannot play 352800 Hz natively")
+        );
+
+        // Still there after an unrelated event...
+        update(
+            &mut state,
+            Msg::Daemon(Event::VolumeChanged {
+                percent: 50,
+                muted: false,
+            }),
+        );
+        assert!(state.playback_error.is_some());
+
+        // ...gone the moment a track actually starts.
+        update(
+            &mut state,
+            Msg::Daemon(Event::TrackStarted {
+                item_id: None,
+                source: Some("tidal:2".into()),
+                title: Some("Another Song".into()),
+                duration_ms: None,
+                spec: phonia_ipc::Spec {
+                    sample_rate: 44_100,
+                    channels: 2,
+                    bits_per_sample: 16,
+                },
+                gapless: false,
+                quality: None,
+                cover: None,
+            }),
+        );
+        assert_eq!(state.playback_error, None);
+    }
+
+    #[test]
+    fn a_playback_error_is_also_cleared_by_a_fresh_sink_report() {
+        let mut state = playing_with_volume(None, &[]);
+        update(
+            &mut state,
+            Msg::Daemon(Event::Error {
+                message: "the output is gone".into(),
+            }),
+        );
+        assert!(state.playback_error.is_some());
+        update(
+            &mut state,
+            Msg::Daemon(Event::SinkReport(a_sink_report("hw:1,0"))),
+        );
+        assert_eq!(state.playback_error, None);
     }
 
     #[test]

@@ -293,6 +293,14 @@ fn connected_line<'a>(state: &State, theme: &Theme) -> Line<'a> {
 /// The signal path: what is playing, through what format, to which device, with the bit-perfect
 /// verdict -- or as much of that as is known yet, down to nothing at all with no connection.
 fn signal_line<'a>(state: &State, theme: &Theme, width: u16) -> Line<'a> {
+    // The daemon's own last word on why playback just failed (e.g. a track the DAC refuses) takes
+    // priority over anything `status` itself says: `TrackEnded` has likely already cleared the
+    // track this error was about, so without this check the line would just go blank or show
+    // whatever output was last known, losing the one thing worth saying right now.
+    if let Some(error) = &state.playback_error {
+        let text = truncate(&format!("\u{2716} {error}"), usize::from(width));
+        return Line::styled(text, theme.error);
+    }
     let Some(status) = &state.status else {
         return Line::raw("");
     };
@@ -1004,6 +1012,70 @@ mod tests {
             text.contains("Output released to jackd: resume to take it back"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_playback_error_shows_on_the_signal_path_line_and_a_fresh_track_clears_it() {
+        let mut state = playing(SPEC_96K);
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::TrackEnded {
+                item_id: None,
+                reason: phonia_ipc::EndReason::Failed,
+            }),
+        );
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::Error {
+                message: "hw:1,0 cannot play 352800 Hz natively".into(),
+            }),
+        );
+        let text = screen(&state, 120, 12);
+        assert!(
+            text.contains("hw:1,0 cannot play 352800 Hz natively"),
+            "{text}"
+        );
+
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::TrackStarted {
+                item_id: None,
+                source: Some("tidal:2".into()),
+                title: Some("Another Song".into()),
+                duration_ms: None,
+                spec: SPEC_96K,
+                gapless: false,
+                quality: None,
+                cover: None,
+            }),
+        );
+        let text = screen(&state, 120, 12);
+        assert!(
+            !text.contains("cannot play 352800 Hz"),
+            "a track starting replaces the stale error: {text}"
+        );
+    }
+
+    #[test]
+    fn a_long_playback_error_is_truncated_not_wrapped_or_cut_off_silently() {
+        let mut state = playing(SPEC_96K);
+        let long = "hw:1,0 cannot play 352800 Hz natively; for 24-bit audio it can do 44100, \
+            48000, 88200, 96000, 176400, 192000 Hz. phonia does not resample in exclusive mode; \
+            to hear it resampled, play through the sound server (`phonia ctl output set \
+            shared:default`).";
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::Error {
+                message: long.into(),
+            }),
+        );
+        let text = screen(&state, 60, 12);
+        let line = text
+            .lines()
+            .find(|line| line.contains("cannot play"))
+            .expect("the error is on some line");
+        assert!(line.chars().count() <= 60, "{line:?}");
+        assert!(line.ends_with('\u{2026}'), "{line:?}");
     }
 
     #[test]
