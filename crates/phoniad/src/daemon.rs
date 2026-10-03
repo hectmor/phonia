@@ -658,8 +658,8 @@ impl Daemon {
             }
             Err(VolumeError::Unsupported) => self::error(
                 ErrorCode::Unsupported,
-                "this output has no volume to set: an exclusive card plays the audio unscaled, so use \
-                 the DAC's own volume, or switch to a shared output",
+                "this output has no volume to set: it's an exclusive card with no hardware mixer \
+                 control of its own. Use the DAC's own knob, or switch to a shared output",
             ),
             Err(VolumeError::Failed(why)) => self::error(ErrorCode::Internal, &why),
         }

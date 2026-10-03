@@ -71,7 +71,7 @@ done — it is its own product decision, not a leftover.
 | #26 | Per-track sample rate switching | Code complete, same plan and PRs as #25; **issue left open on GitHub, worth closing by hand** |
 | #28 | Signal path indicator in the TUI | Code complete (PRs #110–#112, all 3 parts); **issue left open on GitHub, worth closing by hand** |
 | #30 | ReplayGain in shared mode | Code complete (all 4 parts); **issue left open on GitHub, worth closing by hand** |
-| #31 | Hardware mixer volume | In progress (approved 3-PR plan; part 1 done) |
+| #31 | Hardware mixer volume | In progress (approved 3-PR plan; parts 1–2 done) |
 
 ### Phases 4 and 5
 
@@ -320,6 +320,36 @@ it was genuinely in use, at -10 dB, not a throwaway default), the
 internal `sof-hda-dsp` card's `Master` control (a second real "has a
 control" case), and an NVidia HDMI output (confirmed to correctly
 report no usable control at all, read-only, nothing audible).
+
+Part 2 (merged) is the first audible change: `AlsaSinkFactory::volume()`
+now returns a working `HardwareVolume` whenever the card has one
+(re-probed fresh on every call, never cached). `phoniad`'s `Outputs`
+had its two hazards fixed, both by the same underlying change:
+`Outputs::volume()` and the base `set_volume` computes a relative
+change from are now always the control's own current value
+(`control.get()`), never a value `Outputs` cached itself — this erases
+the "seeded at 100%" bug outright, since there is no cache left to seed
+badly. `switched_to` now carries the level forward only between two
+shared outputs; attaching to anything else (any exclusive card, with a
+hardware control or without) never writes a value into it at attach
+time, no matter what `Outputs` last had asked for. Every stale
+"exclusive has no volume" message, doc comment and help text across
+`mod.rs`, `proto.rs`, `outputs.rs`, `daemon.rs`, `ctl.rs` and the TUI
+was reworded to say "no hardware mixer control" instead, without
+changing the wire format (the refusal stays `ErrorCode::Unsupported`,
+`Status.volume` stays `None`).
+
+Verified for real end to end against the DS2: started a scratch
+daemon on it and watched `phonia ctl status` show its *actual* live
+level (68%, matching -10 dB, not a seeded 100%) before any volume
+command was ever sent; a relative `volume -5` landed at exactly 63% on
+both phonia's own report and a separate `amixer` read; mute and unmute
+each left the level untouched; switching to a shared output (the
+built-in speaker, nothing DS2-related) started fresh at 100% rather
+than carrying the DS2's 63% over; switching back to the DS2 showed
+63% again, confirming the hardware was never touched during the
+detour; and the card was set back to its exact original value
+(84%/-10 dB/on) before the scratch daemon was stopped.
 
 #25, #26, #28 and #30 are all code-complete but still open on GitHub
 (see "Conventions" below) — close them by hand when convenient.

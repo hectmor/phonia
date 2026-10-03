@@ -144,7 +144,7 @@ pub enum Request {
         output: String,
     },
     /// Sets the volume, 0 to 100 (since 1.3). Refused for an output with no volume of its own to
-    /// set, which is an exclusive card.
+    /// set: an exclusive card with no hardware mixer control.
     SetVolume {
         percent: u8,
     },
@@ -265,7 +265,8 @@ pub enum ErrorCode {
     BadSource,
     /// The entry the request names does not exist.
     NotFound,
-    /// The request is fine but this output can't do it (a volume on an exclusive card). Since 1.3.
+    /// The request is fine but this output can't do it (a volume on a card with no hardware mixer
+    /// control). Since 1.3.
     Unsupported,
     /// There is no TIDAL login, or TIDAL no longer accepts it: run `phonia login`. Since 1.6.
     NotLoggedIn,

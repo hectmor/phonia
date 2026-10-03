@@ -154,9 +154,10 @@ pub trait SinkFactory: Send + Sync {
     /// Not called between two tracks of different formats, where the card stays reserved.
     fn release(&self) {}
 
-    /// The volume of this output, when it has one phonia can set: the stream's volume in shared
-    /// mode. An exclusive card has none (the DAC's own volume applies, and the audio is never
-    /// scaled).
+    /// The volume of this output, when it has one phonia can set: the stream's digital volume in
+    /// shared mode, or an exclusive card's own hardware mixer control, when it has one (see
+    /// `output::mixer`). `None` when there is nothing to set at all: an exclusive card with no
+    /// such control stays fixed at 100%, since phonia never scales the audio itself in that mode.
     fn volume(&self) -> Option<Arc<dyn VolumeControl>> {
         None
     }
@@ -167,10 +168,12 @@ pub trait SinkFactory: Send + Sync {
     fn on_release_request(&self, _handler: ReleaseHandler) {}
 }
 
-/// How loud, as a percentage of what the stream would play at unity gain (100), and whether it is
-/// muted. Digital: it scales the audio before the sound server mixes it, so it never touches the
-/// hardware volume. The scale is the one the desktop's mixers show, which is cubic in amplitude:
-/// 50% is about -18 dB.
+/// How loud, as a percentage of unity gain (100), and whether it is muted. What it actually does
+/// depends on which [`VolumeControl`] applies it: in shared mode it scales the audio digitally
+/// before the sound server mixes it, never touching any hardware; for an exclusive card with a
+/// hardware mixer control (`output::mixer`), it drives that control directly, and the stream
+/// itself stays untouched and bit-perfect either way. The percentage is cubic in amplitude in both
+/// cases, the same curve the desktop's own mixers use: 50% is about -18 dB.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Volume {
     pub percent: u8,

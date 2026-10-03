@@ -1285,3 +1285,55 @@ Out of scope for #31: a config override for control-name selection, a `fixed: bo
 showing the hardware dB value on #28's own signal-path line, and hardware volume for shared outputs
 (PipeWire already owns that). Software volume in exclusive mode of any kind remains out of the
 question — it would break bit-perfectness, which is the one thing this project never trades away.
+
+## 2026-10-03 — #31 part 2: `Outputs` reads the control, it never caches it
+
+Wires `AlsaSinkFactory::volume()` to `self.hw_volume.probe().is_some().then(|| self.hw_volume.clone()
+as Arc<dyn VolumeControl>)` — re-probed on every call, per part 1's own decision, so a replugged card
+is never trusted to still have whatever it had a moment ago.
+
+**Both hazards part 1 found are fixed by the same change, not two separate patches.** The actual bug
+in both cases was that `phoniad::Outputs` kept its own `Mutex<Volume>` (`level`) as the thing it
+reported and computed relative changes from, seeded once at `Volume::default()` and never
+synchronized against reality. The fix removes that role from `level` entirely: `Outputs::volume()`
+now calls `control.get()` directly every time, and `set_volume`'s relative base is `control.get()`,
+not `level`. `level` still exists, but only for one narrow job — remembering the last *shared*
+level, so a future shared output can start where the previous one left off — and nothing else reads
+it. This is a strictly more correct design than literally patching `attach()` to "read the value when
+not carrying," which was the plan's own original framing: it closes the staleness window entirely
+(there is no gap between an attach and the first read where a cached value could be wrong), it costs
+nothing extra (a hardware read is already sub-millisecond, confirmed in part 1), and it means a
+hardware control changed by anything else — even before part 3's watcher exists — is reflected the
+very next time anyone asks, not just after a reattach.
+
+`switched_to` now computes `both_shared = old spec is Shared && new spec is Shared` *before*
+overwriting `self.current`, and passes that as `carry_volume` to `attach` instead of always `true`.
+Carrying was never the only thing standing between "shared" and "hazard": even with the fix above,
+writing an old level into a *hardware* control on attach would have been a real, audible jump by
+itself, so both the write-side (`attach`'s `carry_volume`) and the read-side (`volume`/`set_volume`
+above) needed fixing, not just one.
+
+**Every "exclusive has no volume" message became "no hardware mixer control"**, reworded, not
+restructured: `SinkFactory::volume`'s and `Volume`'s own doc comments (`output/mod.rs`),
+`VolumeError::Unsupported`'s doc, `SetVolume`'s doc and `ErrorCode::Unsupported`'s doc (`proto.rs`),
+the daemon's own wire error text and the TUI's local copy of the same refusal, and `ctl.rs`'s
+`volume`/`mute` help text. No wire or behavior change from this alone — `Status.volume` is still
+`None` exactly when there is nothing to set, `ErrorCode::Unsupported` is still what a refusal reports
+as. The TUI's `OutputChanged` handler, which clears `status.volume` pre-emptively for any exclusive
+route, was *not* restructured: the daemon already publishes `VolumeChanged` right after
+`OutputChanged` whenever the new output has one (this already existed, in `set_output`, for whatever
+reason the investigation's own research had missed it), so the clear is corrected by the very next
+event in the same sequence; only the comment explaining *why* it clears needed to stop asserting
+"exclusive never has volume" as if it were still universally true.
+
+**Verified for real, end to end, against the DS2** (a scratch `phoniad` on a throwaway socket,
+`--output exclusive:hw:DS2,0`, no track ever played): `phonia ctl status` showed the control's actual
+live value (68%, matching the -10 dB `amixer` independently confirmed) the moment the daemon started,
+never a seeded 100%; `volume -5` landed at exactly 63%, confirmed both by phonia's own report and a
+separate `amixer` read; mute, then unmute, each left the level exactly where it was; switching to a
+wholly unrelated shared output (the laptop's own speaker, not the DS2 under PipeWire) started that
+stream at a fresh 100%, not the DS2's 63%; switching back to the DS2 showed 63% again, proving the
+hardware was never written during the detour through shared mode; the card was returned to its exact
+starting state (84%/-10 dB/on) before the scratch daemon was stopped. This exercises the full stack —
+engine-independent, since the mixer control has nothing to do with the PCM or its reservation — with
+nothing synthetic standing in for any part of it.
