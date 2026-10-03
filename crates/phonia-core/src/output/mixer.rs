@@ -16,7 +16,15 @@ use alsa::Round;
 use alsa::mixer::{MilliBel, Mixer, Selem, SelemChannelId};
 use anyhow::{Result, anyhow, bail};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
+
+/// How long the watcher thread's `Mixer::wait` ever blocks at once: short enough that it also
+/// serves as its own "is anyone still interested" tick (it exits once the `HardwareVolume` it
+/// watches for is dropped), without being so short it wakes for nothing.
+const WATCH_POLL_MS: u32 = 2_000;
+/// How long the watcher waits before trying to reopen a card that has gone away.
+const WATCH_RETRY: Duration = Duration::from_secs(5);
 
 /// What [`probe`] found on a card: the control it would drive, and what that control reports.
 /// `db_range` is `None` for a control with no usable dB data (an error reading it, or a reported
@@ -27,6 +35,22 @@ pub struct ControlInfo {
     pub name: String,
     pub db_range: Option<(i32, i32)>,
     pub has_switch: bool,
+}
+
+impl ControlInfo {
+    /// `"PCM (-63.0..0.0 dB)"`, or just the name when the control has no usable dB range (the
+    /// linear-raw fallback has no fixed units worth printing).
+    pub fn describe(&self) -> String {
+        match self.db_range {
+            Some((min, max)) => format!(
+                "{} ({:.1}..{:.1} dB)",
+                self.name,
+                f64::from(min) / 100.0,
+                f64::from(max) / 100.0
+            ),
+            None => self.name.clone(),
+        }
+    }
 }
 
 /// Converts a volume percentage to the dB figure alsamixer and the desktop's mixers show for it:
@@ -143,37 +167,136 @@ fn db_range_of(selem: &Selem) -> Option<(i32, i32)> {
 /// Read-only, safe to call whether or not phonia is currently playing: the control device has
 /// nothing to do with the PCM's own reservation.
 pub fn probe(device: &str) -> Option<ControlInfo> {
-    let resolved = device::resolve(device, Path::new(device::ASOUND)).ok()?;
-    let Device::Hw { card, .. } = resolved else {
-        return None;
-    };
-    let mixer = Mixer::new(&format!("hw:{card}"), false).ok()?;
-    let controls = list_controls(&mixer);
-    let refs: Vec<(&str, bool)> = controls.iter().map(|(n, v)| (n.as_str(), *v)).collect();
-    let name = choose_control(&refs)?;
-    let selem = find_selem(&mixer, name)?;
-    Some(ControlInfo {
-        name: name.to_string(),
-        db_range: db_range_of(&selem),
-        has_switch: selem.has_playback_switch(),
-    })
+    open_control(device).ok().map(|(_, info)| info)
 }
 
-/// A [`VolumeControl`] backed by a card's own hardware mixer. Every call re-resolves the device
-/// and re-opens the mixer: there is nothing cached to go stale across a replug (see the module
-/// doc), and the `alsa` crate's `Mixer` is not `Sync`, so nothing could be kept open across calls
-/// from different threads regardless.
+/// The same work as [`probe`], but for a card already identified by its numeric index, with no
+/// resolution by id at all. For a caller that already has the right index from its own source of
+/// truth (`device::list`'s own card listing, which may come from a fake `/proc/asound`-shaped
+/// tree in a test): going through [`device::resolve`] again would silently consult the real
+/// system instead of whatever tree the caller actually meant.
+pub fn probe_card(index: u32) -> Option<ControlInfo> {
+    open_control_by_index(index).ok().map(|(_, info)| info)
+}
+
+/// Opens `device`'s mixer and picks the control [`choose_control`] would. Kept separate from
+/// [`probe`] (which only needs the [`ControlInfo`]) so the watcher thread, which needs the
+/// [`Mixer`] itself kept open, can share the same logic.
+fn open_control(device: &str) -> Result<(Mixer, ControlInfo)> {
+    let resolved = device::resolve(device, Path::new(device::ASOUND))?;
+    let Device::Hw { card, .. } = resolved else {
+        bail!("{device} is not a hardware device");
+    };
+    open_control_by_index(card)
+}
+
+/// [`open_control`], for a card already identified by its numeric index.
+fn open_control_by_index(card: u32) -> Result<(Mixer, ControlInfo)> {
+    let mixer = Mixer::new(&format!("hw:{card}"), false)?;
+    let controls = list_controls(&mixer);
+    let refs: Vec<(&str, bool)> = controls.iter().map(|(n, v)| (n.as_str(), *v)).collect();
+    let name = choose_control(&refs)
+        .ok_or_else(|| anyhow!("card {card} has no usable hardware volume control"))?
+        .to_string();
+    let info = {
+        let selem =
+            find_selem(&mixer, &name).ok_or_else(|| anyhow!("the {name} control disappeared"))?;
+        ControlInfo {
+            name,
+            db_range: db_range_of(&selem),
+            has_switch: selem.has_playback_switch(),
+        }
+    };
+    Ok((mixer, info))
+}
+
+/// Reads `info`'s control on an already-open `mixer`.
+fn read_control(mixer: &Mixer, info: &ControlInfo) -> Result<Volume> {
+    let selem = find_selem(mixer, &info.name)
+        .ok_or_else(|| anyhow!("the {} control disappeared", info.name))?;
+    let percent = match info.db_range {
+        Some(range) => {
+            let MilliBel(current) = selem.get_playback_vol_db(SelemChannelId::FrontLeft)?;
+            millibel_to_percent_in(current as i32, range)
+        }
+        None => {
+            let range = selem.get_playback_volume_range();
+            let raw = selem.get_playback_volume(SelemChannelId::FrontLeft)?;
+            raw_to_percent_linear(raw, range)
+        }
+    };
+    let muted = info.has_switch && selem.get_playback_switch(SelemChannelId::FrontLeft)? == 0;
+    Ok(Volume { percent, muted })
+}
+
+/// Runs on its own dedicated thread for as long as `target` is still alive (checked by trying to
+/// upgrade `target` every tick; once it fails, `target`'s owner dropped it and there is no reason
+/// to keep watching). Unlike [`HardwareVolume::get`]/[`set`], which always open a fresh [`Mixer`]
+/// (see the module doc), this keeps one open so [`Mixer::wait`] can block on it for real events —
+/// that is the one thing a per-call open can't do. Re-resolves the device and reopens every
+/// [`WATCH_RETRY`] while the card is gone, the same as every other re-probe in this module.
+fn watch(target: Weak<HardwareVolume>) {
+    let mut last: Option<Volume>;
+    loop {
+        let Some(this) = target.upgrade() else { return };
+        let device = this.device.clone();
+        drop(this);
+        let Ok((mixer, info)) = open_control(&device) else {
+            std::thread::sleep(WATCH_RETRY);
+            continue;
+        };
+        // The starting point is established silently: only a change from here on is worth
+        // announcing, not wherever the control already happened to be.
+        last = read_control(&mixer, &info).ok();
+        loop {
+            if mixer.wait(Some(WATCH_POLL_MS)).is_err() {
+                break;
+            }
+            let _ = mixer.handle_events();
+            let Some(this) = target.upgrade() else { return };
+            match read_control(&mixer, &info) {
+                Ok(current) => {
+                    if last != Some(current) {
+                        last = Some(current);
+                        if let Some(handler) = this.handler.lock().unwrap().clone() {
+                            handler(current);
+                        }
+                    }
+                }
+                Err(_) => {
+                    // The control (or the card) disappeared: fall back to re-resolving it.
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// A [`VolumeControl`] backed by a card's own hardware mixer. [`get`](VolumeControl::get)/
+/// [`set`](VolumeControl::set) each re-resolve the device and re-open the mixer: there is nothing
+/// cached to go stale across a replug (see the module doc), and the `alsa` crate's `Mixer` is not
+/// `Sync`, so nothing could be kept open across calls from different threads regardless. The one
+/// exception is the background watcher [`VolumeControl::on_change`] starts, which keeps its own
+/// mixer open on its own dedicated thread so it can actually wait on it.
 pub struct HardwareVolume {
     device: String,
     handler: Mutex<Option<VolumeHandler>>,
+    /// Whether the watcher thread has already been started; `on_change` can be called more than
+    /// once (every [`super::SinkFactory`] attach does), and must not spawn a second one.
+    watching: Mutex<bool>,
+    /// A weak reference to itself, handed to the watcher thread so it exits once nothing else
+    /// holds this `HardwareVolume` any more, instead of outliving it.
+    weak_self: Weak<Self>,
 }
 
 impl HardwareVolume {
-    pub fn new(device: impl Into<String>) -> Self {
-        Self {
+    pub fn new(device: impl Into<String>) -> Arc<Self> {
+        Arc::new_cyclic(|weak_self| Self {
             device: device.into(),
             handler: Mutex::new(None),
-        }
+            watching: Mutex::new(false),
+            weak_self: weak_self.clone(),
+        })
     }
 
     /// Whether this device currently has a usable hardware volume control; re-probed fresh every
@@ -183,50 +306,13 @@ impl HardwareVolume {
         probe(&self.device)
     }
 
-    fn open(&self) -> Result<(Mixer, ControlInfo)> {
-        let resolved = device::resolve(&self.device, Path::new(device::ASOUND))?;
-        let Device::Hw { card, .. } = resolved else {
-            bail!("{} is not a hardware device", self.device);
-        };
-        let mixer = Mixer::new(&format!("hw:{card}"), false)?;
-        let controls = list_controls(&mixer);
-        let refs: Vec<(&str, bool)> = controls.iter().map(|(n, v)| (n.as_str(), *v)).collect();
-        let name = choose_control(&refs)
-            .ok_or_else(|| anyhow!("{} has no usable hardware volume control", self.device))?
-            .to_string();
-        let info = {
-            let selem = find_selem(&mixer, &name)
-                .ok_or_else(|| anyhow!("the {name} control disappeared"))?;
-            ControlInfo {
-                name,
-                db_range: db_range_of(&selem),
-                has_switch: selem.has_playback_switch(),
-            }
-        };
-        Ok((mixer, info))
-    }
-
     fn read(&self) -> Result<Volume> {
-        let (mixer, info) = self.open()?;
-        let selem = find_selem(&mixer, &info.name)
-            .ok_or_else(|| anyhow!("the {} control disappeared", info.name))?;
-        let percent = match info.db_range {
-            Some(range) => {
-                let MilliBel(current) = selem.get_playback_vol_db(SelemChannelId::FrontLeft)?;
-                millibel_to_percent_in(current as i32, range)
-            }
-            None => {
-                let range = selem.get_playback_volume_range();
-                let raw = selem.get_playback_volume(SelemChannelId::FrontLeft)?;
-                raw_to_percent_linear(raw, range)
-            }
-        };
-        let muted = info.has_switch && selem.get_playback_switch(SelemChannelId::FrontLeft)? == 0;
-        Ok(Volume { percent, muted })
+        let (mixer, info) = open_control(&self.device)?;
+        read_control(&mixer, &info)
     }
 
     fn write(&self, volume: Volume) -> Result<()> {
-        let (mixer, info) = self.open()?;
+        let (mixer, info) = open_control(&self.device)?;
         if volume.muted && !info.has_switch {
             bail!("{}'s volume has no mute switch", info.name);
         }
@@ -260,10 +346,24 @@ impl VolumeControl for HardwareVolume {
         self.write(volume)
     }
 
-    /// Stored, but never called in this part: nothing here watches for a change made outside
-    /// phonia (`alsamixer`, or the desktop reclaiming the card) yet. That is a later part of #31.
+    /// Starts the background watcher the first time this is called (idempotent after that), so a
+    /// change made outside phonia -- `alsamixer`, or the desktop reclaiming the card and
+    /// restoring its own saved level -- is still noticed and announced.
     fn on_change(&self, handler: VolumeHandler) {
         *self.handler.lock().unwrap() = Some(handler);
+        let mut watching = self.watching.lock().unwrap();
+        if !*watching {
+            *watching = true;
+            let target = self.weak_self.clone();
+            let device = self.device.clone();
+            let result = std::thread::Builder::new()
+                .name("phonia-hw-volume-watch".into())
+                .spawn(move || watch(target));
+            if let Err(error) = result {
+                crate::warn!("could not start watching {device}'s hardware volume: {error}");
+                *watching = false;
+            }
+        }
     }
 }
 
@@ -381,11 +481,33 @@ mod tests {
         assert_eq!(probe("plughw:0,0"), None);
     }
 
+    #[test]
+    fn describing_a_control_names_its_db_range_when_it_has_one() {
+        let info = ControlInfo {
+            name: "PCM".into(),
+            db_range: Some((-6300, 0)),
+            has_switch: true,
+        };
+        assert_eq!(info.describe(), "PCM (-63.0..0.0 dB)");
+    }
+
+    #[test]
+    fn describing_a_control_with_no_db_range_is_just_its_name() {
+        let info = ControlInfo {
+            name: "Speaker".into(),
+            db_range: None,
+            has_switch: false,
+        };
+        assert_eq!(info.describe(), "Speaker");
+    }
+
     // ---- against real hardware -----------------------------------------------------------
     //
     // Read-only or restore-after-itself; ignored by default. Run with:
     // `PHONIA_TEST_DEVICE=hw:DS2,0 cargo test -p phonia-core mixer::tests::hardware -- --ignored --nocapture`
-    // (the device may be named by card id, or be `auto`, the default)
+    // (the device may be named by card id, or be `auto`, the default). Run with `--test-threads=1`
+    // when running more than one of these together: they share the same physical control, and two
+    // of them writing to it at once look to each other exactly like an outside change.
 
     /// Needs a real DAC with a usable hardware volume control. Read-only. Written against the
     /// Fosi Audio DS2's "PCM" control (a UAC Feature Unit, -63..0 dB in exact 1 dB steps).
@@ -484,5 +606,60 @@ mod tests {
             })
             .unwrap();
         assert!(!control.get().muted, "unmute did not take");
+    }
+
+    /// Needs a real DAC with a usable hardware volume control; nothing is played. Restores the
+    /// control afterward. The "outside" change is a second, independent write to the same
+    /// control -- indistinguishable, from the watcher's own persistent `Mixer`, from `alsamixer`
+    /// or the desktop doing it, since neither ever goes through the watcher's own handle.
+    #[test]
+    #[ignore = "needs a real ALSA device with a usable mixer control"]
+    fn hardware_watcher_reports_a_change_made_outside_itself() {
+        let wanted = std::env::var("PHONIA_TEST_DEVICE").unwrap_or_else(|_| "auto".into());
+        let device = device::resolve(&wanted, Path::new(device::ASOUND))
+            .expect("finding the device")
+            .alsa_name();
+        let control = HardwareVolume::new(device.clone());
+        assert!(
+            control.probe().is_some(),
+            "{device} has no usable mixer control; set PHONIA_TEST_DEVICE to one that does"
+        );
+        let original = control.get();
+
+        struct Restore<'a> {
+            control: &'a HardwareVolume,
+            original: Volume,
+        }
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                let _ = self.control.set(self.original);
+            }
+        }
+        let _restore = Restore {
+            control: &control,
+            original,
+        };
+
+        let seen: Arc<Mutex<Vec<Volume>>> = Arc::default();
+        let collected = seen.clone();
+        control.on_change(Arc::new(move |volume| {
+            collected.lock().unwrap().push(volume)
+        }));
+        // Lets the watcher open the mixer and read its starting value before anything changes.
+        std::thread::sleep(Duration::from_millis(500));
+
+        let target = Volume {
+            percent: original.percent.min(30),
+            muted: false,
+        };
+        control.set(target).unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while seen.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let seen = seen.lock().unwrap();
+        assert!(!seen.is_empty(), "the watcher never reported the change");
+        assert_eq!(seen.last().unwrap().percent, target.percent);
     }
 }

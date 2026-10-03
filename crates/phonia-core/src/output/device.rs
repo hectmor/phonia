@@ -9,6 +9,7 @@
 //! The sound cards are read from a directory laid out like `/proc/asound`, passed in, so all of
 //! this can be tested against a made-up tree.
 
+use super::mixer;
 use anyhow::{Result, anyhow, bail};
 use std::path::Path;
 
@@ -217,6 +218,14 @@ fn first_usb_card(asound: &Path) -> Result<Device> {
 
 /// The text of `phonia devices`: the cards that can play, with the string to put in the config.
 pub fn list(asound: &Path) -> Result<String> {
+    list_with(asound, mixer::probe_card)
+}
+
+/// [`list`], probing for a hardware volume control with `probe` instead of the real one: real
+/// mixer access has no fake-filesystem equivalent (unlike `stream0`, a plain text file under
+/// `asound`), so a test that is not exercising this specifically passes a closure that always
+/// says there is none, to stay deterministic and free of any real hardware dependency.
+fn list_with(asound: &Path, probe: impl Fn(u32) -> Option<mixer::ControlInfo>) -> Result<String> {
     let cards = cards(asound)?;
     let playing: Vec<&CardInfo> = cards
         .iter()
@@ -249,6 +258,12 @@ pub fn list(asound: &Path) -> Result<String> {
             for line in advertised_lines(&stream0) {
                 lines.push(format!("      advertises {line}"));
             }
+        }
+        // Whether the card has a hardware mixer control phonia can drive in exclusive mode
+        // (#31): also passive, the mixer control is a separate device from the PCM and costs
+        // nothing to read whether or not anything is playing.
+        if let Some(info) = probe(card.index) {
+            lines.push(format!("      hardware volume: {}", info.describe()));
         }
     }
     lines.push("Or use `auto` for the first USB sound card.".to_string());
@@ -497,7 +512,7 @@ mod tests {
     fn devices_output_is_pinned() {
         let root = asound("list");
         assert_eq!(
-            list(&root).unwrap(),
+            list_with(&root, |_| None).unwrap(),
             "Sound cards, exclusive and bit-perfect (put the device in ~/.config/phonia/config.toml under [output]):\n\
              \x20 hw:NVidia,3 hw:NVidia,7 HDA NVidia  (card 0)\n\
              \x20 hw:DS2,0         Fosi Audio DS2  (card 1, USB)\n\
@@ -507,12 +522,34 @@ mod tests {
     }
 
     #[test]
+    fn a_cards_hardware_volume_control_is_shown_when_it_has_one() {
+        let root = asound("list");
+        let text = list_with(&root, |index| {
+            (index == 1).then(|| mixer::ControlInfo {
+                name: "PCM".into(),
+                db_range: Some((-6300, 0)),
+                has_switch: true,
+            })
+        })
+        .unwrap();
+        assert!(
+            text.contains("      hardware volume: PCM (-63.0..0.0 dB)"),
+            "{text}"
+        );
+        assert_eq!(
+            text.matches("hardware volume").count(),
+            1,
+            "only the DS2 (card 1) was given one: {text}"
+        );
+    }
+
+    #[test]
     fn a_machine_without_cards_says_so() {
         let root =
             std::env::temp_dir().join(format!("phonia-device-test-{}-empty", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         assert_eq!(
-            list(&root).unwrap(),
+            list_with(&root, |_| None).unwrap(),
             "No sound cards with playback were found."
         );
     }
@@ -661,7 +698,7 @@ Capture:
     fn phonia_devices_shows_what_a_usb_card_advertises_and_leaves_hda_cards_alone() {
         let root = asound("stream0");
         std::fs::write(root.join("card1").join("stream0"), DS2_STREAM0).unwrap();
-        let text = list(&root).unwrap();
+        let text = list_with(&root, |_| None).unwrap();
         assert!(
             text.contains(
                 "      advertises S16_LE, S24_3LE, S32_LE at 44100, 48000, 88200, 96000, \

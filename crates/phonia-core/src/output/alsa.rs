@@ -593,7 +593,7 @@ impl AlsaSinkFactory {
     pub fn new(device: impl Into<String>) -> Self {
         let device = device.into();
         Self {
-            hw_volume: Arc::new(HardwareVolume::new(device.clone())),
+            hw_volume: HardwareVolume::new(device.clone()),
             device,
             on_report: None,
             reservation: None,

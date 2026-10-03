@@ -1337,3 +1337,75 @@ hardware was never written during the detour through shared mode; the card was r
 starting state (84%/-10 dB/on) before the scratch daemon was stopped. This exercises the full stack —
 engine-independent, since the mixer control has nothing to do with the PCM or its reservation — with
 nothing synthetic standing in for any part of it.
+
+## 2026-10-03 — #31 part 3 (last): the watcher fires on a change, not on attaching
+
+Adds the live watcher `on_change` was always meant to start, and a passive `phonia devices` hint.
+
+**The watcher is a background thread, started once per `HardwareVolume` the first time anything
+calls `on_change`** (guarded by a `watching: Mutex<bool>`, since every `Outputs::attach` calls it
+again on the same, still-live control). It keeps its own `Mixer` open for as long as it runs — the
+one place in this module that does, everywhere else in `HardwareVolume` opens a fresh one per call
+on purpose (part 1) — because that is the only way to use `Mixer::wait`, which blocks on the
+control's own poll descriptors for a real kernel event instead of guessing a polling interval. The
+thread holds only a `Weak<HardwareVolume>` (via `Arc::new_cyclic` at construction), so it exits on
+its own, with no explicit stop needed, once whatever `AlsaSinkFactory` owned it switches away and
+drops the last strong reference. While the card is gone it re-resolves and reopens every five
+seconds, the same re-probe-on-every-operation principle as everywhere else here.
+
+**A real bug, caught by writing the hardware test for this before trusting the first version at
+all**: the first implementation compared every reading against a `last: Option<Volume>` that
+started as `None`, so the very first reading after opening the control — the level the card
+already happened to be at, not a change at all — always looked different from `None` and fired
+immediately. The test (`hardware_watcher_reports_a_change_made_outside_itself`) caught this
+directly: it failed by reporting the *original* value instead of the *target* one, because the
+spurious "attach" announcement raced ahead of the real change and satisfied the test's "wait for
+any report" loop first. Fixed by reading the starting value silently right after opening, with no
+comparison and no callback, and only beginning to compare — and only then ever calling the
+handler — from the next tick on.
+
+**The "outside change" in the test is a second, independent write to the same control**, not
+literally `alsamixer` or WirePlumber: from the watcher's own persistently-open `Mixer`, there is no
+way to tell a write issued by another real program from one issued by a second call to the same
+`HardwareVolume`'s own `set` (which always opens its *own*, separate `Mixer` per part 1's design) —
+both arrive at the watcher as nothing more than "the control's value changed," which is exactly the
+mechanism being tested. Running two of these hardware tests at once (plain parallel `cargo test`,
+no `--test-threads=1`) makes this same ambiguity work against the tests themselves — confirmed
+directly: `hardware_mixer_round_trip` and the watcher test running concurrently each looked to the
+other like an unrelated outside change, and both failed until serialized. Documented at the top of
+the real-hardware test section rather than treated as flaky: it is the expected behavior of
+hardware two tests happen to share, the same reason none of this module's other real-hardware tests
+are safe to run concurrently with each other either.
+
+**The `phonia devices` hint is deliberately not on `catalog::Entry`, or anywhere the daemon's own
+output list or the wire protocol reaches.** It is a standalone-CLI, read-only probe — the same
+boundary the USB `advertises` line (#25/#26 part 4) already drew between "what a device claims,
+read without opening it, shown by the CLI" and "what the daemon's own clients see over IPC." Giving
+`device::list` a `probe: impl Fn(u32) -> Option<ControlInfo>` parameter (real callers get
+`mixer::probe_card`) rather than calling real ALSA mixer access unconditionally was necessary, not
+just tidy: `list`'s existing tests build a *fake* `/proc/asound`-shaped directory tree and reuse
+card numbers freely, and this machine's real card 1 (NVidia) and the fake tree's card 1 (also named
+differently) are different cards entirely — a hardcoded real probe would have silently reached past
+the fake tree into this machine's actual hardware, passing or failing depending on what happened to
+be plugged in on whoever ran the test, not on the code. `mixer::probe_card(index)` itself is new
+too: unlike `probe(device)`, it never calls `device::resolve` at all, so a caller that already has
+the right numeric index from its own tree (fake or real) is never at risk of that same mismatch.
+
+**Verified for real.** The watcher: a dedicated test opens the real DS2's control, installs a
+handler, waits for the watcher thread to establish its baseline, writes a new level through a
+second call to the same control, and confirms the handler fires with that exact value — the bug
+above was caught this way, by this same test, before any version of the fix shipped. `phonia
+devices`, run live: `hardware volume: PCM (-63.0..0.0 dB)` under the DS2, `hardware volume: Master
+(-65.2..0.0 dB)` under the internal `sof-hda-dsp` card, and correctly no such line at all under the
+NVidia HDMI card.
+
+**Also verified through the full real daemon, end to end, not just the isolated module**: a scratch
+`phoniad` on the real DS2, with `phonia ctl watch` running against it. A plain `amixer -c 0 sset PCM
+20%` — a completely independent process, the closest real stand-in for `alsamixer` short of
+scripting the TUI itself — landed the control at -50 dB, and `phonia ctl watch` printed `volume 15%`
+(matching `100·10^(-50/60) ≈ 15`) within the same second, with `phonia ctl status` agreeing
+afterward. This exercises every link the isolated hardware test above does not: the watcher's
+handler reaching `Outputs::volume_changed_outside`, the daemon publishing `VolumeChanged`, and a
+client actually receiving it. Restored to the exact original raw value afterward.
+
+This closes #31: all 3 parts of the approved plan are merged.
