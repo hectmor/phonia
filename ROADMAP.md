@@ -70,7 +70,7 @@ done — it is its own product decision, not a leftover.
 | #25 | DAC capability detection | Code complete (PRs #106–#109, all 4 parts); **issue left open on GitHub, worth closing by hand** |
 | #26 | Per-track sample rate switching | Code complete, same plan and PRs as #25; **issue left open on GitHub, worth closing by hand** |
 | #28 | Signal path indicator in the TUI | Code complete (PRs #110–#112, all 3 parts); **issue left open on GitHub, worth closing by hand** |
-| #30 | ReplayGain in shared mode | In progress (approved 4-PR plan; part 1 done) |
+| #30 | ReplayGain in shared mode | In progress (approved 4-PR plan; parts 1–2 done) |
 | #31 | Hardware mixer volume | Not started |
 
 ### Phases 4 and 5
@@ -227,6 +227,22 @@ Part 1 (merged) adds the four loudness fields to `tidal.rs`'s
 type, and `TrackMeta.loudness`, filled by `TidalOpener::open` from the
 playback info already being fetched — no behavior change. Verified
 against a real TIDAL track at both LOSSLESS and HI_RES_LOSSLESS tiers.
+
+Part 2 (merged) adds the decision logic, still not wired to any audio:
+`replaygain.rs` gains `Mode` (the `[playback] replaygain` config key,
+default `off`), `Kind` (which of the two gains was actually used) and
+`choose(loudness, mode, same_album_neighbor)`, which picks track or album
+gain and applies the peak-based clip cap (a boost is capped at
+`-20·log10(peak)`, never clipping the track's own reported true peak; a
+cut is never touched; a missing peak caps a boost at 0 dB). `QueueTrack`
+and `SourceInfo` gain `album_id` (mirroring `cover`'s own precedent from
+#21/#24), and `Inner::album_context(id)` decides whether an entry sits
+next to another of the same album in play order — always `false` while
+shuffled, whatever the shuffled order happens to put next to what.
+`Queue::set_replay_gain(mode)` is called once at daemon startup from
+config; there is no runtime IPC setter, on purpose (#30's own scope
+excludes one). `Queue::applied_gain(id, loudness)` is what the engine
+will call in part 3 to get the final `AppliedGain` for a track.
 
 **#31 (hardware mixer volume)** is not started.
 

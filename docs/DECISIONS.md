@@ -1031,3 +1031,58 @@ Out of scope for #30: ReplayGain tags in local files, a runtime IPC
 setter for the replaygain mode, and applying gain through a DAC's
 hardware mixer in exclusive mode (left for a future issue if ever
 wanted).
+
+## 2026-10-03 — #30 part 2: the decision logic, still wired to nothing audible
+
+Adds `Mode` (the `[playback] replaygain` config key: `off` default,
+`track`, `album`, `auto`), `Kind` (which of the two gains ended up used)
+and `choose(loudness, mode, same_album_neighbor) -> Option<AppliedGain>`
+to `replaygain.rs` — a pure function, so the whole decision matrix is
+unit-tested without a queue or an engine in sight.
+
+**Peak capping follows the approved rule literally, not just
+approximately**: a cut (`db <= 0.0`) is returned completely untouched,
+whatever the peak says; only a boost (`db > 0.0`) is ever capped, at
+`-20·log10(peak)` when a peak is known, or at `0.0` when it is not. An
+earlier draft used a plain `db.min(cap)` for every gain, which happens to
+agree with the literal rule for a normal peak (≤ 1.0, where the cap is
+non-negative) but quietly over-cuts a negative gain whenever `peak > 1.0`
+(a track TIDAL itself measured as already clipping, where `-20·log10(peak)`
+goes negative) — caught by a dedicated test
+(`a_cut_is_never_touched_by_the_cap_however_small_the_peak`) before it
+could become a real discrepancy between the written rule and the code.
+
+**`Mode::Album` falls back to the track's own gain when TIDAL has no
+album measurement, and says so honestly**: `AppliedGain.kind` becomes
+`Kind::Track` in that case, not `Kind::Album` — the point of `kind` is to
+tell a later display (#30 part 4) what was *actually* used, and reporting
+"(album)" next to a number that is really the track's gain would be a
+small but real lie.
+
+**Album context is a queue concept, not a `TrackMeta` one.** `album_id`
+was added to `SourceInfo` and `QueueTrack`, mirroring `cover`'s own
+precedent from #21/#24 exactly (same two structs, same "`None` for a
+local file or an albumless track" rule) — nothing already threads album
+identity this far, and #27's gapless join is purely format-based with no
+concept of an album at all. `Inner::album_context(id)` (private to the
+queue's own sequencing state machine, alongside `advance`/`peek`) looks
+at `self.order` — the same play order `Advance`/`Previous`/shuffle
+already maintain — for a neighbor (either side) sharing `album_id`, and
+returns `false` unconditionally while shuffled, regardless of what the
+shuffled order happens to put next to what: shuffle breaks album
+sequencing by definition, so there is no "lucky" shuffled adjacency worth
+treating as an album.
+
+**`Queue::set_replay_gain(mode)` is called once, at daemon construction,
+from `config.toml` alone** (`DaemonParts.replaygain`, mirroring how
+`engine::Options.gapless` already arrives from `settings.gapless.value`)
+— there is deliberately no IPC request to change it at runtime, per the
+plan's own stated scope. `Queue::applied_gain(id, loudness)` combines the
+stored mode with `album_context(id)` and `replaygain::choose`, so the
+engine (part 3) only has to call one method with the `Loudness` it
+already has from `TrackMeta`, never touching `Inner` directly.
+
+Still nothing audible: no sink reads `AppliedGain`, no sample is scaled.
+That is part 3. Verified with `phonia config show` and a real
+`config.toml` carrying `replaygain = "auto"` (`(config file)` shown, not
+`(default)`) in addition to the unit test suite.

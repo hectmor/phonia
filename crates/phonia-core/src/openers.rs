@@ -82,6 +82,10 @@ pub struct SourceInfo {
     /// The track's album's cover id (a UUID); `None` for a local file, or a TIDAL track with no
     /// album.
     pub cover: Option<String>,
+    /// The track's album's id; `None` for a local file, or a TIDAL track with no album. Used to
+    /// tell whether a track sits next to another of the same album in play order (see
+    /// `replaygain::Mode::Auto`).
+    pub album_id: Option<String>,
 }
 
 /// Why a source could not be described.
@@ -129,6 +133,7 @@ impl FileOpener {
                     .map(|name| name.to_string_lossy().into_owned()),
                 duration: decoder.duration(),
                 cover: None,
+                album_id: None,
             })
         })
         .await
@@ -274,6 +279,7 @@ impl TidalOpener {
             Ok(track) => Ok(SourceInfo {
                 title: Some(format!("{} - {}", track.artist.name, track.title)),
                 duration: Some(Duration::from_secs(track.duration)),
+                album_id: track.album.as_ref().map(|album| album.id.to_string()),
                 cover: track.album.and_then(|album| album.cover),
             }),
             Err(error) => Err(classify_track_error(id, &error)),

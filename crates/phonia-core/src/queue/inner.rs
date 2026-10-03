@@ -3,6 +3,7 @@
 
 use super::{ItemId, QueueItem, QueueSnapshot, QueueTrack, Repeat};
 use crate::engine::Advance;
+use crate::replaygain;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -52,6 +53,7 @@ pub(super) struct Inner {
     shuffle: bool,
     rng: StdRng,
     version: u64,
+    replaygain: replaygain::Mode,
 }
 
 impl Inner {
@@ -69,6 +71,7 @@ impl Inner {
             shuffle: false,
             rng: StdRng::seed_from_u64(seed),
             version: 0,
+            replaygain: replaygain::Mode::default(),
         }
     }
 
@@ -285,6 +288,49 @@ impl Inner {
             self.vacated = None;
         }
         self.version += 1;
+    }
+
+    pub(super) fn set_replay_gain(&mut self, mode: replaygain::Mode) {
+        self.replaygain = mode;
+    }
+
+    /// Whether `id` sits next to another entry of the same album in play order, which is what
+    /// [`replaygain::Mode::Auto`] treats as "part of an album, not a one-off track": shuffle
+    /// breaks album sequencing entirely, so a shuffled queue is never an album context, whatever
+    /// the order happens to put next to what.
+    pub(super) fn album_context(&self, id: ItemId) -> bool {
+        if self.shuffle {
+            return false;
+        }
+        let Some(album) = self
+            .item(id)
+            .and_then(|item| item.track.album_id.as_deref())
+        else {
+            return false;
+        };
+        let Some(position) = self.position(id) else {
+            return false;
+        };
+        let matches = |neighbor: Option<ItemId>| {
+            neighbor
+                .and_then(|id| self.item(id))
+                .and_then(|item| item.track.album_id.as_deref())
+                == Some(album)
+        };
+        matches(
+            position
+                .checked_sub(1)
+                .and_then(|p| self.order.get(p).copied()),
+        ) || matches(self.order.get(position + 1).copied())
+    }
+
+    /// The gain to apply for `id`, given the mode in force and its album context.
+    pub(super) fn applied_gain(
+        &self,
+        id: ItemId,
+        loudness: &replaygain::Loudness,
+    ) -> Option<replaygain::AppliedGain> {
+        replaygain::choose(loudness, self.replaygain, self.album_context(id))
     }
 
     // ---- sequencing ----------------------------------------------------------------------

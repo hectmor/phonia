@@ -176,6 +176,8 @@ pub struct Settings {
     pub verbose: Sourced<bool>,
     /// Whether tracks of the same format are joined without a gap.
     pub gapless: Sourced<bool>,
+    /// How ReplayGain is chosen.
+    pub replaygain: Sourced<crate::replaygain::Mode>,
 }
 
 /// Decides every setting: command line over file over default.
@@ -224,6 +226,11 @@ pub fn resolve(overrides: Overrides, file: &ConfigFile) -> Settings {
         ),
         verbose: Sourced::pick(overrides.verbose, file.daemon.verbose, false),
         gapless: Sourced::pick(None, file.playback.gapless, true),
+        replaygain: Sourced::pick(
+            None,
+            file.playback.replaygain,
+            crate::replaygain::Mode::default(),
+        ),
     }
 }
 

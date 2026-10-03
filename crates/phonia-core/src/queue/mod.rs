@@ -10,6 +10,7 @@
 mod inner;
 
 use crate::engine::{Advance, LoadedTrack, Peek, TrackMeta, TrackOpener, TrackRef, TrackSupplier};
+use crate::replaygain;
 use anyhow::{Result, anyhow};
 use futures_util::future::BoxFuture;
 use inner::{Inner, Peeked};
@@ -54,6 +55,9 @@ pub struct QueueTrack {
     /// The track's album's cover id (a UUID); `None` for a local file, or a TIDAL track with no
     /// album.
     pub cover: Option<String>,
+    /// The track's album's id; `None` for a local file, or a TIDAL track with no album. Used by
+    /// [`Inner::album_context`] to decide `replaygain::Mode::Auto`.
+    pub album_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -156,6 +160,22 @@ impl Queue {
 
     pub fn set_repeat(&self, repeat: Repeat) {
         self.mutate(|inner| inner.set_repeat(repeat));
+    }
+
+    /// Sets how ReplayGain is chosen; see [`replaygain::Mode`]. There is no runtime way to change
+    /// this once the daemon has started: it comes from `config.toml` alone.
+    pub fn set_replay_gain(&self, mode: replaygain::Mode) {
+        self.mutate(|inner| inner.set_replay_gain(mode));
+    }
+
+    /// The gain to apply for an entry that was opened with `loudness`, per the mode in force and
+    /// the entry's place among its neighbors; `None` means apply no gain at all.
+    pub fn applied_gain(
+        &self,
+        id: ItemId,
+        loudness: &replaygain::Loudness,
+    ) -> Option<replaygain::AppliedGain> {
+        self.inner.lock().unwrap().applied_gain(id, loudness)
     }
 
     pub fn snapshot(&self) -> Arc<QueueSnapshot> {

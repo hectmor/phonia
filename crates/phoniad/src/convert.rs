@@ -388,6 +388,7 @@ mod tests {
                         title: title.map(str::to_string),
                         duration: secs.map(Duration::from_secs),
                         cover: cover.map(str::to_string),
+                        album_id: None,
                     },
                 }
             };
