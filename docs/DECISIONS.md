@@ -888,3 +888,51 @@ with the exact same harness and exact same non-result, to rule out a
 regression before accepting it as a pre-existing limitation of the pty
 setup, not of the change -- `q`'s own handling is separately pinned by a
 plain unit test (`q_and_control_c_quit`) that needs no terminal at all.
+
+## 2026-10-03 — #28 part 3 (last): a refusal reaches the signal-path line, not just "Stopped"
+
+Today, a track the DAC refuses (#25) already fails with a precise reason
+(`caps::Unsupported`'s own text) -- but the TUI never showed it. `Event
+::Error` fell into `on_daemon_event`'s own catch-all, so the person just
+saw the state go to `Stopped` with no explanation, the exact gap #25/#26's
+own planning investigation first flagged and this part closes.
+
+**A new, TUI-only `State.playback_error: Option<String>`**, not part of
+the wire protocol at all (nothing here is a daemon concept, it is purely
+"the last thing the signal-path line should say"). Set by `Event::Error`;
+cleared once something strictly newer replaces it: a track actually
+starting (`TrackStarted`), or a fresh `SinkReport` (a sink that just
+opened is itself proof the refusal is over). It deliberately does **not**
+reuse `last_error`: that field answers "did the request *I* just sent
+work", is cleared by the next key the person presses, and its own
+"Could not do that: ..." wording is written for a rejected command, not
+an asynchronous failure from the engine that had nothing to do with a key
+at all. Conflating the two would mean an unrelated keypress silently
+wiping a signal-path error the person has not even read yet, or the
+"Could not do that" phrasing appearing next to a problem nobody asked for.
+
+`signal_line` checks `playback_error` **first**, before `status` at all:
+by the time `Event::Error` arrives, `TrackEnded` (which fires first, per
+#25/#26's own part 3 fix) has typically already cleared `status.track`,
+so without this ordering the line would simply go blank, or worse, fall
+through to whatever output-without-a-track text was already there,
+losing the one thing worth saying. The text is run through the existing
+`truncate` helper (not `fit`, which is for the path-plus-verdict pair;
+here there is only one string) so a long `caps::Unsupported` message
+(these can run well past a typical terminal's width, since they name
+every rate the device actually offers) is cut with `…` instead of being
+silently clipped by ratatui's own right-edge behavior or wrapping onto a
+line that does not exist.
+
+No live verification against real hardware for this part: the
+development machine's own Fosi Audio DS2 accepts every rate and format
+TIDAL can send it (confirmed repeatedly since #25), so a genuine refusal
+cannot be produced against it -- exactly the same limitation #25/#26
+recorded for testing the refusal path itself, now inherited here. Covered
+instead by unit tests (`app.rs`: the error persists across unrelated
+events and is cleared by the next track or report) and `TestBackend`
+screen tests (`view/mod.rs`: the message renders, a track starting
+replaces it, and a long message is truncated with `…` rather than wrapped
+or silently cut).
+
+This closes #28: all 3 parts of the approved plan are merged.

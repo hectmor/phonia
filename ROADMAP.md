@@ -69,7 +69,7 @@ done — it is its own product decision, not a leftover.
 | #29 | Quality tiers, a floor, and automatic fallback | Closed (parts 1–3); an optional part 4 (AAC decode for the lossy tiers) is not started and not blocking |
 | #25 | DAC capability detection | Code complete (PRs #106–#109, all 4 parts); **issue left open on GitHub, worth closing by hand** |
 | #26 | Per-track sample rate switching | Code complete, same plan and PRs as #25; **issue left open on GitHub, worth closing by hand** |
-| #28 | Signal path indicator in the TUI | In progress: approved 3-PR plan; parts 1–2 merged (`Status.sink_report`/protocol 1.7, and the TUI bar's own signal-path line); only the optional part 3 (showing a refused/failed track's reason there too) is left |
+| #28 | Signal path indicator in the TUI | Code complete (PRs #110–#112, all 3 parts); **issue left open on GitHub, worth closing by hand** |
 | #30 | ReplayGain in shared mode | Not started |
 | #31 | Hardware mixer volume | Not started |
 
@@ -180,19 +180,31 @@ where a `q` keypress sent through a forked pty is never seen to exit the
 process within the harness, even though the key handling itself is
 unit-tested and unrelated to this change.
 
-Only the optional part 3 is left: showing a refused or failed track's
-reason on the same line instead of the bare "Stopped" the TUI shows
-today. Deliberately **not** done in parts 1–2, per the plan: #25's probed
+Part 3 (merged) closes #28 out: the same signal-path line shows a
+refused or failed track's own reason (`✖ hw:1,0 cannot play 352800 Hz
+natively; ...`, #25's own precise `caps::Unsupported` text) instead of
+the bare "Stopped" the TUI used to show. A new, TUI-only
+`State.playback_error` (not on the wire) is set by the daemon's
+`Event::Error` and cleared once something newer replaces it — a track
+actually starting, or a fresh `SinkReport` — deliberately *not* reusing
+`last_error` (that field means "a request *you* sent just failed," and
+clears on the next key; this is an async failure from the daemon itself,
+with nothing to do with a key the person pressed). It takes priority over
+whatever `status` itself says, since `TrackEnded` has usually already
+cleared the track the error was about by the time it arrives.
+
+Deliberately **not** done anywhere in #28, per the plan: #25's probed
 `Capabilities` are not attached to `SinkReport` (the issue only asks for
 source/format/device plus a verdict, which it already has in full; that
 seam stays open for a future, separate "what can my DAC do" view) and no
 structured "unsupported format" error code was added (the human text is
 enough for display; a client that would act on its own belongs to a
-future "automatic output selection" issue instead). #30 (ReplayGain in
-shared mode) and #31 (hardware mixer volume) are next after #28, planned
-one at a time with Opus as they come up, unless redirected. #25 and #26
-are code-complete but still open on GitHub (see "Conventions" below) —
-close them by hand when convenient.
+future "automatic output selection" issue instead).
+
+#30 (ReplayGain in shared mode) and #31 (hardware mixer volume) are next,
+planned one at a time with Opus as they come up, unless redirected. #25,
+#26 and #28 are all code-complete but still open on GitHub (see
+"Conventions" below) — close them by hand when convenient.
 
 ## Conventions this file assumes
 

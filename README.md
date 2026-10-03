@@ -87,7 +87,9 @@ chain works with real hardware (a Fosi Audio DS2 during development).
   the same `BIT-PERFECT`/`CONVERTED (reason)`/`SHARED ...` verdict `phonia ctl status` prints, e.g.
   `TIDAL hires 24-bit / 96 kHz → S24_3LE → Fosi Audio DS2 (hw:1,0)  ✔ BIT-PERFECT`; the line is
   always reserved, blank until something is known, so the bar's own height never changes with what
-  is playing. Other keys
+  is playing. The same line also shows a track the DAC refuses (`✖ hw:1,0 cannot play 352800 Hz
+  natively; ...`, #25's own precise reason) in place of `phonia`'s otherwise bare "Stopped", until
+  the next track actually starts or a fresh verdict arrives. Other keys
   are vim-like: `j`/`k` (or the arrows) move, `gg` and `G` go to the ends, `Ctrl-d`/`Ctrl-u` move
   half a page, `h`/`l`/`Tab` change panel, `1`-`3` jump to a section, `?` shows the keys (and
   scrolls with `j`/`k` when the terminal is too short for it) and `q` (or `Ctrl-c`) quits. The help
