@@ -122,6 +122,7 @@ mod tests {
                     duration: None,
                     quality: None,
                     cover: None,
+                    loudness: None,
                 };
                 Ok(LoadedTrack::new(
                     meta,

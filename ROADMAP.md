@@ -70,7 +70,7 @@ done — it is its own product decision, not a leftover.
 | #25 | DAC capability detection | Code complete (PRs #106–#109, all 4 parts); **issue left open on GitHub, worth closing by hand** |
 | #26 | Per-track sample rate switching | Code complete, same plan and PRs as #25; **issue left open on GitHub, worth closing by hand** |
 | #28 | Signal path indicator in the TUI | Code complete (PRs #110–#112, all 3 parts); **issue left open on GitHub, worth closing by hand** |
-| #30 | ReplayGain in shared mode | Not started |
+| #30 | ReplayGain in shared mode | In progress (approved 4-PR plan; part 1 done) |
 | #31 | Hardware mixer volume | Not started |
 
 ### Phases 4 and 5
@@ -201,9 +201,36 @@ structured "unsupported format" error code was added (the human text is
 enough for display; a client that would act on its own belongs to a
 future "automatic output selection" issue instead).
 
-#30 (ReplayGain in shared mode) and #31 (hardware mixer volume) are next,
-planned one at a time with Opus as they come up, unless redirected. #25,
-#26 and #28 are all code-complete but still open on GitHub (see
+**#30 (ReplayGain in shared mode)** is next, planned with Opus as an
+approved 4-PR plan. The investigation found TIDAL already sends
+everything needed — `playbackinfopostpaywall` (fetched on every track
+open already) carries `trackReplayGain`/`trackPeakAmplitude`/
+`albumReplayGain`/`albumPeakAmplitude`; phonia's own `RawPlaybackInfo`
+just didn't declare those fields. The central design question — where to
+apply the gain — was settled against the investigation's own leaning
+(folding it into shared mode's existing PipeWire volume call): shared
+mode's ring buffer is roughly 0.65s deep, so a volume command at a track
+boundary would land on the wrong audio during a gapless join. Instead,
+gain is scaled in process, confined entirely to `SharedSink`, via a new
+`AudioSink::set_gain` trait method that defaults to a no-op — exclusive
+mode gets no new code at all, so bit-perfect-or-refuse stays true by
+construction. Track vs. album gain follows play order (album when
+shuffle is off and the adjacent track shares an album); clip protection
+via the reported peak is always on; the config defaults to `off`
+(`[playback] replaygain = off|track|album|auto`, file-only); the gain is
+shown only when actually applied (shared mode), never in exclusive mode
+or #28's own signal-path line. See `docs/DECISIONS.md` for the full
+reasoning.
+
+Part 1 (merged) adds the four loudness fields to `tidal.rs`'s
+`PlaybackInfo`, a new `replaygain.rs` module holding the pure `Loudness`
+type, and `TrackMeta.loudness`, filled by `TidalOpener::open` from the
+playback info already being fetched — no behavior change. Verified
+against a real TIDAL track at both LOSSLESS and HI_RES_LOSSLESS tiers.
+
+**#31 (hardware mixer volume)** is not started.
+
+#25, #26 and #28 are all code-complete but still open on GitHub (see
 "Conventions" below) — close them by hand when convenient.
 
 ## Conventions this file assumes

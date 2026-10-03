@@ -23,7 +23,9 @@ chain works with real hardware (a Fosi Audio DS2 during development).
   -- Streams and plays tracks by their IDs, one after another. Queries `playbackinfo`, streams
   the DASH manifest (HiRes) or the direct file (Lossless/High/Low), decodes it and outputs it via
   ALSA. `--save-mp4` additionally saves the streamed bytes of the first track to disk (useful for
-  inspecting the fMP4).
+  inspecting the fMP4). Prints what TIDAL answered for the first track opened, including its
+  track and album ReplayGain and true peak when TIDAL reports them (#30) -- not yet applied to
+  playback, which is the rest of #30.
 
 - **`phonia play-file <path>... [--device <device>] [--interactive] [--shuffle] [--repeat off|one|all]`**
   -- Decodes and plays local files (FLAC or fMP4), one after another, through the same playback
