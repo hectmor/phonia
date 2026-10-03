@@ -626,7 +626,15 @@ fn on_daemon_event(state: &mut State, event: Event) -> Effects {
             Effects::redraw()
         }
         Event::StateChanged { state: new_state } => {
-            set_status(state, |status| status.state = new_state);
+            set_status(state, |status| {
+                status.state = new_state;
+                // The sink is gone for certain once the engine stops: nothing else says so, and
+                // a stopped engine has nothing playing for a stale verdict to be mistaken for.
+                if new_state == phonia_ipc::State::Stopped {
+                    status.output = phonia_ipc::Output::Closed;
+                    status.sink_report = None;
+                }
+            });
             Effects::redraw()
         }
         Event::Position {
@@ -659,6 +667,9 @@ fn on_daemon_event(state: &mut State, event: Event) -> Effects {
                     cover,
                 });
                 status.spec = Some(spec);
+                // Only reached once a track has actually started, which `start_track` only
+                // reports once its sink opened successfully.
+                status.output = phonia_ipc::Output::Open;
             });
             Effects::redraw()
         }
@@ -690,7 +701,25 @@ fn on_daemon_event(state: &mut State, event: Event) -> Effects {
             set_status(state, |status| {
                 status.track = None;
                 status.spec = None;
+                // Deliberately NOT cleared here: a `SinkReport` is sent once per sink *open*, not
+                // once per track, so gapless tracks of the same format share one and it must
+                // survive the one that produced it ending.
             });
+            Effects::redraw()
+        }
+        Event::SinkReport(report) => {
+            set_status(state, |status| status.sink_report = Some(report));
+            Effects::redraw()
+        }
+        Event::OutputReleased { by, .. } => {
+            set_status(state, |status| {
+                status.output = phonia_ipc::Output::Released { by };
+                status.sink_report = None;
+            });
+            Effects::redraw()
+        }
+        Event::OutputAcquired => {
+            set_status(state, |status| status.output = phonia_ipc::Output::Open);
             Effects::redraw()
         }
         // The connection closes right after; that is what is shown. Events this version does not
@@ -2352,6 +2381,134 @@ mod tests {
             }),
         );
         assert_eq!(state.status.as_ref().unwrap().position_ms, 90_000);
+    }
+
+    fn a_sink_report(device: &str) -> phonia_ipc::SinkReport {
+        phonia_ipc::SinkReport {
+            device: device.to_string(),
+            source: phonia_ipc::Spec {
+                sample_rate: 96_000,
+                channels: 2,
+                bits_per_sample: 24,
+            },
+            negotiated_format: "S24_3LE".into(),
+            bit_perfect: true,
+            problem: None,
+            hw_params: None,
+            mode: Some(phonia_ipc::OutputMode::Exclusive),
+            resampled_to: None,
+            codec: None,
+            lossy: false,
+            output: Some("exclusive:hw:1,0".into()),
+        }
+    }
+
+    #[test]
+    fn a_sink_report_shows_up_in_the_status() {
+        let mut state = playing_with_volume(None, &[]);
+        update(
+            &mut state,
+            Msg::Daemon(Event::SinkReport(a_sink_report("hw:1,0"))),
+        );
+        assert_eq!(
+            state.status.as_ref().unwrap().sink_report,
+            Some(a_sink_report("hw:1,0"))
+        );
+    }
+
+    #[test]
+    fn the_verdict_survives_a_track_ending_but_not_the_engine_stopping() {
+        // A SinkReport is sent once per sink open, not once per track: a gapless album of the
+        // same format shares one, so TrackEnded must not blank it out from under the next track.
+        let mut state = playing_with_volume(None, &[]);
+        update(
+            &mut state,
+            Msg::Daemon(Event::SinkReport(a_sink_report("hw:1,0"))),
+        );
+        update(
+            &mut state,
+            Msg::Daemon(Event::TrackEnded {
+                item_id: None,
+                reason: phonia_ipc::EndReason::Completed,
+            }),
+        );
+        assert!(
+            state.status.as_ref().unwrap().sink_report.is_some(),
+            "a track ending does not mean the sink closed"
+        );
+
+        // The engine actually stopping is the one event that means the sink is gone for certain.
+        update(
+            &mut state,
+            Msg::Daemon(Event::StateChanged {
+                state: phonia_ipc::State::Stopped,
+            }),
+        );
+        let status = state.status.as_ref().unwrap();
+        assert_eq!(status.sink_report, None);
+        assert_eq!(status.output, phonia_ipc::Output::Closed);
+    }
+
+    #[test]
+    fn releasing_the_output_clears_the_verdict_and_acquiring_it_reopens_it() {
+        let mut state = playing_with_volume(None, &[]);
+        update(
+            &mut state,
+            Msg::Daemon(Event::SinkReport(a_sink_report("hw:1,0"))),
+        );
+
+        update(
+            &mut state,
+            Msg::Daemon(Event::OutputReleased {
+                by: Some("jackd".into()),
+                reason: phonia_ipc::ReleaseReason::Requested,
+            }),
+        );
+        let status = state.status.as_ref().unwrap();
+        assert_eq!(
+            status.output,
+            phonia_ipc::Output::Released {
+                by: Some("jackd".into())
+            }
+        );
+        assert_eq!(
+            status.sink_report, None,
+            "the released sink's verdict is gone with it"
+        );
+
+        update(&mut state, Msg::Daemon(Event::OutputAcquired));
+        assert_eq!(
+            state.status.as_ref().unwrap().output,
+            phonia_ipc::Output::Open
+        );
+    }
+
+    #[test]
+    fn a_track_starting_means_the_output_is_open() {
+        let mut state = State::default();
+        update(&mut state, connected_msg(&[]));
+        state.status.as_mut().unwrap().output = phonia_ipc::Output::Released { by: None };
+        update(
+            &mut state,
+            Msg::Daemon(Event::TrackStarted {
+                item_id: None,
+                source: Some("tidal:1".into()),
+                title: Some("Song".into()),
+                duration_ms: None,
+                spec: phonia_ipc::Spec {
+                    sample_rate: 44_100,
+                    channels: 2,
+                    bits_per_sample: 16,
+                },
+                gapless: false,
+                quality: None,
+                cover: None,
+            }),
+        );
+        assert_eq!(
+            state.status.as_ref().unwrap().output,
+            phonia_ipc::Output::Open
+        );
     }
 
     #[test]

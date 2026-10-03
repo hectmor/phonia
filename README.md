@@ -82,7 +82,12 @@ chain works with real hardware (a Fosi Audio DS2 during development).
   terminal says it has true colour, so `theme.rs`'s own 16-ANSI-colours rule is never broken by
   accident; with neither, no cover shows, rather than one that looks wrong. A cover is fetched
   straight from TIDAL's public image CDN, which needs no TIDAL session, so this is the one thing
-  the interface reaches the network for directly (see `docs/DECISIONS.md`, 2026-10-01). Other keys
+  the interface reaches the network for directly (see `docs/DECISIONS.md`, 2026-10-01). The bar's
+  own **signal path line** (#28) shows what is playing, through what format, to which device, with
+  the same `BIT-PERFECT`/`CONVERTED (reason)`/`SHARED ...` verdict `phonia ctl status` prints, e.g.
+  `TIDAL hires 24-bit / 96 kHz → S24_3LE → Fosi Audio DS2 (hw:1,0)  ✔ BIT-PERFECT`; the line is
+  always reserved, blank until something is known, so the bar's own height never changes with what
+  is playing. Other keys
   are vim-like: `j`/`k` (or the arrows) move, `gg` and `G` go to the ends, `Ctrl-d`/`Ctrl-u` move
   half a page, `h`/`l`/`Tab` change panel, `1`-`3` jump to a section, `?` shows the keys (and
   scrolls with `j`/`k` when the terminal is too short for it) and `q` (or `Ctrl-c`) quits. The help
