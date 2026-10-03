@@ -11,7 +11,7 @@ use phonia_core::output::catalog::{Entry, Mode};
 use phonia_core::output::fake::FakeSinkFactory;
 use phonia_ipc::framing::{read_frame, write_frame};
 use phonia_ipc::*;
-use phoniad::daemon::{Daemon, DaemonParts};
+use phoniad::daemon::{Daemon, DaemonParts, OutputReport};
 use phoniad::outputs::{Build, Outputs};
 use phoniad::server::serve_connection;
 use std::path::PathBuf;
@@ -29,7 +29,7 @@ struct Fixture {
     daemon: Arc<Daemon>,
     sinks: Arc<FakeSinkFactory>,
     switched: Switched,
-    reports: mpsc::UnboundedSender<SinkReport>,
+    reports: mpsc::UnboundedSender<OutputReport>,
     dir: PathBuf,
 }
 
@@ -818,19 +818,22 @@ async fn the_bit_perfect_report_reaches_subscribers() {
 
     let contents = "format: S24_3LE\nrate: 96000 (96000/1)\n";
     f.reports
-        .send(SinkReport::new(
-            "hw:1,0".into(),
-            phonia_core::decode::SourceSpec {
-                sample_rate: 96_000,
-                channels: 2,
-                bits_per_sample: 24,
-            },
-            "S24_3LE".into(),
-            ProcReading::Read {
-                path: "/p".into(),
-                contents: contents.into(),
-            },
-        ))
+        .send(OutputReport {
+            output: "exclusive:hw:fake,0".into(),
+            report: SinkReport::new(
+                "hw:1,0".into(),
+                phonia_core::decode::SourceSpec {
+                    sample_rate: 96_000,
+                    channels: 2,
+                    bits_per_sample: 24,
+                },
+                "S24_3LE".into(),
+                ProcReading::Read {
+                    path: "/p".into(),
+                    contents: contents.into(),
+                },
+            ),
+        })
         .unwrap();
 
     let (_, event) = events_until(&mut events, |event| matches!(event, Event::SinkReport(_)))
@@ -846,6 +849,147 @@ async fn the_bit_perfect_report_reaches_subscribers() {
         ("hw:1,0", "S24_3LE")
     );
     assert_eq!(report.hw_params.as_deref(), Some(contents));
+    assert_eq!(report.output.as_deref(), Some("exclusive:hw:fake,0"));
+    f.finish().await;
+}
+
+/// A helper the new `sink_report`-in-`Status` tests share: plays a short track and waits for it to
+/// start, so `controller.status().spec` is known and a report can be made to match (or not match)
+/// it on purpose.
+async fn playing_a_track(f: &Fixture, client: &Client, events: &mut EventStream) {
+    // Long enough, and the fixture's own blocking sink, that the track is still "playing" (not
+    // finished and stopped, which would itself clear the verdict) for as long as the test needs.
+    let a = f.wav("a.wav", 200_000);
+    let (ids, _, _) = added(client.request(add(&[&a], AddAt::End)).await.unwrap());
+    client
+        .request(Request::Play { item: Some(ids[0]) })
+        .await
+        .unwrap();
+    events_until(events, |event| matches!(event, Event::TrackStarted { .. })).await;
+}
+
+/// The `SourceSpec`/`Spec` of the WAV [`Fixture::wav`] writes: 44.1 kHz, 16-bit, stereo.
+const WAV_SPEC: phonia_core::decode::SourceSpec = phonia_core::decode::SourceSpec {
+    sample_rate: 44_100,
+    channels: 2,
+    bits_per_sample: 16,
+};
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_that_subscribes_mid_track_sees_the_verdict_in_its_snapshot() {
+    let f = fixture("report-snapshot", true).await;
+    let client = f.client().await;
+    let (_, mut events) = client.subscribe().await.unwrap();
+    playing_a_track(&f, &client, &mut events).await;
+
+    f.reports
+        .send(OutputReport {
+            output: "exclusive:hw:fake,0".into(),
+            report: SinkReport::new(
+                "hw:fake,0".into(),
+                WAV_SPEC,
+                "S16_LE".into(),
+                ProcReading::NotHw,
+            ),
+        })
+        .unwrap();
+    events_until(&mut events, |event| matches!(event, Event::SinkReport(_))).await;
+
+    // A second, freshly-subscribing client sees the verdict right away, with no need to wait for
+    // the next sink to open (there may not be one for a long time, on a gapless album).
+    let second = f.client().await;
+    let (snapshot, _events) = second.subscribe().await.unwrap();
+    let report = snapshot
+        .status
+        .sink_report
+        .expect("the verdict is in the snapshot");
+    assert_eq!(report.device, "hw:fake,0");
+    f.sinks.handles()[0].set_blocking(false);
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn releasing_the_output_clears_the_verdict() {
+    let f = fixture("report-release", true).await;
+    let client = f.client().await;
+    let (_, mut events) = client.subscribe().await.unwrap();
+    playing_a_track(&f, &client, &mut events).await;
+
+    f.reports
+        .send(OutputReport {
+            output: "exclusive:hw:fake,0".into(),
+            report: SinkReport::new(
+                "hw:fake,0".into(),
+                WAV_SPEC,
+                "S16_LE".into(),
+                ProcReading::NotHw,
+            ),
+        })
+        .unwrap();
+    events_until(&mut events, |event| matches!(event, Event::SinkReport(_))).await;
+    assert!(client.status().await.unwrap().sink_report.is_some());
+
+    client.request(Request::Release).await.unwrap();
+    f.sinks.handles()[0].advance(1024); // lets the blocked write return so the engine sees it
+    events_until(&mut events, |event| {
+        matches!(event, Event::OutputReleased { .. })
+    })
+    .await;
+    assert_eq!(client.status().await.unwrap().sink_report, None);
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_report_for_a_different_format_is_not_shown_as_the_current_verdict() {
+    let f = fixture("report-mismatch", true).await;
+    let client = f.client().await;
+    let (_, mut events) = client.subscribe().await.unwrap();
+    playing_a_track(&f, &client, &mut events).await;
+
+    f.reports
+        .send(OutputReport {
+            output: "exclusive:hw:fake,0".into(),
+            report: SinkReport::new(
+                "hw:fake,0".into(),
+                phonia_core::decode::SourceSpec {
+                    sample_rate: 96_000,
+                    channels: 2,
+                    bits_per_sample: 24,
+                },
+                "S24_3LE".into(),
+                ProcReading::NotHw,
+            ),
+        })
+        .unwrap();
+    events_until(&mut events, |event| matches!(event, Event::SinkReport(_))).await;
+
+    assert_eq!(client.status().await.unwrap().sink_report, None);
+    f.sinks.handles()[0].set_blocking(false);
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_report_for_another_output_is_not_shown_as_the_current_verdict() {
+    let f = fixture("report-other-output", true).await;
+    let client = f.client().await;
+    let (_, mut events) = client.subscribe().await.unwrap();
+    playing_a_track(&f, &client, &mut events).await;
+
+    f.reports
+        .send(OutputReport {
+            output: "exclusive:hw:other,0".into(),
+            report: SinkReport::new(
+                "hw:other,0".into(),
+                WAV_SPEC,
+                "S16_LE".into(),
+                ProcReading::NotHw,
+            ),
+        })
+        .unwrap();
+    events_until(&mut events, |event| matches!(event, Event::SinkReport(_))).await;
+
+    assert_eq!(client.status().await.unwrap().sink_report, None);
+    f.sinks.handles()[0].set_blocking(false);
     f.finish().await;
 }
 

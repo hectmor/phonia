@@ -29,7 +29,7 @@ pub const CAP_QUALITY: &str = "quality";
 pub const CAP_CATALOG: &str = "catalog";
 
 /// The protocol version this crate speaks.
-pub const PROTOCOL: Version = Version { major: 1, minor: 6 };
+pub const PROTOCOL: Version = Version { major: 1, minor: 7 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Version {
@@ -390,6 +390,9 @@ pub enum Reply {
     Err(ProtocolError),
 }
 
+/// Built, serialized and dropped, the same as [`Reply`]: boxing `Resync`'s own `Status`/`Queue`
+/// would only complicate every caller.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {

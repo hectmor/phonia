@@ -714,3 +714,100 @@ confirmed against the real CLI output too.
 This closes #25 and #26: all 4 parts of the approved plan are merged.
 Both issues are code-complete; closing them on GitHub is, as always, left
 for the project owner to do by hand once they've seen this.
+
+## 2026-10-02 — #28 part 1: the verdict persists in `Status`, stamped by output, protocol 1.7
+
+Opus planned #28 (signal path indicator in the TUI) after a read-only
+investigation found the wire path already existed in full: `AlsaSink`'s
+`SinkReport` already reached `phoniad`, which already turned it into
+`Event::SinkReport` for every subscriber, and `phonia ctl`'s event log
+already showed it with its own `BIT-PERFECT`/`CONVERTED (reason)`/`SHARED
+...` wording. The TUI was the only thing dropping it, through its
+catch-all `_ => Effects::default()`. So #28 is almost entirely a TUI-side
+job (parts 2-3) — except for one real gap this part closes.
+
+**The gap:** a `SinkReport` fires once per sink *open*, not once per
+track — gapless tracks of the same format, an ordinary skip, and a resume
+all reuse the same open sink and get no fresh report. A client that
+connects, reconnects (the TUI does this on its own, see #18) or resyncs
+after falling behind therefore saw nothing until the *next format
+change*, which on a same-format album could be never. `Status` needed a
+persistent slot.
+
+**The design:**
+
+- **`Status.sink_report: Option<SinkReport>`** (additive, protocol 1.7 —
+  the first wire change since the `v0.2.0` tag, so the "nothing released
+  yet, keep adding under 1.6" reasoning from 2026-09-27 no longer applies;
+  bumping the minor was the natural next step rather than a special case).
+  Filled in by `Daemon::state()` from a new `last_report: Mutex<Option<ipc::SinkReport>>`
+  field, which `fan_in` updates whenever a report arrives and clears on
+  the two events that mean the sink is gone for certain
+  (`OutputReleased`, `StateChanged(Stopped)`) — nothing else announces a
+  sink closing or changing on its own.
+- **`SinkReport::applies_to(status)`**, the gate `state()` runs the stored
+  report through before showing it: true when the format matches
+  (`status.spec == Some(report.source)`) and, when both sides know it,
+  the output does too. This is how a stale report is recognized instead
+  of being told about directly — a reopen for a new format, or an output
+  switch, has no dedicated "the old sink is gone" event the way a release
+  or a stop does.
+- **`SinkReport.output: Option<String>`**, the route id (`exclusive:hw:DS2,0`,
+  `shared:default`) of the output whose sink produced the report, is what
+  `applies_to` compares. It is stamped in the **per-output factory
+  closure in `phoniad/main.rs`** (`spec.id()`, captured once, before the
+  closure is handed to `output::factory_for`) — the one place that knows
+  it for certain. Stamping it later, say in `fan_in` from
+  `self.outputs.route()`, was rejected: `Daemon::set_output` reopens and
+  resumes the new sink *before* it awaits `outputs.list()` and publishes
+  `Event::OutputChanged`, so a fresh `SinkReport` can arrive — and would
+  need to be shown — before the daemon's own route has caught up. Reading
+  `route()` at report time would either show the *old* route next to the
+  *new* verdict, or (worse) silently miss the id mismatch and show a
+  switch's verdict on top of whichever device used to be live a moment
+  earlier.
+- **No pre-check, no cache, no `Capabilities`.** Consistent with #25's own
+  reasoning: a `SinkReport` is cheap to produce (the kernel already ran
+  the real negotiation) and the report itself is the single source of
+  truth, so nothing here duplicates or pre-computes it.
+
+**Deliberately not done, both flagged in #25's own entries as open seams
+for #28 to decide on, and both declined:**
+
+- **#25's probed `Capabilities` are not attached to `SinkReport`.** The
+  issue asks for source → format → device plus a verdict, which
+  `SinkReport` already carries in full; the capability matrix answers a
+  different question (what else the device *could* play), already has a
+  home (`phonia probe-device`, and `phonia devices`'s passive `stream0`
+  line from #25 part 4), and under "bit-perfect or refuse" adds nothing to
+  a verdict for a sink that is already open and playing. The seam stays
+  open for a possible future "what can my DAC do" view, separate from
+  this indicator.
+- **No structured "unsupported format" error code.** `caps::Unsupported`'s
+  human text is already precise; a code would only matter to a client
+  that acts on a refusal by itself (falling back to shared mode, say),
+  which belongs with the "automatic output selection" wish already on
+  record (2026-10-02, the #25/#26 wrap-up entry), not with an indicator
+  whose job is to show the person what happened.
+
+**Shared code, not a third reimplementation:** the verdict's own text
+(`BIT-PERFECT`, `CONVERTED (reason)`, `SHARED (not bit-perfect[, resampled
+to N Hz])`, `SHARED, LOSSY[ CODEC (codec)]`) moved from `phonia ctl`'s
+`format_event` into `phonia_ipc::fmt::verdict`, the same boundary
+`fmt::stream_quality`/`fmt::sample_rate` already establish for things both
+`phonia-tui` and `phonia` need to show identically. `ctl`'s own test pins
+that the move changed nothing observable. `phonia ctl status` gains a
+`Verdict:` line from the new field as a side effect — a visible result of
+part 1 on its own, with no TUI change needed to see it.
+
+One cosmetic fix folded in, also from #25's own notes: shared mode's
+hardcoded negotiated-format string was `"S32LE"`, while ALSA's own
+`Display` (and exclusive mode) spell it `"S32_LE"` — `output/shared/pulse.rs`
+now matches.
+
+**Parts 2 and 3 remain**: the indicator itself in the TUI's bottom bar
+(a new, always-reserved line, so the bar's height never depends on
+whether a report has arrived — the same "layout never jumps" discipline
+#24's covers work established), and showing a refused or failed track's
+reason on that same line instead of the bare "Stopped" the TUI shows
+today.

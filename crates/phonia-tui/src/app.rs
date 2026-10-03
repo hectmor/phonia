@@ -1783,6 +1783,7 @@ pub(crate) mod tests_support {
             route: None,
             volume: None,
             quality_range: None,
+            sink_report: None,
         }
     }
 

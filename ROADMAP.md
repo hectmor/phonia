@@ -69,7 +69,7 @@ done — it is its own product decision, not a leftover.
 | #29 | Quality tiers, a floor, and automatic fallback | Closed (parts 1–3); an optional part 4 (AAC decode for the lossy tiers) is not started and not blocking |
 | #25 | DAC capability detection | Code complete (PRs #106–#109, all 4 parts); **issue left open on GitHub, worth closing by hand** |
 | #26 | Per-track sample rate switching | Code complete, same plan and PRs as #25; **issue left open on GitHub, worth closing by hand** |
-| #28 | Signal path indicator in the TUI | Not started |
+| #28 | Signal path indicator in the TUI | In progress: approved 3-PR plan; part 1 (`Status.sink_report`, protocol 1.7, `phonia ctl status`'s `Verdict:` line) merged |
 | #30 | ReplayGain in shared mode | Not started |
 | #31 | Hardware mixer volume | Not started |
 
@@ -137,11 +137,39 @@ freed from PipeWire first. Because this DAC accepts everything TIDAL can
 send it, the *refusal* path (a rate or format a device can't do) cannot be
 exercised against it and is tested with fakes instead.
 
-Phase 3 continues with #28 (signal path indicator in the TUI), #30
-(ReplayGain in shared mode) and #31 (hardware mixer volume), planned one
-at a time with Opus as they come up, unless redirected. #25 and #26 are
-code-complete but still open on GitHub (see "Conventions" below) — close
-them by hand when convenient.
+Phase 3 continues with **#28 (signal path indicator in the TUI)**, planned
+with Opus as an approved 3-PR plan. The investigation behind it found that
+the wire path already existed end to end — `phonia-core`'s `SinkReport`
+already reached `phoniad`, which already broadcast it as
+`Event::SinkReport` to every client, `phonia ctl`'s event log included —
+the TUI just silently dropped it. The only real gap: `Status` carried no
+*persistent* verdict, so a client that connects, reconnects or resyncs
+mid-album (gapless tracks of the same format share one `SinkReport`, sent
+once per sink *open*, not once per track) saw nothing until the next
+format change. Part 1 (merged) closes that gap: protocol 1.7 adds
+`SinkReport.output` (the route id of the output that produced it, stamped
+where it is known for certain — the per-output factory closure in
+`phoniad/main.rs` — since the report can otherwise race ahead of
+`Event::OutputChanged` on a switch) and `Status.sink_report`, gated by a
+new `SinkReport::applies_to(status)` (same format, and same output when
+both sides know it) so a stale verdict is never shown as current. The
+verdict's own text (`BIT-PERFECT`/`CONVERTED (reason)`/`SHARED ...`) moved
+out of `phonia ctl` into a shared `phonia_ipc::fmt::verdict`, so the TUI
+(part 2) can reuse it instead of a third reimplementation; `phonia ctl
+status` already shows it today, as a `Verdict:` line. Remaining: part 2
+(the indicator itself, a new line in the TUI's bottom bar) and part 3 (the
+same line shows a refused/failed track's reason instead of just
+"Stopped"). Deliberately **not** done here, per the plan: #25's probed
+`Capabilities` are not attached to `SinkReport` (the issue only asks for
+source/format/device plus a verdict, which it already has in full; that
+seam stays open for a future, separate "what can my DAC do" view) and no
+structured "unsupported format" error code was added (the human text is
+enough for display; a client that would act on its own belongs to a
+future "automatic output selection" issue instead). #30 (ReplayGain in
+shared mode) and #31 (hardware mixer volume) are next after #28, planned
+one at a time with Opus as they come up, unless redirected. #25 and #26
+are code-complete but still open on GitHub (see "Conventions" below) —
+close them by hand when convenient.
 
 ## Conventions this file assumes
 

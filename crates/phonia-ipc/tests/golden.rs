@@ -54,10 +54,11 @@ fn status() -> Status {
         route: None,
         volume: None,
         quality_range: None,
+        sink_report: None,
     }
 }
 
-const STATUS_JSON: &str = r#"{"state":"playing","track":{"item_id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000,"quality":null,"cover":null},"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"position_ms":1234,"duration_ms":215000,"output":{"state":"open"},"route":null,"volume":null,"quality_range":null}"#;
+const STATUS_JSON: &str = r#"{"state":"playing","track":{"item_id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000,"quality":null,"cover":null},"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"position_ms":1234,"duration_ms":215000,"output":{"state":"open"},"route":null,"volume":null,"quality_range":null,"sink_report":null}"#;
 
 fn queue() -> Queue {
     Queue {
@@ -283,7 +284,7 @@ fn the_server_banner() {
                 CAP_CATALOG.into(),
             ],
         }),
-        r#"{"type":"hello","protocol":{"major":1,"minor":6},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","catalog"]}"#,
+        r#"{"type":"hello","protocol":{"major":1,"minor":7},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","catalog"]}"#,
     );
 }
 
@@ -298,7 +299,7 @@ fn successful_responses() {
         2,
         Reply::Ok(Payload::Status(status())),
         &format!(
-            r#"{{"type":"response","id":2,"ok":{{"type":"status","state":"playing","track":{},"spec":{},"position_ms":1234,"duration_ms":215000,"output":{{"state":"open"}},"route":null,"volume":null,"quality_range":null}}}}"#,
+            r#"{{"type":"response","id":2,"ok":{{"type":"status","state":"playing","track":{},"spec":{},"position_ms":1234,"duration_ms":215000,"output":{{"state":"open"}},"route":null,"volume":null,"quality_range":null,"sink_report":null}}}}"#,
             r#"{"item_id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000,"quality":null,"cover":null}"#,
             r#"{"sample_rate":96000,"channels":2,"bits_per_sample":24}"#
         ),
@@ -491,8 +492,9 @@ fn events() {
             resampled_to: None,
             codec: None,
             lossy: false,
+            output: Some("exclusive:hw:1,0".into()),
         }),
-        r#"{"type":"event","seq":12,"event":{"type":"sink_report","device":"hw:1,0","source":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"negotiated_format":"S24_3LE","bit_perfect":true,"problem":null,"hw_params":"rate: 96000 (96000/1)\n","mode":"exclusive","resampled_to":null,"codec":null,"lossy":false}}"#,
+        r#"{"type":"event","seq":12,"event":{"type":"sink_report","device":"hw:1,0","source":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"negotiated_format":"S24_3LE","bit_perfect":true,"problem":null,"hw_params":"rate: 96000 (96000/1)\n","mode":"exclusive","resampled_to":null,"codec":null,"lossy":false,"output":"exclusive:hw:1,0"}}"#,
     );
 }
 
@@ -923,11 +925,12 @@ fn a_shared_sink_report_carries_how_the_sound_got_there() {
         resampled_to: Some(48_000),
         codec: Some("SBC".into()),
         lossy: true,
+        output: Some("shared:default".into()),
     };
     event(
         19,
         Event::SinkReport(report),
-        r#"{"type":"event","seq":19,"event":{"type":"sink_report","device":"Soundcore Life P2","source":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"negotiated_format":"S32LE","bit_perfect":false,"problem":"shared through the sound server, and the SBC codec loses information","hw_params":null,"mode":"shared","resampled_to":48000,"codec":"SBC","lossy":true}}"#,
+        r#"{"type":"event","seq":19,"event":{"type":"sink_report","device":"Soundcore Life P2","source":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"negotiated_format":"S32LE","bit_perfect":false,"problem":"shared through the sound server, and the SBC codec loses information","hw_params":null,"mode":"shared","resampled_to":48000,"codec":"SBC","lossy":true,"output":"shared:default"}}"#,
     );
 }
 
@@ -1053,6 +1056,17 @@ fn a_1_1_daemon_status_and_sink_report_still_parse() {
 }
 
 #[test]
+fn a_1_6_status_and_sink_report_say_nothing_of_the_output_id() {
+    let old = r#"{"state":"playing","track":null,"spec":null,"position_ms":0,"duration_ms":null,"output":{"state":"open"},"quality_range":null}"#;
+    let parsed: Status = serde_json::from_str(old).unwrap();
+    assert_eq!(parsed.sink_report, None);
+
+    let old = r#"{"device":"hw:1,0","source":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"negotiated_format":"S24_3LE","bit_perfect":true,"problem":null,"hw_params":null}"#;
+    let parsed: SinkReport = serde_json::from_str(old).unwrap();
+    assert_eq!(parsed.output, None);
+}
+
+#[test]
 fn a_mode_from_the_future_does_not_break_a_client() {
     let parsed: Route =
         serde_json::from_str(r#"{"id":"x","mode":"cloud","description":"d"}"#).unwrap();
@@ -1081,7 +1095,7 @@ fn versions_are_compatible_across_minors_but_not_majors() {
     assert!(v(1, 0).compatible_with(v(1, 7)));
     assert!(v(1, 7).compatible_with(v(1, 0)));
     assert!(!v(1, 0).compatible_with(v(2, 0)));
-    assert_eq!(PROTOCOL, v(1, 6));
+    assert_eq!(PROTOCOL, v(1, 7));
 }
 
 #[test]

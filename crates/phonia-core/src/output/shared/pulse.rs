@@ -857,7 +857,7 @@ impl SharedSinkFactory {
         let report = self.on_report.clone().map(|handler| {
             (
                 handler,
-                SinkReport::shared(spec, "S32LE".to_string(), route),
+                SinkReport::shared(spec, "S32_LE".to_string(), route),
             )
         });
         let server_target_frames = u64::from(rate * TARGET_NUM / TARGET_DEN);

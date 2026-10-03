@@ -11,7 +11,7 @@ use phonia_core::diag::{self, Level};
 use phonia_core::engine;
 use phonia_core::openers::{DispatchOpener, TidalOpener};
 use phonia_core::{auth, tidal};
-use phoniad::daemon::{Daemon, DaemonParts, wait_for_shutdown};
+use phoniad::daemon::{Daemon, DaemonParts, OutputReport, wait_for_shutdown};
 use phoniad::outputs::{Build, Outputs};
 use phoniad::{server, socket};
 use std::path::PathBuf;
@@ -119,13 +119,19 @@ async fn run(args: Args) -> Result<()> {
     let reserve = settings.reserve.value;
     let build: Build = Arc::new(move |spec| {
         let reports = report_tx.clone();
+        let output = spec.id();
         phonia_core::output::factory_for(
             spec,
             reserve,
             tokio::runtime::Handle::current(),
-            // Called on the audio thread: an unbounded send never blocks.
+            // Called on the audio thread: an unbounded send never blocks. The output id is
+            // stamped here, where it is known for certain, not guessed back later from whatever
+            // the daemon's route happens to say by the time the report is converted.
             Arc::new(move |report| {
-                let _ = reports.send(report);
+                let _ = reports.send(OutputReport {
+                    output: output.clone(),
+                    report,
+                });
             }),
         )
     });

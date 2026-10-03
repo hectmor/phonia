@@ -223,6 +223,7 @@ mod tests {
             route: None,
             volume: None,
             quality_range: None,
+            sink_report: None,
         }
     }
 

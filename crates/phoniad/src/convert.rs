@@ -263,6 +263,9 @@ pub fn status_dto(
             muted: volume.muted,
         }),
         quality_range,
+        // Filled in by `Daemon::state`, which alone knows the last report and can gate it against
+        // the rest of this very status with `SinkReport::applies_to`.
+        sink_report: None,
     }
 }
 
@@ -291,7 +294,11 @@ fn release_reason(reason: ReleaseReason) -> ipc::ReleaseReason {
     }
 }
 
-pub fn sink_report(report: &SinkReport) -> ipc::SinkReport {
+/// `output` is the route id of whatever opened this sink (`exclusive:hw:DS2,0`,
+/// `shared:default`), stamped by the one place that knows it for certain: the per-output factory
+/// closure in `main.rs`, not guessed back from the daemon's current route, which can change before
+/// this report is even converted.
+pub fn sink_report(report: &SinkReport, output: &str) -> ipc::SinkReport {
     ipc::SinkReport {
         device: report.device.clone(),
         source: spec(report.source),
@@ -314,6 +321,7 @@ pub fn sink_report(report: &SinkReport) -> ipc::SinkReport {
             .filter(|rate| *rate != report.source.sample_rate),
         codec: report.shared.as_ref().and_then(|route| route.codec.clone()),
         lossy: report.shared.as_ref().is_some_and(|route| route.lossy),
+        output: Some(output.to_string()),
     }
 }
 
@@ -632,10 +640,11 @@ mod tests {
                 contents: "format: S24_3LE\nrate: 96000 (96000/1)\n".into(),
             },
         );
-        let dto = sink_report(&report);
+        let dto = sink_report(&report, "exclusive:hw:1,0");
         assert!(dto.bit_perfect);
         assert_eq!(dto.problem, None);
         assert!(dto.hw_params.unwrap().contains("rate: 96000"));
+        assert_eq!(dto.output.as_deref(), Some("exclusive:hw:1,0"));
 
         let converted = SinkReport::new(
             "default".into(),
@@ -647,10 +656,11 @@ mod tests {
             "S24_3LE".into(),
             ProcReading::NotHw,
         );
-        let dto = sink_report(&converted);
+        let dto = sink_report(&converted, "shared:default");
         assert!(!dto.bit_perfect);
         assert!(dto.problem.unwrap().contains("not hw:N,D"));
         assert_eq!(dto.hw_params, None);
+        assert_eq!(dto.output.as_deref(), Some("shared:default"));
     }
 
     #[test]
@@ -671,7 +681,7 @@ mod tests {
                 lossy: true,
             },
         );
-        let dto = sink_report(&report);
+        let dto = sink_report(&report, "shared:default");
         assert!(!dto.bit_perfect);
         assert_eq!(dto.device, "Soundcore Life P2");
         assert!(dto.problem.unwrap().contains("SBC"));

@@ -369,6 +369,14 @@ cat /proc/asound/card1/pcm0p/sub0/hw_params
 
 If you see `closed`, nothing has the device open at that moment.
 
+**`phoniad` carries the same verdict over IPC** (`Event::SinkReport`, and, since protocol 1.7,
+`Status.sink_report`, so it is there the moment a client connects or resyncs, not only at the
+next sink open): `phonia ctl status` shows it as a `Verdict:` line (`S24_3LE BIT-PERFECT`), and
+`phonia ctl watch`/the event log print the same `BIT-PERFECT`/`CONVERTED (reason)`/`SHARED ...`
+wording `phonia play` does (#28). The verdict is dropped once the sink that produced it closes
+(released, or playback stopped) or changes format or output, so it never outlives what it
+describes.
+
 ## Sharing the DAC with PipeWire
 
 `phonia` opens the ALSA device you configured directly, without going through
