@@ -130,6 +130,11 @@ fn format_settings(
             settings.gapless.value.to_string(),
             settings.gapless.origin,
         ),
+        (
+            "playback.replaygain",
+            settings.replaygain.value.to_string(),
+            settings.replaygain.origin,
+        ),
     ];
     let key_width = rows.iter().map(|row| row.0.len()).max().unwrap_or(0);
     let value_width = rows.iter().map(|row| row.1.len()).max().unwrap_or(0);
@@ -175,7 +180,8 @@ mod tests {
              \x20 tidal.session_store         keyring                             (default)\n\
              \x20 daemon.socket               /run/user/1000/phonia/phoniad.sock  (default)\n\
              \x20 daemon.verbose              false                               (default)\n\
-             \x20 playback.gapless            true                                (default)"
+             \x20 playback.gapless            true                                (default)\n\
+             \x20 playback.replaygain         off                                 (default)"
         );
     }
 
@@ -206,8 +212,9 @@ mod tests {
         assert!(text.contains("lossless"), "{text}");
         assert_eq!(
             text.matches("(default)").count(),
-            9,
-            "mode, sink, reserve, release_after_pause, min_quality, session_store, socket, verbose and gapless were not written"
+            10,
+            "mode, sink, reserve, release_after_pause, min_quality, session_store, socket, \
+             verbose, gapless and replaygain were not written"
         );
     }
 

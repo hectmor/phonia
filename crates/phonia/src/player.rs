@@ -434,6 +434,7 @@ mod tests {
                     title: Some(title.to_string()),
                     duration: None,
                     cover: None,
+                    album_id: None,
                 },
             })
             .collect();

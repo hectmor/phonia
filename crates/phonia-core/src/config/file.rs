@@ -216,6 +216,9 @@ pub struct Daemon {
 pub struct Playback {
     /// Join a track to the next of the same format with no gap.
     pub gapless: Option<bool>,
+    /// How ReplayGain is chosen; see `crate::replaygain::Mode`. No command-line flag: altering a
+    /// sample's value is a deliberate, written-down choice.
+    pub replaygain: Option<crate::replaygain::Mode>,
 }
 
 /// The whole file.
@@ -256,6 +259,7 @@ verbose = true
 
 [playback]
 gapless = false
+replaygain = "album"
 "#;
 
     #[test]
@@ -280,7 +284,8 @@ gapless = false
                     verbose: Some(true)
                 },
                 playback: Playback {
-                    gapless: Some(false)
+                    gapless: Some(false),
+                    replaygain: Some(crate::replaygain::Mode::Album),
                 },
             }
         );

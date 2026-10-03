@@ -156,6 +156,7 @@ verbose = false
 
 [playback]
 gapless = true          # join a track to the next one of the same format with no gap
+replaygain = "off"      # off | track | album | auto: apply TIDAL's ReplayGain? (default off, #30)
 ```
 
 - **Name the card, not its number.** ALSA numbers cards in the order the kernel finds them, so a USB
@@ -449,6 +450,17 @@ samples changes, so it is as bit-perfect as before.
   frames their manifest declares). Lossy formats have encoder padding at the ends that phonia does
   not trim.
 - `gapless = false` gives the old behaviour: drain, then load the next track.
+
+## ReplayGain (#30, in progress)
+
+`[playback] replaygain` decides whether TIDAL's own loudness measurement is applied: `off`
+(default), `track` (always the track's own gain), `album` (always the album's, falling back to
+the track's when TIDAL has none for the album) or `auto` (the album's gain when the track sits
+next to another entry of the same album in play order and shuffle is off, the track's own
+otherwise). A boost is capped so the track's own reported true peak never clips; a cut is never
+capped. This is decided per track already (`phonia play --info` prints what TIDAL sent), but not
+yet audibly applied to any output -- that is the next part of #30, confined to shared mode only,
+since exclusive mode stays bit-perfect-or-refuse.
 
 ## Shared mode: any output, not bit-perfect
 

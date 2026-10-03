@@ -105,6 +105,7 @@ fn entry(name: &str) -> QueueTrack {
         title: Some(name.to_string()),
         duration: None,
         cover: None,
+        album_id: None,
     }
 }
 
@@ -273,6 +274,7 @@ fn opening_an_entry_rewrites_the_reference_and_fills_in_what_the_queue_did_not_k
         title: None,
         duration: None,
         cover: None,
+        album_id: None,
     }]);
 
     let loaded = block_on(queue.open(ids[0].track_ref(), Duration::ZERO)).unwrap();

@@ -148,6 +148,7 @@ async fn run(args: Args) -> Result<()> {
             gapless: settings.gapless.value,
             ..engine::Options::default()
         },
+        replaygain: settings.replaygain.value,
     })?;
 
     daemon.refresh_route().await;

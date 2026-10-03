@@ -111,6 +111,7 @@ async fn fixture_full(
         ))),
         reports: report_rx,
         engine: options,
+        replaygain: phonia_core::replaygain::Mode::default(),
     })
     .unwrap();
     let dir = std::env::temp_dir().join(format!(

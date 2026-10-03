@@ -29,12 +29,13 @@ pub async fn wait_for_shutdown(signal: &mut watch::Receiver<bool>) {
     let _ = signal.wait_for(|stopping| *stopping).await;
 }
 
-/// A track on its way into the queue: what it is, its title, length and cover if known, and why
-/// they are not known, if they are not.
+/// A track on its way into the queue: what it is, its title, length, cover and album id if known,
+/// and why they are not known, if they are not.
 type Accepted = (
     Source,
     Option<String>,
     Option<std::time::Duration>,
+    Option<String>,
     Option<String>,
     Option<String>,
 );
@@ -64,6 +65,9 @@ pub struct DaemonParts {
     /// Bit-perfect reports from the sinks, to be announced to clients.
     pub reports: mpsc::UnboundedReceiver<OutputReport>,
     pub engine: engine::Options,
+    /// How ReplayGain is chosen; see `phonia_core::replaygain::Mode`. Set once at startup: there
+    /// is no runtime way to change it.
+    pub replaygain: phonia_core::replaygain::Mode,
     /// Which output the daemon is on and how to move it.
     pub outputs: Outputs,
     /// The tiers TIDAL is asked for, if the daemon plays from TIDAL.
@@ -99,6 +103,7 @@ impl Daemon {
     /// Must be called inside a tokio runtime.
     pub fn start(parts: DaemonParts) -> Result<Arc<Daemon>> {
         let queue = Queue::new(parts.opener.clone() as Arc<dyn TrackOpener>);
+        queue.set_replay_gain(parts.replaygain);
         let first_sinks = parts.sinks.clone();
         let engine = Engine::spawn_with_options(
             tokio::runtime::Handle::current(),
@@ -775,11 +780,16 @@ impl Daemon {
         let (mut accepted, mut rejected) = (Vec::new(), Vec::new());
         for outcome in outcomes {
             match outcome {
-                Outcome::Ready(source, info) => {
-                    accepted.push((source, info.title, info.duration, info.cover, None))
-                }
+                Outcome::Ready(source, info) => accepted.push((
+                    source,
+                    info.title,
+                    info.duration,
+                    info.cover,
+                    info.album_id,
+                    None,
+                )),
                 Outcome::Unresolved(source, reason) => {
-                    accepted.push((source, None, None, None, Some(reason)))
+                    accepted.push((source, None, None, None, None, Some(reason)))
                 }
                 Outcome::Rejected(source, reason) => {
                     rejected.push(ipc::Rejected { source, reason })
@@ -803,11 +813,12 @@ impl Daemon {
         let _serial = self.control_lock.lock().await;
         let tracks: Vec<QueueTrack> = accepted
             .iter()
-            .map(|(source, title, duration, cover, _)| QueueTrack {
+            .map(|(source, title, duration, cover, album_id, _)| QueueTrack {
                 source: phonia_core::engine::TrackRef(source.to_wire()),
                 title: title.clone(),
                 duration: *duration,
                 cover: cover.clone(),
+                album_id: album_id.clone(),
             })
             .collect();
         let queue = self.controller.queue();
@@ -816,7 +827,7 @@ impl Daemon {
             AddAt::Next => queue.play_next(tracks),
             AddAt::Index { index } => queue.insert(index, tracks),
         };
-        for (id, (_, _, _, _, reason)) in ids.iter().zip(&accepted) {
+        for (id, (_, _, _, _, _, reason)) in ids.iter().zip(&accepted) {
             if let Some(reason) = reason {
                 unresolved_reasons.push(ipc::Unresolved {
                     id: ipc::ItemId(id.0),
@@ -886,7 +897,8 @@ impl Daemon {
                     None => track.title.clone(),
                 };
                 let cover = track.album.as_ref().and_then(|album| album.cover.clone());
-                accepted.push((source, Some(name), track.duration, cover, None));
+                let album_id = track.album.as_ref().map(|album| album.id.clone());
+                accepted.push((source, Some(name), track.duration, cover, album_id, None));
             } else {
                 rejected.push(ipc::Rejected {
                     source: source.to_wire(),

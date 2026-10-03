@@ -307,6 +307,7 @@ async fn run_play_file(
                 .map(|name| name.to_string_lossy().into_owned()),
             duration: None,
             cover: None,
+            album_id: None,
         }]);
     }
     queue.set_shuffle(shuffle);
@@ -349,6 +350,7 @@ async fn run_play(
             title: Some(id.clone()),
             duration: None,
             cover: None,
+            album_id: None,
         }]);
     }
     queue.set_shuffle(shuffle);

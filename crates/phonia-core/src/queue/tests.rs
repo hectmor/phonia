@@ -11,6 +11,14 @@ fn track(name: &str) -> QueueTrack {
         title: Some(name.to_string()),
         duration: None,
         cover: None,
+        album_id: None,
+    }
+}
+
+fn track_in_album(name: &str, album: &str) -> QueueTrack {
+    QueueTrack {
+        album_id: Some(album.to_string()),
+        ..track(name)
     }
 }
 
@@ -585,6 +593,7 @@ fn opening_a_track_fills_in_only_what_was_missing() {
         title: None,
         duration: None,
         cover: None,
+        album_id: None,
     }]);
     let before = inner.snapshot().version;
 
@@ -813,4 +822,110 @@ fn an_empty_queue_and_nothing_playing_peek_sensibly() {
         "nothing has played: the first entry"
     );
     assert_eq!(inner.peek(Advance::Previous), Peeked::Unknown);
+}
+
+// ---- replaygain album context -------------------------------------------------------------
+
+#[test]
+fn a_lone_entry_with_no_neighbors_has_no_album_context() {
+    let mut inner = Inner::new(1);
+    let ids = inner.add([track_in_album("a", "album-1")]);
+    assert!(!inner.album_context(ids[0]));
+}
+
+#[test]
+fn a_track_with_no_album_has_no_album_context_even_next_to_its_own_album() {
+    let mut inner = Inner::new(1);
+    let ids = inner.add([track("a"), track_in_album("b", "album-1")]);
+    assert!(!inner.album_context(ids[0]));
+}
+
+#[test]
+fn adjacent_entries_of_the_same_album_are_an_album_context() {
+    let mut inner = Inner::new(1);
+    let ids = inner.add([
+        track_in_album("a", "album-1"),
+        track_in_album("b", "album-1"),
+    ]);
+    assert!(inner.album_context(ids[0]));
+    assert!(inner.album_context(ids[1]));
+}
+
+#[test]
+fn adjacent_entries_of_different_albums_are_not_an_album_context() {
+    let mut inner = Inner::new(1);
+    let ids = inner.add([
+        track_in_album("a", "album-1"),
+        track_in_album("b", "album-2"),
+    ]);
+    assert!(!inner.album_context(ids[0]));
+    assert!(!inner.album_context(ids[1]));
+}
+
+#[test]
+fn a_middle_entry_counts_either_neighbor() {
+    let mut inner = Inner::new(1);
+    let ids = inner.add([
+        track_in_album("a", "album-1"),
+        track_in_album("b", "album-2"),
+        track_in_album("c", "album-2"),
+    ]);
+    // "b" matches "c" on its right even though "a" on its left is a different album.
+    assert!(!inner.album_context(ids[0]));
+    assert!(inner.album_context(ids[1]));
+    assert!(inner.album_context(ids[2]));
+}
+
+#[test]
+fn shuffle_always_turns_off_album_context_whatever_the_order() {
+    let mut inner = Inner::new(1);
+    let ids = inner.add([
+        track_in_album("a", "album-1"),
+        track_in_album("b", "album-1"),
+    ]);
+    inner.set_shuffle(true);
+    assert!(!inner.album_context(ids[0]));
+    assert!(!inner.album_context(ids[1]));
+}
+
+#[test]
+fn an_unknown_entry_has_no_album_context() {
+    let inner = Inner::new(1);
+    assert!(!inner.album_context(ItemId(999)));
+}
+
+#[test]
+fn applied_gain_follows_the_configured_mode_and_context() {
+    use crate::replaygain::{Kind, Loudness, Mode};
+    let mut inner = Inner::new(1);
+    let ids = inner.add([
+        track_in_album("a", "album-1"),
+        track_in_album("b", "album-1"),
+    ]);
+    let loudness = Loudness {
+        track_db: -6.0,
+        track_peak: Some(0.9),
+        album_db: Some(-7.0),
+        album_peak: Some(0.95),
+    };
+
+    assert_eq!(
+        inner.applied_gain(ids[0], &loudness),
+        None,
+        "off by default"
+    );
+
+    inner.set_replay_gain(Mode::Auto);
+    assert_eq!(
+        inner.applied_gain(ids[0], &loudness).map(|g| g.kind),
+        Some(Kind::Album),
+        "adjacent same-album entries"
+    );
+
+    inner.set_shuffle(true);
+    assert_eq!(
+        inner.applied_gain(ids[0], &loudness).map(|g| g.kind),
+        Some(Kind::Track),
+        "shuffle breaks the album context"
+    );
 }
