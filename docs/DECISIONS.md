@@ -811,3 +811,80 @@ whether a report has arrived — the same "layout never jumps" discipline
 #24's covers work established), and showing a refused or failed track's
 reason on that same line instead of the bare "Stopped" the TUI shows
 today.
+
+## 2026-10-03 — #28 part 2: the signal-path line, a fixed fourth row in the bar
+
+`state.status.sink_report` needed no new field on `app::State`: since
+`Status` already carries it after part 1, `Connected` and `Resync`
+(which replace `status` whole) bring it in for free, the same as every
+other status field. `on_daemon_event` gained the arms part 1's own design
+implied it would need: `Event::SinkReport` sets it, `Event::OutputReleased`
+clears it (the output is gone, so whatever it reported no longer applies),
+`Event::OutputAcquired` and `Event::TrackStarted` mark the output open
+again (`TrackStarted` only ever fires once `start_track` has actually
+opened a sink), and `Event::StateChanged { Stopped }` closes the output
+and clears the verdict -- the same two "the sink is definitely gone"
+events the daemon itself keys off in part 1, kept in step on purpose.
+`Event::TrackEnded` stays exactly as it was: it still does *not* clear
+`sink_report`, since a report is per sink-open, not per track, and a
+gapless album of one format must not go blank between tracks.
+
+**Layout: a fourth bar line, present and blank in every connection state,
+not only `Connected`.** `BAR_HEIGHT` went from 4 to 5 (the border plus
+four lines, up from three) everywhere, including `Connecting`,
+`Disconnected` and `Refused`, each of which gained one `Line::raw("")` to
+match -- the same "never let the main panel's height depend on what
+happened to load" discipline #24's cover work established, now applied to
+the bar itself. A dedicated regression test
+(`the_quit_key_is_on_the_same_row_in_every_connection_state_and_with_or_without_a_report`)
+pins that the bar's last line lands on the identical screen row whether
+connecting, disconnected, playing with no verdict yet, or playing with
+one. The first line's own `(24-bit / 96 kHz, hires)` parenthetical was
+removed: showing format and rate twice, once generically and once next
+to the device that actually negotiated them, would read as noise once
+the new line exists.
+
+**The line's own shape**, by what `status` says:
+- `Output::Released { by }`: "Output released[ to X]: resume to take it
+  back" -- the same verb `ctl`'s own released wording uses.
+- No track, but a known route: "Output: {description} ({exclusive |
+  shared, not bit-perfect})".
+- A track, but no `SinkReport` that `applies_to` the current status yet
+  (the window between `TrackStarted` and the first write, or a track
+  loaded paused): the source and format, ending in a bare arrow, styled
+  dim -- nothing is claimed about the device until the kernel has
+  actually confirmed something.
+- A track with an applicable report: `{TIDAL <tier> | TIDAL | file}
+  {bits}-bit / {rate}[ {n}ch if not stereo] → {format}[ {resampled rate}
+  if shared] → {device} → ✔/✖ {verdict}`. Bit-perfect is `theme.accent`;
+  a shared-mode "not bit-perfect" (not wrong, just not exclusive) is the
+  new `theme.warn`; an actual `CONVERTED` or non-shared failure stays
+  `theme.error`.
+
+**`fit(path, verdict, width)`**, a new pure helper in the style of
+`progress_line`: the verdict is kept whole as long as it fits by itself;
+`path` is truncated with `…` to make room for it; only once the verdict
+alone would not fit at all is *it* the one truncated. The verdict is the
+whole point of the line, so it is the last thing to give way, not the
+first.
+
+**One new theme colour, `warn` (`Color::Yellow`)**, added to the existing
+16-ANSI-colours palette rather than introducing anything outside it (see
+the 2026-09-26 colours decision) -- with `NO_COLOR` it carries no
+modifier at all, since the `SHARED (not bit-perfect...)` wording already
+says plainly that this is not an error, unlike `error`'s bold+underline.
+
+**Verified live** against the real Fosi Audio DS2 (shared mode, via a
+PipeWire null sink, a real TIDAL track) by driving the real TUI over a
+forked pty: the captured terminal bytes show the new line rendering
+correctly end to end --
+`92 kHz → S32_LE 48 kHz → phonia_test Audio/Sin…  ✖ SHARED (not
+bit-perfect, r[esampled to 48000 Hz])` -- confirming the whole path from a
+real `SinkReport` through `Status` to the rendered line. The harness could
+not confirm a clean exit on `q` this time: a `q` keypress sent through
+this particular forked-pty setup is never observed to end the process
+within the harness's own wait window. Checked against `develop` itself
+with the exact same harness and exact same non-result, to rule out a
+regression before accepting it as a pre-existing limitation of the pty
+setup, not of the change -- `q`'s own handling is separately pinned by a
+plain unit test (`q_and_control_c_quit`) that needs no terminal at all.

@@ -69,7 +69,7 @@ done — it is its own product decision, not a leftover.
 | #29 | Quality tiers, a floor, and automatic fallback | Closed (parts 1–3); an optional part 4 (AAC decode for the lossy tiers) is not started and not blocking |
 | #25 | DAC capability detection | Code complete (PRs #106–#109, all 4 parts); **issue left open on GitHub, worth closing by hand** |
 | #26 | Per-track sample rate switching | Code complete, same plan and PRs as #25; **issue left open on GitHub, worth closing by hand** |
-| #28 | Signal path indicator in the TUI | In progress: approved 3-PR plan; part 1 (`Status.sink_report`, protocol 1.7, `phonia ctl status`'s `Verdict:` line) merged |
+| #28 | Signal path indicator in the TUI | In progress: approved 3-PR plan; parts 1–2 merged (`Status.sink_report`/protocol 1.7, and the TUI bar's own signal-path line); only the optional part 3 (showing a refused/failed track's reason there too) is left |
 | #30 | ReplayGain in shared mode | Not started |
 | #31 | Hardware mixer volume | Not started |
 
@@ -154,12 +154,35 @@ where it is known for certain — the per-output factory closure in
 new `SinkReport::applies_to(status)` (same format, and same output when
 both sides know it) so a stale verdict is never shown as current. The
 verdict's own text (`BIT-PERFECT`/`CONVERTED (reason)`/`SHARED ...`) moved
-out of `phonia ctl` into a shared `phonia_ipc::fmt::verdict`, so the TUI
-(part 2) can reuse it instead of a third reimplementation; `phonia ctl
-status` already shows it today, as a `Verdict:` line. Remaining: part 2
-(the indicator itself, a new line in the TUI's bottom bar) and part 3 (the
-same line shows a refused/failed track's reason instead of just
-"Stopped"). Deliberately **not** done here, per the plan: #25's probed
+out of `phonia ctl` into a shared `phonia_ipc::fmt::verdict`, reused by
+part 2 instead of a third reimplementation; `phonia ctl status` already
+showed it as a `Verdict:` line from part 1 alone.
+
+Part 2 (merged) is the indicator itself: the TUI's bottom bar gains a
+dedicated, always-reserved fourth line — `TIDAL hires 24-bit / 96 kHz →
+S24_3LE → Fosi Audio DS2 (hw:1,0)  ✔ BIT-PERFECT` — present and blank in
+every connection state (even disconnected or still connecting), so the
+bar's height, and the main panel's own row count, never depend on what is
+playing. The first line drops the `(24-bit / 96 kHz, hires)` it used to
+show, since that moved to the new line next to the device it actually
+reached. A width-aware `fit()` keeps the verdict whole and truncates the
+path first, only cutting the verdict itself if it alone would not fit. A
+new `theme.warn` (yellow; no modifier with `NO_COLOR`, since the SHARED
+wording already says it is not an error) colours a shared-mode "not
+bit-perfect" apart from a real `CONVERTED`/refusal, which stays
+`theme.error`. Verified live against the real Fosi Audio DS2 over a
+PipeWire null sink with a real TIDAL track: the line rendered correctly
+end to end (`92 kHz → S32_LE 48 kHz → phonia_test Audio/Sin…  ✖ SHARED
+(not bit-perfect, resampled to 48000 Hz)`), confirmed from the captured
+pty bytes rather than a clean quit — this terminal harness has a known,
+pre-existing quirk (confirmed against `develop` itself, not a regression)
+where a `q` keypress sent through a forked pty is never seen to exit the
+process within the harness, even though the key handling itself is
+unit-tested and unrelated to this change.
+
+Only the optional part 3 is left: showing a refused or failed track's
+reason on the same line instead of the bare "Stopped" the TUI shows
+today. Deliberately **not** done in parts 1–2, per the plan: #25's probed
 `Capabilities` are not attached to `SinkReport` (the issue only asks for
 source/format/device plus a verdict, which it already has in full; that
 seam stays open for a future, separate "what can my DAC do" view) and no

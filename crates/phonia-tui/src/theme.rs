@@ -21,6 +21,8 @@ pub struct Theme {
     pub selected: Style,
     /// Something went wrong.
     pub error: Style,
+    /// Not wrong, but not bit-perfect either (shared mode): worth noticing, not an error.
+    pub warn: Style,
 }
 
 impl Theme {
@@ -40,6 +42,7 @@ impl Theme {
                 accent: plain.fg(Color::Green).add_modifier(Modifier::BOLD),
                 selected: plain.add_modifier(Modifier::REVERSED),
                 error: plain.fg(Color::Red).add_modifier(Modifier::BOLD),
+                warn: plain.fg(Color::Yellow),
             }
         } else {
             Self {
@@ -49,6 +52,8 @@ impl Theme {
                 accent: plain.add_modifier(Modifier::BOLD),
                 selected: plain.add_modifier(Modifier::REVERSED),
                 error: plain.add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                // No modifier: the SHARED/CONVERTED wording already says this is not an error.
+                warn: plain,
             }
         }
     }
@@ -68,6 +73,7 @@ mod tests {
             theme.accent,
             theme.selected,
             theme.error,
+            theme.warn,
         ] {
             assert_eq!(style.fg, None);
             assert_eq!(style.bg, None);
@@ -77,7 +83,13 @@ mod tests {
     #[test]
     fn with_colour_only_the_terminals_own_sixteen_are_used() {
         let theme = Theme::new(true);
-        for style in [theme.title, theme.dim, theme.accent, theme.error] {
+        for style in [
+            theme.title,
+            theme.dim,
+            theme.accent,
+            theme.error,
+            theme.warn,
+        ] {
             let color = style.fg.expect("a colour");
             assert!(
                 !matches!(color, Color::Rgb(..) | Color::Indexed(_)),

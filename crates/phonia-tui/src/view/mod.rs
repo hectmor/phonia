@@ -21,8 +21,10 @@ use ratatui_image::Image;
 
 /// The columns the sidebar takes: the longest section name and room for the border and the mark.
 const SIDEBAR_WIDTH: u16 = 14;
-/// The rows of the bar at the bottom: a border and three lines.
-const BAR_HEIGHT: u16 = 4;
+/// The rows of the bar at the bottom: a border and four lines. Always this many, in every
+/// connection state, so the main panel's own height never depends on what is playing or whether a
+/// signal-path verdict has arrived yet.
+const BAR_HEIGHT: u16 = 5;
 
 /// The three areas of the screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,24 +285,134 @@ fn connected_line<'a>(state: &State, theme: &Theme) -> Line<'a> {
         .as_ref()
         .and_then(|track| track.title.clone().or_else(|| track.source.clone()))
         .unwrap_or_else(|| "Nothing playing".to_string());
-    let mut text = format!("{}  {name}", state_word(status.state));
-    if status.track.is_some() {
-        let mut details = Vec::new();
-        if let Some(spec) = &status.spec {
-            details.push(format!(
-                "{}-bit / {}",
-                spec.bits_per_sample,
-                phonia_ipc::fmt::sample_rate(spec.sample_rate)
-            ));
+    // Format, rate and quality move to the signal-path line below, next to the device they
+    // actually reached: saying them here too would mean every playing track reads them twice.
+    Line::styled(format!("{}  {name}", state_word(status.state)), theme.text)
+}
+
+/// The signal path: what is playing, through what format, to which device, with the bit-perfect
+/// verdict -- or as much of that as is known yet, down to nothing at all with no connection.
+fn signal_line<'a>(state: &State, theme: &Theme, width: u16) -> Line<'a> {
+    let Some(status) = &state.status else {
+        return Line::raw("");
+    };
+    if let phonia_ipc::Output::Released { by } = &status.output {
+        let text = match by {
+            Some(by) => format!("Output released to {by}: resume to take it back"),
+            None => "Output released: resume to take it back".to_string(),
+        };
+        return Line::styled(text, theme.dim);
+    }
+    let Some(track) = &status.track else {
+        let Some(route) = &status.route else {
+            return Line::raw("");
+        };
+        let mode = match route.mode {
+            phonia_ipc::OutputMode::Exclusive => "exclusive",
+            phonia_ipc::OutputMode::Shared => "shared, not bit-perfect",
+            phonia_ipc::OutputMode::Unknown => "?",
+        };
+        return Line::styled(format!("Output: {} ({mode})", route.description), theme.dim);
+    };
+
+    let mut path = match &track.quality {
+        Some(quality) => format!("TIDAL {}", phonia_ipc::fmt::stream_quality(quality)),
+        None if track
+            .source
+            .as_deref()
+            .is_some_and(|s| s.starts_with("tidal:")) =>
+        {
+            "TIDAL".to_string()
         }
-        if let Some(quality) = status.track.as_ref().and_then(|track| track.quality) {
-            details.push(phonia_ipc::fmt::stream_quality(&quality));
-        }
-        if !details.is_empty() {
-            text.push_str(&format!("  ({})", details.join(", ")));
+        None => "file".to_string(),
+    };
+    if let Some(spec) = &status.spec {
+        path.push(' ');
+        path.push_str(&format!(
+            "{}-bit / {}",
+            spec.bits_per_sample,
+            phonia_ipc::fmt::sample_rate(spec.sample_rate)
+        ));
+        if spec.channels != 2 {
+            path.push_str(&format!(" {}ch", spec.channels));
         }
     }
-    Line::styled(text, theme.text)
+
+    let Some(report) = status
+        .sink_report
+        .as_ref()
+        .filter(|report| report.applies_to(status))
+    else {
+        let device = status
+            .route
+            .as_ref()
+            .map(|route| format!(" {}", route.description))
+            .unwrap_or_default();
+        return Line::styled(format!("{path} \u{2192}{device}"), theme.dim);
+    };
+
+    let mut route_text = report.negotiated_format.clone();
+    if let Some(rate) = report.resampled_to {
+        route_text.push(' ');
+        route_text.push_str(&phonia_ipc::fmt::sample_rate(rate));
+    }
+    let device = match &status.route {
+        Some(route) if route.description != report.device => {
+            format!("{} ({})", route.description, report.device)
+        }
+        _ => report.device.clone(),
+    };
+    let full_path = format!("{path} \u{2192} {route_text} \u{2192} {device}");
+
+    let symbol = if report.bit_perfect {
+        "\u{2714}"
+    } else {
+        "\u{2716}"
+    };
+    let verdict = format!("{symbol} {}", phonia_ipc::fmt::verdict(report));
+    let verdict_style = if report.bit_perfect {
+        theme.accent
+    } else if report.mode == Some(phonia_ipc::OutputMode::Shared) {
+        theme.warn
+    } else {
+        theme.error
+    };
+
+    let (fitted_path, fitted_verdict) = fit(&full_path, &verdict, width);
+    Line::from(vec![
+        Span::styled(fitted_path.clone(), theme.text),
+        Span::raw(if fitted_path.is_empty() { "" } else { "  " }),
+        Span::styled(fitted_verdict, verdict_style),
+    ])
+}
+
+/// Fits `path` and `verdict` into `width` columns (separated by two spaces when both are shown):
+/// the verdict is kept whole as long as it fits by itself, and `path` is truncated with `…` to
+/// make room for it. Only when the verdict alone would not fit is it the one truncated instead.
+fn fit(path: &str, verdict: &str, width: u16) -> (String, String) {
+    const SEP: usize = 2;
+    let width = usize::from(width);
+    let verdict_len = verdict.chars().count();
+    if path.is_empty() || verdict_len + SEP > width {
+        return (String::new(), truncate(verdict, width));
+    }
+    (
+        truncate(path, width - verdict_len - SEP),
+        verdict.to_string(),
+    )
+}
+
+/// `text`, or its first `width - 1` characters plus `…` when it is longer than `width`.
+fn truncate(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut truncated: String = text.chars().take(width - 1).collect();
+    truncated.push('\u{2026}');
+    truncated
 }
 
 /// `1:05 ████████░░░░░░░░ 5:43`, as wide as `width`; just the times when there is no room or the
@@ -367,6 +479,7 @@ fn draw_bar(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
         Connection::Connecting => vec![
             Line::styled("Connecting to phoniad...", theme.dim),
             Line::raw(""),
+            Line::raw(""),
             Line::styled("? help   q quit", theme.dim),
         ],
         Connection::Connected => {
@@ -380,6 +493,7 @@ fn draw_bar(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
             let flags = flags(state);
             vec![
                 connected_line(state, theme),
+                signal_line(state, theme, area.width),
                 Line::styled(progress, theme.accent),
                 Line::from(vec![
                     Span::styled(KEYS, theme.dim),
@@ -403,11 +517,13 @@ fn draw_bar(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
                 ),
                 theme.dim,
             ),
+            Line::raw(""),
             Line::styled("? help   q quit", theme.dim),
         ],
         Connection::Refused { reason } => vec![
             Line::styled(format!("Cannot use this daemon: {reason}"), theme.error),
             Line::styled("R: try again", theme.dim),
+            Line::raw(""),
             Line::styled("? help   q quit", theme.dim),
         ],
     };
@@ -577,7 +693,7 @@ mod tests {
             text.contains('█') && text.contains('░'),
             "the progress bar: {text}"
         );
-        assert!(text.contains("(16-bit / 44.1 kHz)"), "{text}");
+        assert!(text.contains("TIDAL 16-bit / 44.1 kHz"), "{text}");
     }
 
     #[test]
@@ -667,6 +783,35 @@ mod tests {
     }
 
     #[test]
+    fn fit_keeps_the_verdict_whole_and_truncates_the_path_to_make_room() {
+        let (path, verdict) = fit("a path that is much too long to fit anywhere", "OK", 20);
+        assert_eq!(verdict, "OK");
+        assert_eq!(path.chars().count() + verdict.chars().count() + 2, 20);
+        assert!(path.ends_with('\u{2026}'), "{path}");
+    }
+
+    #[test]
+    fn fit_leaves_a_short_path_untouched() {
+        assert_eq!(
+            fit("short", "OK", 80),
+            ("short".to_string(), "OK".to_string())
+        );
+    }
+
+    #[test]
+    fn fit_truncates_the_verdict_only_once_it_alone_does_not_fit() {
+        let (path, verdict) = fit("path", "a verdict too long for a narrow bar", 10);
+        assert_eq!(path, "", "the path gives way entirely first");
+        assert_eq!(verdict.chars().count(), 10);
+        assert!(verdict.ends_with('\u{2026}'), "{verdict}");
+    }
+
+    #[test]
+    fn fit_with_no_path_gives_the_verdict_the_whole_width() {
+        assert_eq!(fit("", "OK", 10), (String::new(), "OK".to_string()));
+    }
+
+    #[test]
     fn the_volume_and_the_queue_modes_show_when_they_are_not_the_plain_ones() {
         use phonia_ipc::{Queue, Repeat, Volume};
         let mut state = connected();
@@ -739,8 +884,224 @@ mod tests {
         );
         let text = screen(&state, 120, 12);
         assert!(
-            text.contains("(24-bit / 96 kHz, lossless (asked for hires))"),
+            text.contains("TIDAL lossless (asked for hires) 24-bit / 96 kHz"),
             "{text}"
+        );
+    }
+
+    /// A connected state with `track` already started at `spec`, so a `SinkReport` sent next has
+    /// something to apply to.
+    fn playing(spec: phonia_ipc::Spec) -> State {
+        let mut state = connected();
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::TrackStarted {
+                item_id: None,
+                source: Some("tidal:1".into()),
+                title: Some("Aerodynamic".into()),
+                duration_ms: Some(343_000),
+                spec,
+                gapless: false,
+                quality: None,
+                cover: None,
+            }),
+        );
+        state
+    }
+
+    const SPEC_96K: phonia_ipc::Spec = phonia_ipc::Spec {
+        sample_rate: 96_000,
+        channels: 2,
+        bits_per_sample: 24,
+    };
+
+    fn a_sink_report(bit_perfect: bool, mode: phonia_ipc::OutputMode) -> phonia_ipc::SinkReport {
+        phonia_ipc::SinkReport {
+            device: "hw:1,0".into(),
+            source: SPEC_96K,
+            negotiated_format: "S24_3LE".into(),
+            bit_perfect,
+            problem: if bit_perfect {
+                None
+            } else {
+                Some("the card reports 48000 Hz instead of 96000 Hz".into())
+            },
+            hw_params: None,
+            mode: Some(mode),
+            resampled_to: None,
+            codec: None,
+            lossy: false,
+            output: None,
+        }
+    }
+
+    #[test]
+    fn a_bit_perfect_verdict_shows_on_its_own_line() {
+        let mut state = playing(SPEC_96K);
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::SinkReport(a_sink_report(
+                true,
+                phonia_ipc::OutputMode::Exclusive,
+            ))),
+        );
+        let text = screen(&state, 120, 12);
+        assert!(text.contains("TIDAL 24-bit / 96 kHz"), "{text}");
+        assert!(text.contains("S24_3LE"), "{text}");
+        assert!(text.contains("hw:1,0"), "{text}");
+        assert!(text.contains("BIT-PERFECT"), "{text}");
+    }
+
+    #[test]
+    fn a_converted_verdict_names_the_reason() {
+        let mut state = playing(SPEC_96K);
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::SinkReport(a_sink_report(
+                false,
+                phonia_ipc::OutputMode::Exclusive,
+            ))),
+        );
+        let text = screen(&state, 120, 12);
+        assert!(
+            text.contains("CONVERTED (the card reports 48000 Hz instead of 96000 Hz)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_shared_mode_verdict_is_not_treated_as_an_error() {
+        let mut state = playing(SPEC_96K);
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::SinkReport(a_sink_report(
+                false,
+                phonia_ipc::OutputMode::Shared,
+            ))),
+        );
+        let text = screen(&state, 120, 12);
+        assert!(text.contains("SHARED"), "{text}");
+    }
+
+    #[test]
+    fn a_released_output_says_so_and_a_track_with_no_report_yet_ends_in_an_arrow() {
+        let mut state = playing(SPEC_96K);
+        let text = screen(&state, 120, 12);
+        assert!(
+            text.contains("TIDAL 24-bit / 96 kHz \u{2192}"),
+            "no report has arrived yet: {text}"
+        );
+
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::OutputReleased {
+                by: Some("jackd".into()),
+                reason: phonia_ipc::ReleaseReason::Requested,
+            }),
+        );
+        let text = screen(&state, 120, 12);
+        assert!(
+            text.contains("Output released to jackd: resume to take it back"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_sink_report_for_a_different_output_than_the_one_switched_to_is_not_shown() {
+        // The race #28's own daemon-side fix exists for: a report can arrive stamped with the
+        // output that is going away, right as `OutputChanged` names the new one. Whichever order
+        // they come in, the old device's verdict must never be shown as the new one's.
+        let mut state = playing(SPEC_96K);
+        let mut report = a_sink_report(true, phonia_ipc::OutputMode::Exclusive);
+        report.output = Some("exclusive:hw:1,0".into());
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::SinkReport(report)),
+        );
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::OutputChanged {
+                route: phonia_ipc::Route {
+                    id: "exclusive:hw:2,0".into(),
+                    mode: phonia_ipc::OutputMode::Exclusive,
+                    description: "Other DAC".into(),
+                },
+            }),
+        );
+        let text = screen(&state, 120, 12);
+        assert!(!text.contains("BIT-PERFECT"), "{text}");
+
+        // The other order: the route changes first, the stale report for the old output arrives
+        // after -- still not shown, since the ids still disagree.
+        let mut state = playing(SPEC_96K);
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::OutputChanged {
+                route: phonia_ipc::Route {
+                    id: "exclusive:hw:2,0".into(),
+                    mode: phonia_ipc::OutputMode::Exclusive,
+                    description: "Other DAC".into(),
+                },
+            }),
+        );
+        let mut report = a_sink_report(true, phonia_ipc::OutputMode::Exclusive);
+        report.output = Some("exclusive:hw:1,0".into());
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::SinkReport(report)),
+        );
+        let text = screen(&state, 120, 12);
+        assert!(!text.contains("BIT-PERFECT"), "{text}");
+    }
+
+    #[test]
+    fn the_quit_key_is_on_the_same_row_in_every_connection_state_and_with_or_without_a_report() {
+        // The bar reserves a fixed 4 content rows in every state (connecting, connected,
+        // disconnected, refused) so the row the last line of the bar lands on -- "? help q quit"
+        // or its equivalent -- never moves, the same discipline #24's covers work established for
+        // the main panel.
+        let (width, height) = (100, 24);
+        let row_of = |text: &str, needle: &str| {
+            text.lines()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("{needle:?} not found in:\n{text}"))
+        };
+
+        let connecting_row = row_of(&screen(&State::default(), width, height), "q quit");
+
+        let mut disconnected = connected();
+        update(
+            &mut disconnected,
+            Msg::Disconnected {
+                reason: "x".into(),
+                retry_in: std::time::Duration::from_secs(1),
+            },
+        );
+        let disconnected_row = row_of(&screen(&disconnected, width, height), "q quit");
+
+        let not_playing_row = row_of(&screen(&connected(), width, height), "q quit");
+
+        let mut playing_no_report = playing(SPEC_96K);
+        let playing_no_report_row = row_of(&screen(&playing_no_report, width, height), "q quit");
+
+        update(
+            &mut playing_no_report,
+            Msg::Daemon(phonia_ipc::Event::SinkReport(a_sink_report(
+                true,
+                phonia_ipc::OutputMode::Exclusive,
+            ))),
+        );
+        let with_report_row = row_of(&screen(&playing_no_report, width, height), "q quit");
+
+        assert_eq!(
+            [
+                connecting_row,
+                disconnected_row,
+                not_playing_row,
+                playing_no_report_row,
+                with_report_row
+            ],
+            [connecting_row; 5]
         );
     }
 
