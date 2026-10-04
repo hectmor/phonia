@@ -71,7 +71,7 @@ done — it is its own product decision, not a leftover.
 | #26 | Per-track sample rate switching | Code complete, same plan and PRs as #25; **issue left open on GitHub, worth closing by hand** |
 | #28 | Signal path indicator in the TUI | Code complete (PRs #110–#112, all 3 parts); **issue left open on GitHub, worth closing by hand** |
 | #30 | ReplayGain in shared mode | Code complete (all 4 parts); **issue left open on GitHub, worth closing by hand** |
-| #31 | Hardware mixer volume | In progress (approved 3-PR plan; parts 1–2 done) |
+| #31 | Hardware mixer volume | Code complete (all 3 parts); **issue left open on GitHub, worth closing by hand** |
 
 ### Phases 4 and 5
 
@@ -350,6 +350,38 @@ than carrying the DS2's 63% over; switching back to the DS2 showed
 63% again, confirming the hardware was never touched during the
 detour; and the card was set back to its exact original value
 (84%/-10 dB/on) before the scratch daemon was stopped.
+
+Part 3 (merged, last) adds the live watcher: a background thread,
+started the first time anything calls `on_change`, that keeps its own
+`Mixer` open (the only place in this module that does — `get`/`set`
+still always open a fresh one) so it can block on `Mixer::wait` for
+real events instead of polling blindly, and announces a change only
+when the value actually differs from what it last reported. Found and
+fixed a real bug while writing the test for this, not after: the first
+version announced the control's starting value as if it were a
+"change" the instant it attached, because the comparison began from
+`None`; fixed by reading the starting value silently first, and only
+comparing against it from the next tick on. Also adds a passive
+`phonia devices` hint — `hardware volume: PCM (-63.0..0.0 dB)` — read
+the same way the USB `advertises` line already is: without opening the
+device, costing nothing whether or not anything is playing. Kept out
+of `catalog::Entry`/the daemon's own output list on purpose: this is a
+standalone-CLI, read-only probe, not something that needs a running
+daemon or the wire protocol, the same boundary the `stream0` line
+already draws.
+
+Verified for real: the watcher test writes to the exact same DS2
+control a second, independent way and confirms the handler fires with
+the right value, restoring the card afterward; `phonia devices` was
+run live and correctly showed `PCM (-63.0..0.0 dB)` under the DS2 and
+`Master (-65.2..0.0 dB)` under the internal `sof-hda-dsp` card, with
+no line at all under the NVidia HDMI card. The real hardware tests
+must be run one at a time (`--test-threads=1`) when run together: two
+of them writing to the same physical control at once look to each
+other exactly like an outside change, which is itself a sign the
+watcher's detection is working as meant.
+
+This closes #31: all 3 parts of the approved plan are merged.
 
 #25, #26, #28 and #30 are all code-complete but still open on GitHub
 (see "Conventions" below) — close them by hand when convenient.

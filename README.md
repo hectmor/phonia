@@ -122,7 +122,9 @@ chain works with real hardware (a Fosi Audio DS2 during development).
   with no device opened and nothing taken from PipeWire: for a USB card, an `advertises ...` line
   parsed straight from `/proc/asound/cardN/stream0` -- what the device *claims* in its USB
   descriptors, before any kernel quirk or real negotiation, not what `probe-device`/actual playback
-  found. HDA and HDMI cards have no `stream0` at all, so they get no such line.
+  found. HDA and HDMI cards have no `stream0` at all, so they get no such line. The same entry also
+  shows a `hardware volume: ...` line when the card has a usable mixer control (#31), e.g. `PCM
+  (-63.0..0.0 dB)` -- also passive, also read without opening the device.
 
 All commands are run with `cargo run -p phonia -- <command>`, for example:
 
@@ -537,7 +539,9 @@ sink = "bluez_output.AA_BB_CC_DD_EE_FF.1"   # from `phonia devices`; or "default
     shared output instead. A hardware volume is never carried in from a previous output, or seeded
     to any particular value: it is read fresh and only ever changed when you explicitly ask, so
     `phonia ctl status` always shows whatever the card's own control is *actually* set to, even if
-    something else (the DAC's own knob, or the desktop) changed it since.
+    something else (the DAC's own knob, or the desktop reclaiming the card) changed it since: a
+    background watcher notices and `phonia ctl watch`/the TUI follow, the same as the desktop's own
+    mixer already does in shared mode.
 
 ## Project status
 
