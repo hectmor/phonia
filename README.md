@@ -153,6 +153,7 @@ release_after_pause = 10   # seconds a pause lasts before the card is handed bac
 max_quality = "hires"   # hires | lossless | high | low: the best tier to ask for
 min_quality = "lossless" # the worst tier phonia will play (default lossless)
 session_store = "keyring"  # where the TIDAL login is kept: keyring | file (see below)
+report_plays = true     # report finished plays to TIDAL, for Recently Played (default on, #120)
 
 [daemon]
 socket = "/run/user/1000/phonia/phoniad.sock"   # default: $XDG_RUNTIME_DIR/phonia/phoniad.sock
@@ -476,6 +477,19 @@ shows a `Gain:` line (`RG -2.9 dB (album)`) and the TUI's bar shows it next to t
 is shown in exclusive mode, even though the same gain is still *decided* for an exclusive-mode
 track (TIDAL's loudness data doesn't depend on the output) -- showing it there would claim an
 effect that was never applied.
+
+## Play reporting
+
+`[tidal] report_plays` (default on) reports a track to TIDAL once it has actually been heard for
+30 seconds, so it shows up in Recently Played on the account -- the same mechanism TIDAL's own
+apps use: there is no simpler, documented "mark this played" endpoint, only a generic analytics
+event (`playback_session`) sent through TIDAL's own internal event pipeline. This is undocumented
+and best-effort: a failure to send it is always silent and never affects playback, and TIDAL could
+change the contract without notice. See `docs/DECISIONS.md` for the full reasoning, including
+what is still provisional about it (#120).
+
+As of #120 part 1, the setting exists but nothing reads it outside a test yet -- turning it on or
+off has no effect until part 2 wires it into the daemon.
 
 ## Shared mode: any output, not bit-perfect
 

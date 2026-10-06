@@ -178,6 +178,8 @@ pub struct Settings {
     pub gapless: Sourced<bool>,
     /// How ReplayGain is chosen.
     pub replaygain: Sourced<crate::replaygain::Mode>,
+    /// Whether finished plays are reported to TIDAL, for Recently Played.
+    pub report_plays: Sourced<bool>,
 }
 
 /// Decides every setting: command line over file over default.
@@ -231,6 +233,7 @@ pub fn resolve(overrides: Overrides, file: &ConfigFile) -> Settings {
             file.playback.replaygain,
             crate::replaygain::Mode::default(),
         ),
+        report_plays: Sourced::pick(None, file.tidal.report_plays, true),
     }
 }
 
@@ -525,6 +528,33 @@ mod tests {
             Sourced {
                 value: false,
                 origin: Origin::Default
+            }
+        );
+        assert_eq!(
+            settings.report_plays,
+            Sourced {
+                value: true,
+                origin: Origin::Default
+            },
+            "on by default, like the official apps"
+        );
+    }
+
+    #[test]
+    fn the_file_can_turn_off_reporting_plays_to_tidal() {
+        let file = ConfigFile {
+            tidal: Tidal {
+                report_plays: Some(false),
+                ..Tidal::default()
+            },
+            ..ConfigFile::default()
+        };
+        let settings = resolve(Overrides::default(), &file);
+        assert_eq!(
+            settings.report_plays,
+            Sourced {
+                value: false,
+                origin: Origin::File
             }
         );
     }

@@ -23,4 +23,5 @@ tidlers.workspace = true
 tokio.workspace = true
 pulseaudio.workspace = true
 toml.workspace = true
+uuid.workspace = true
 zbus.workspace = true

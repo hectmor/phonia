@@ -110,6 +110,11 @@ fn format_settings(
             settings.session_store.origin,
         ),
         (
+            "tidal.report_plays",
+            settings.report_plays.value.to_string(),
+            settings.report_plays.origin,
+        ),
+        (
             "daemon.socket",
             settings
                 .socket
@@ -178,6 +183,7 @@ mod tests {
              \x20 tidal.max_quality           hires                               (default)\n\
              \x20 tidal.min_quality           lossless                            (default)\n\
              \x20 tidal.session_store         keyring                             (default)\n\
+             \x20 tidal.report_plays          true                                (default)\n\
              \x20 daemon.socket               /run/user/1000/phonia/phoniad.sock  (default)\n\
              \x20 daemon.verbose              false                               (default)\n\
              \x20 playback.gapless            true                                (default)\n\
@@ -212,9 +218,9 @@ mod tests {
         assert!(text.contains("lossless"), "{text}");
         assert_eq!(
             text.matches("(default)").count(),
-            10,
-            "mode, sink, reserve, release_after_pause, min_quality, session_store, socket, \
-             verbose, gapless and replaygain were not written"
+            11,
+            "mode, sink, reserve, release_after_pause, min_quality, session_store, \
+             report_plays, socket, verbose, gapless and replaygain were not written"
         );
     }
 
