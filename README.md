@@ -488,8 +488,11 @@ and best-effort: a failure to send it is always silent and never affects playbac
 change the contract without notice. See `docs/DECISIONS.md` for the full reasoning, including
 what is still provisional about it (#120).
 
-As of #120 part 1, the setting exists but nothing reads it outside a test yet -- turning it on or
-off has no effect until part 2 wires it into the daemon.
+A play counts once it has actually been heard for 30 real seconds (paused time doesn't count),
+whatever reason it ends for -- completed, skipped or failed -- and however long the track is;
+every play is reported as a plain track, not attributed to the album or playlist it was queued
+from (a seam left for a later issue). Only `phoniad` sends these, through the same TIDAL login it
+already uses for everything else.
 
 ## Shared mode: any output, not bit-perfect
 

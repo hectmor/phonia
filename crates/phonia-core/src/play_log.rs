@@ -257,7 +257,9 @@ fn batch_form(entries: &[(String, String)]) -> Vec<(String, String)> {
 
 // ---- Sending --------------------------------------------------------------------------------
 
-/// Sends finished plays to TIDAL, through the process's one TIDAL session.
+/// Sends finished plays to TIDAL, through the process's one TIDAL session. Cheap to clone: it is
+/// only a client and a shared handle to that session.
+#[derive(Clone)]
 pub struct PlayLog {
     http: reqwest::Client,
     session: Arc<TidalSession>,

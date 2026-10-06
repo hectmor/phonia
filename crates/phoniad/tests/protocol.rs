@@ -109,6 +109,7 @@ async fn fixture_full(
             phonia_core::config::Quality::Hires,
             phonia_core::config::Quality::Lossless,
         ))),
+        play_log: None,
         reports: report_rx,
         engine: options,
         replaygain: phonia_core::replaygain::Mode::default(),

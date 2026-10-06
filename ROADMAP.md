@@ -77,7 +77,7 @@ done — it is its own product decision, not a leftover.
 
 | Issue | What | Status |
 |---|---|---|
-| #120 | Play reporting: finished plays reach TIDAL's own Recently Played | In progress, part 1/2 |
+| #120 | Play reporting: finished plays reach TIDAL's own Recently Played | Closed (verified live against a real account) |
 
 The rest of Phase 4 and all of Phase 5 are not started, except CI (#42) and
 rustfmt-in-CI (#50), both closed. Nothing else is planned in detail yet;
@@ -428,9 +428,33 @@ once 30 real seconds have been heard. `[tidal] report_plays` exists (default
 `true`) but nothing reads it outside a test yet — no engine, daemon or wire
 protocol changes in this part.
 
-Part 2 (not started) wires it into `phoniad`'s event loop and is the first
-part that actually sends anything; it ends with a mandatory live check
-against a real account to confirm (or correct) what is still provisional.
+Part 2 (merged, last) wires it into `phoniad`: `Daemon::note_play_log` feeds
+every relevant engine event (`TrackStarted`, `Position`, `Seeked`,
+`StateChanged(Paused|Playing)`, `TrackEnded`) to the tracker from inside
+`fan_in`, resolving the real TIDAL id and delivered quality from the queue
+snapshot already fetched there (`resolve_tidal_track`, new) — doing this at
+`TrackStarted` time, not later, matters for a gapless join, where the queue
+can advance before the outgoing track's own `TrackEnded` is even converted.
+A finished session is sent in the background (one in-memory retry after
+30s, then given up, both logged only with `verbose`) so reporting never
+blocks playback or the event fan-out. `main.rs` only builds a `PlayLog` at
+all when `report_plays` is on. No wire protocol change: this stays entirely
+a `phoniad`-side effect, same as planned.
+
+**Verified live against a real account**, with a scratch daemon on a
+PipeWire null sink (`report_plays` at its default, on): a track played past
+the 30-second threshold and then skipped was accepted by TIDAL's event
+endpoint and showed up in that account's real Recently Played shortly
+after, for two different tracks; a third, skipped after only ~10 seconds,
+correctly produced no event at all. This resolves the open PROVISIONAL
+question of whether a bare `playback_session` is enough on its own — it
+is, with no need for a correlated `x-tidal-streamingsessionid` header or
+the separate `streaming_metrics` events (the PR3-conditional fallback the
+plan had set aside never had to be built). The pinned client identity in
+`play_log.rs` stays marked `PROVISIONAL (#120)` regardless: it worked today,
+but nothing stops TIDAL from tightening what it accepts later.
+
+This closes #120: both parts of the approved plan are merged.
 
 ## Conventions this file assumes
 

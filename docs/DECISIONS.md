@@ -1480,3 +1480,56 @@ events into a finished `PlaybackSession` once 30s have actually been heard. Noth
 engine or the daemon yet — `[tidal] report_plays` exists and defaults to `true`, but nothing reads
 it outside a test. No change to the wire protocol: this is entirely a `phoniad`-side, best-effort
 side effect, not something any client needs to see or control.
+
+## 2026-10-06 — #120 part 2 (last): wired into `phoniad`, verified live
+
+`Daemon::note_play_log` feeds every relevant engine event
+(`TrackStarted`/`Position`/`Seeked`/`StateChanged(Paused|Playing)`/`TrackEnded`) to part 1's
+`SessionTracker`, called from inside `fan_in` on the exact queue snapshot `fan_in` already fetches
+for `convert::event` — not a separate, later lookup. That has to happen there specifically: a
+gapless join can advance the queue to the next entry before the outgoing track's own `TrackEnded`
+is even converted, so resolving the TIDAL id and delivered quality any later would risk resolving
+the *wrong* track's source. The resolution itself (`resolve_tidal_track`, new, pure) parses
+`QueueTrack.source`'s wire form through `openers::Source::parse`; a local file (`Source::File`)
+always resolves to no id, since there is nothing to report TIDAL about.
+
+Sending is fire-and-forget from `fan_in`'s own perspective: a finished session is handed to a
+spawned task (`spawn_report`) with one in-memory retry after 30 seconds, then given up — never a
+disk-persisted outbox, as decided when the plan was approved. Any failure is logged only through
+`phonia_core::warn!`, so it is silent unless `[daemon] verbose` is on, and never anything the
+caller of `note_play_log` waits on.
+
+`main.rs` only builds a `PlayLog` at all — via `TidalOpener::play_log()` — when `settings.
+report_plays.value` is true; `Daemon::start` only starts a `SessionTracker` alongside it in that
+case. No wire protocol change, exactly as planned: no client needs to see this or control it.
+
+**Not tested against a crossing of the real 30-second threshold**, deliberately: `SessionTracker`
+accounts "heard" time against real wall-clock timestamps (`now_ms`, actual `SystemTime`), which is
+correct for the real daemon but would make an automated test either take 30 real seconds or need a
+fake clock threaded all the way into `Daemon` for no real benefit — that math is already
+thoroughly covered, with an injected clock, by part 1's own `SessionTracker` tests. What part 2
+adds that part 1's tests could not cover is the wiring itself: a new `daemon::play_log_tests`
+module tests `resolve_tidal_track` directly against constructed `QueueSnapshot` fixtures (a TIDAL
+track resolves its id and delivered quality; a local file resolves to no id; a reference the queue
+no longer has resolves to nothing) — the one genuinely new, fragile piece of logic in this part,
+isolated from the engine and the network entirely.
+
+**Verified live, exactly as the plan required before merging**: a scratch daemon on a PipeWire
+null sink, real account, `report_plays` at its default (on). Two different real TIDAL tracks each
+played past 30 seconds and then skipped (`Interrupted`) were accepted by
+`https://ec.tidal.com/api/event-batch` (no `BatchResultErrorEntry`) and confirmed, by hand, to
+show up in that account's actual Recently Played shortly after; a third track skipped after only
+about 10 seconds correctly produced no event at all, matching `SessionTracker`'s unit tests now
+confirmed against real wall-clock time, not an injected one. The heard position reported in each
+event (e.g. 59.85s on a track skipped roughly a minute after it started) matched real elapsed time.
+
+This settles the one question part 1 had left open: **a bare `playback_session` event is enough
+on its own** — no correlated `x-tidal-streamingsessionid` header on the playbackinfo request, and
+no separate `streaming_metrics` events, were needed for Recently Played to update. The
+PR3-conditional fallback the plan had set aside for that case was never needed and is dropped. The
+pinned client identity in `play_log.rs` (app version, OS/device strings) stays marked
+`PROVISIONAL (#120)` on principle — it worked today, against this account, but it is still an
+undocumented contract TIDAL could tighten or change without notice, which is exactly why a failure
+here stays silent and never touches playback.
+
+This closes #120: both parts of the approved plan are merged and verified against a real account.
