@@ -110,6 +110,7 @@ async fn run(args: Args) -> Result<()> {
     .min_quality(settings.min_quality.value);
     let quality = tidal_opener.limits();
     let catalog: Arc<dyn Catalog> = Arc::new(tidal_opener.catalog());
+    let play_log = settings.report_plays.value.then(|| tidal_opener.play_log());
     let opener = Arc::new(DispatchOpener::new(Some(tidal_opener)));
 
     let (report_tx, reports) = mpsc::unbounded_channel();
@@ -142,6 +143,7 @@ async fn run(args: Args) -> Result<()> {
         opener,
         quality: Some(quality),
         catalog: Some(catalog),
+        play_log,
         reports,
         engine: engine::Options {
             release_after_pause: settings.release_after_pause.value.duration(),

@@ -89,7 +89,7 @@ pub fn queue_dto(queue: &QueueSnapshot) -> ipc::Queue {
 }
 
 /// The queue entry an engine track reference stands for, and its source.
-fn entry_of(
+pub(crate) fn entry_of(
     track: &engine::TrackRef,
     queue: &QueueSnapshot,
 ) -> (Option<ipc::ItemId>, Option<String>) {

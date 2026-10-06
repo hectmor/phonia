@@ -16,11 +16,13 @@ use phonia_core::engine::{self, Command, Engine, TrackOpener};
 use phonia_core::openers::{DescribeError, DispatchOpener, QualityLimits, Source};
 use phonia_core::output::SinkFactory;
 use phonia_core::output::alsa::SinkReport;
-use phonia_core::queue::{ItemId, Queue, QueueTrack};
+use phonia_core::play_log::{PlayLog, PlaybackSession, SessionTracker};
+use phonia_core::queue::{ItemId, Queue, QueueSnapshot, QueueTrack};
 use phonia_ipc as ipc;
 use phonia_ipc::{AddAt, ErrorCode, NewTrack, Payload, ProtocolError, Reply, Request};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, mpsc, watch};
 
 /// Completes once the daemon has been asked to stop. (A helper so the guard `wait_for` returns is
@@ -74,6 +76,8 @@ pub struct DaemonParts {
     pub quality: Option<Arc<QualityLimits>>,
     /// TIDAL's catalog, if the daemon has a login to browse it with.
     pub catalog: Option<Arc<dyn Catalog>>,
+    /// Reports finished plays to TIDAL, if `[tidal] report_plays` is on.
+    pub play_log: Option<PlayLog>,
 }
 
 pub struct Daemon {
@@ -82,6 +86,9 @@ pub struct Daemon {
     opener: Arc<DispatchOpener>,
     quality: Option<Arc<QualityLimits>>,
     catalog: Option<Arc<dyn Catalog>>,
+    /// The tracker's state is only ever touched from `fan_in`, so a plain (non-async) lock is
+    /// enough; it just has to be `Sync` to live on `Daemon`.
+    play_log: Option<(PlayLog, Mutex<SessionTracker>)>,
     events: broadcast::Sender<(u64, ipc::Event)>,
     /// The sequence number of the last event published; only changed under `publish_lock`.
     seq: AtomicU64,
@@ -121,6 +128,9 @@ impl Daemon {
             opener: parts.opener,
             quality: parts.quality,
             catalog: parts.catalog,
+            play_log: parts
+                .play_log
+                .map(|play_log| (play_log, Mutex::new(SessionTracker::new()))),
             events,
             seq: AtomicU64::new(0),
             publish_lock: Mutex::new(()),
@@ -169,6 +179,7 @@ impl Daemon {
                             *self.last_report.lock().unwrap() = None;
                         }
                         let queue = self.controller.snapshot();
+                        self.note_play_log(&event, &queue);
                         self.publish(|_| convert::event(&event, &queue));
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -190,6 +201,48 @@ impl Daemon {
                 }
                 _ = shutdown.changed() => break,
             }
+        }
+    }
+
+    /// Feeds an engine event to the play-log tracker, if reporting plays is on, and spawns a
+    /// send for whatever session it finishes (if any). Resolving the source has to happen here,
+    /// against this exact snapshot, not later: a gapless join can advance the queue before a
+    /// `TrackEnded` for the track it followed is even converted.
+    fn note_play_log(&self, event: &engine::Event, queue: &QueueSnapshot) {
+        let Some((play_log, tracker)) = &self.play_log else {
+            return;
+        };
+        let now = now_ms();
+        let mut tracker = tracker.lock().unwrap();
+        let finished = match event {
+            engine::Event::TrackStarted { meta, .. } => {
+                let (product_id, quality) = resolve_tidal_track(meta, queue);
+                tracker.started(product_id, quality, None, now)
+            }
+            engine::Event::Position { position, .. } => {
+                tracker.position(*position);
+                None
+            }
+            engine::Event::Seeked { position } => {
+                tracker.seeked(*position, now);
+                None
+            }
+            engine::Event::StateChanged(engine::State::Paused) => {
+                tracker.paused(now);
+                None
+            }
+            engine::Event::StateChanged(engine::State::Playing) => {
+                tracker.resumed(now);
+                None
+            }
+            engine::Event::TrackEnded { meta, reason } => {
+                tracker.ended(*reason, meta.duration, now)
+            }
+            _ => None,
+        };
+        drop(tracker);
+        if let Some(session) = finished {
+            spawn_report(play_log.clone(), session);
         }
     }
 
@@ -970,4 +1023,114 @@ fn error(code: ErrorCode, message: &str) -> Reply {
         code,
         message: message.to_string(),
     })
+}
+
+/// The TIDAL track id and delivered quality for an engine track reference, if it is one: `None`
+/// for a local file, or a reference the queue no longer has (already removed by the time this
+/// runs), since there is nothing to report TIDAL about either way.
+fn resolve_tidal_track(
+    meta: &engine::TrackMeta,
+    queue: &QueueSnapshot,
+) -> (Option<String>, Option<phonia_core::config::Quality>) {
+    let (_, source) = convert::entry_of(&meta.track, queue);
+    let product_id = source
+        .and_then(|source| Source::parse(&source).ok())
+        .and_then(|source| match source {
+            Source::Tidal(id) => Some(id),
+            Source::File(_) => None,
+        });
+    let quality = meta.quality.map(|delivered| delivered.delivered);
+    (product_id, quality)
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Sends a finished play in the background, with one retry: never blocks playback or the event
+/// fan-out, and a failure here is always best-effort (see `docs/DECISIONS.md` for #120).
+fn spawn_report(play_log: PlayLog, session: PlaybackSession) {
+    const RETRY_AFTER: Duration = Duration::from_secs(30);
+    tokio::spawn(async move {
+        if let Err(error) = play_log.send(std::slice::from_ref(&session)).await {
+            phonia_core::warn!(
+                "phoniad: could not report a play to TIDAL ({error:#}); retrying once in 30s"
+            );
+            tokio::time::sleep(RETRY_AFTER).await;
+            if let Err(error) = play_log.send(std::slice::from_ref(&session)).await {
+                phonia_core::warn!("phoniad: retry failed too ({error:#}); giving up on this play");
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod play_log_tests {
+    use super::*;
+    use phonia_core::config::Quality;
+    use phonia_core::engine::{Delivered, TrackMeta, TrackRef};
+    use phonia_core::queue::{QueueItem, Repeat};
+
+    fn snapshot() -> QueueSnapshot {
+        let item = |id: u64, source: &str| QueueItem {
+            id: ItemId(id),
+            track: QueueTrack {
+                source: TrackRef(source.to_string()),
+                title: None,
+                duration: None,
+                cover: None,
+                album_id: None,
+            },
+        };
+        QueueSnapshot {
+            version: 1,
+            items: vec![item(7, "file:/m/a.flac"), item(8, "tidal:42")],
+            order: vec![ItemId(8), ItemId(7)],
+            current: Some(ItemId(8)),
+            shuffle: false,
+            repeat: Repeat::Off,
+        }
+    }
+
+    fn meta_for(id: u64, quality: Option<Delivered>) -> TrackMeta {
+        TrackMeta {
+            track: ItemId(id).track_ref(),
+            title: None,
+            duration: None,
+            quality,
+            cover: None,
+            loudness: None,
+            gain: None,
+        }
+    }
+
+    #[test]
+    fn a_tidal_track_resolves_its_id_and_delivered_quality() {
+        let delivered = Delivered {
+            requested: Quality::Hires,
+            delivered: Quality::Lossless,
+        };
+        let meta = meta_for(8, Some(delivered));
+        let (id, quality) = resolve_tidal_track(&meta, &snapshot());
+        assert_eq!(id, Some("42".to_string()));
+        assert_eq!(quality, Some(Quality::Lossless));
+    }
+
+    #[test]
+    fn a_local_file_has_no_tidal_id_to_report() {
+        let meta = meta_for(7, None);
+        let (id, _) = resolve_tidal_track(&meta, &snapshot());
+        assert_eq!(id, None);
+    }
+
+    #[test]
+    fn an_item_no_longer_in_the_queue_resolves_to_nothing() {
+        let meta = meta_for(999, None);
+        let (id, quality) = resolve_tidal_track(&meta, &snapshot());
+        assert_eq!(id, None);
+        assert_eq!(quality, None);
+    }
 }
