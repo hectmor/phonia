@@ -28,8 +28,8 @@ decisions log, and the issue tracker alone.
 |---|---|---|
 | 0 — CLI prototype | [Fase 0](https://github.com/hectmor/phonia/milestone/1) | Done (#1–#7, #46) |
 | 1 — Daemon and playback engine | [Fase 1](https://github.com/hectmor/phonia/milestone/2) | Done (#8–#16, #47, #52, #53) |
-| 2 — TUI base | [Fase 2](https://github.com/hectmor/phonia/milestone/3) | In progress (see below) |
-| 3 — Audio quality | [Fase 3](https://github.com/hectmor/phonia/milestone/4) | In progress (see below) |
+| 2 — TUI base | [Fase 2](https://github.com/hectmor/phonia/milestone/3) | Done (#17–#24, tagged `v0.2.0`) |
+| 3 — Audio quality | [Fase 3](https://github.com/hectmor/phonia/milestone/4) | Done (#25–#31) |
 | 4 — SONE-like features | [Fase 4](https://github.com/hectmor/phonia/milestone/5) | Not started |
 | 5 — Extras and packaging | [Fase 5](https://github.com/hectmor/phonia/milestone/6) | Partly started |
 
@@ -47,10 +47,10 @@ desktop keyring, and TOML configuration.
 | #18 | The TUI as an IPC client: connect, reconnect, subscribe | Closed |
 | #22 | Queue view with editing (play, remove, move, clear) | Closed |
 | #23 | Playback bar: progress, format/quality, volume, shuffle/repeat | Closed |
-| #19 | Search (tracks, albums, artists, playlists) | Code complete (PRs #82–#87 merged); **issue left open on GitHub, worth closing by hand** |
+| #19 | Search (tracks, albums, artists, playlists) | Closed (PRs #82–#87) |
 | #20 | Album and artist views, opened from a search result | Closed |
-| #21 | Library: favorite tracks/albums and the user's playlists | Code complete (PRs #95–#98) |
-| #24 | Covers in the terminal (`ratatui-image`) | Code complete (PRs #99–#105, all 7 parts); **issue left open on GitHub, worth closing by hand** |
+| #21 | Library: favorite tracks/albums and the user's playlists | Closed (PRs #95–#98) |
+| #24 | Covers in the terminal (`ratatui-image`) | Closed (PRs #99–#105, all 7 parts) |
 
 The catalog (search, an album, an artist, and now the library) is served by
 the **daemon**, not the TUI process: the TUI depends only on `phonia-ipc`, so
@@ -67,11 +67,11 @@ done — it is its own product decision, not a leftover.
 |---|---|---|
 | #27 | Gapless playback | Closed (verified bit-exact against real TIDAL over `snd-aloop`) |
 | #29 | Quality tiers, a floor, and automatic fallback | Closed (parts 1–3); an optional part 4 (AAC decode for the lossy tiers) is not started and not blocking |
-| #25 | DAC capability detection | Code complete (PRs #106–#109, all 4 parts); **issue left open on GitHub, worth closing by hand** |
-| #26 | Per-track sample rate switching | Code complete, same plan and PRs as #25; **issue left open on GitHub, worth closing by hand** |
-| #28 | Signal path indicator in the TUI | Code complete (PRs #110–#112, all 3 parts); **issue left open on GitHub, worth closing by hand** |
-| #30 | ReplayGain in shared mode | Code complete (all 4 parts); **issue left open on GitHub, worth closing by hand** |
-| #31 | Hardware mixer volume | Code complete (all 3 parts); **issue left open on GitHub, worth closing by hand** |
+| #25 | DAC capability detection | Closed (PRs #106–#109, all 4 parts) |
+| #26 | Per-track sample rate switching | Closed, same plan and PRs as #25 |
+| #28 | Signal path indicator in the TUI | Closed (PRs #110–#112, all 3 parts) |
+| #30 | ReplayGain in shared mode | Closed (all 4 parts) |
+| #31 | Hardware mixer volume | Closed (all 3 parts) |
 
 ### Phases 4 and 5
 
@@ -383,8 +383,9 @@ watcher's detection is working as meant.
 
 This closes #31: all 3 parts of the approved plan are merged.
 
-#25, #26, #28 and #30 are all code-complete but still open on GitHub
-(see "Conventions" below) — close them by hand when convenient.
+Phase 3 is now fully closed: #25 and #26 were the last two issues left
+open on GitHub after being code-complete for a while, closed by hand
+on 2026-10-04 alongside this update.
 
 ## Conventions this file assumes
 
