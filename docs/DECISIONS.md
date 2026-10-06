@@ -1409,3 +1409,74 @@ handler reaching `Outputs::volume_changed_outside`, the daemon publishing `Volum
 client actually receiving it. Restored to the exact original raw value afterward.
 
 This closes #31: all 3 parts of the approved plan are merged.
+
+## 2026-10-06 — #120 part 1: plays go to TIDAL as its own `playback_session` event, Android-shaped
+
+The first issue of Phase 4. Its one-line body: "Reports finished plays to TIDAL so Recently Played
+reflects what you listen to in SONE" — SONE is a different, open-source Linux TIDAL client
+(`lullabyX/sone`), not phonia's own name; the issue's wording was lifted from its README, which is
+also what led to finding it as a reference during planning (see below).
+
+There is no documented "mark this as played" endpoint. TIDAL's official apps send a generic
+analytics event — a `playback_session`, under the `play_log` event group — through the "TIDAL
+Event Platform," an ingest pipeline behind AWS SQS's `SendMessageBatch`, reached at
+`https://ec.tidal.com/api/event-batch`. None of this is in TIDAL's public developer docs; it comes
+from TIDAL's own open-source SDKs (`tidal-music/tidal-sdk-web`'s `event-producer` and `player`
+packages, and `tidal-music/tidal-sdk-android`), which define the event's name, transport and the
+"web" shape of its body. That web shape — a bare `{group, name, payload, version, ts, uuid}` — is
+what a literal reading of those SDKs gives, but it is **not** what makes a play show up in Recently
+Played for phonia: SONE's own implementation (GPL-3; read for the protocol facts it had already
+live-verified against a real account, no code copied, same category of information as the SDK
+source itself) found and documented that only the **mobile/Android shape** — the same body plus
+top-level `user: {id, clientId, sessionId}` and `client: {token, deviceType: "mobile", version,
+platform: "android"}` objects, both filled from the access token's own JWT claims — actually
+produces a row. That difference matters specifically for phonia, not just because SONE happened to
+need it: phonia's own PKCE client id (what `tidlers` authenticates with by default,
+`6BDSRdpK9hqEBTgU`, decoded from its `auth::credentials` module) is a native, Android-type client,
+not a browser one — an event rides on the identity of the client whose token it carries, so it has
+to describe that kind of client, not phonia, whatever client happens to be sending it.
+
+**`sourceType`/`sourceId` are not optional**, even though TIDAL's backend accepts an event without
+them: SONE's own live-verified finding is that a sourceless play is accepted but never produces a
+Recently Played row at all. The real enum is `ALBUM | PLAYLIST | ARTIST | MIX | ITEM | MY_ITEMS`,
+not the `"TRACK"` a literal reading of "productType" would suggest. phonia has no plumbing today to
+know whether a play came from an album, a playlist or a mix it was queued from, so every play is
+reported as `ITEM` + the track's own id — the same fallback the official apps themselves use for a
+track started outside any container (search, a deep link, a context menu). Richer attribution is a
+seam for a later issue, not something #120 needs to get the feature working at all.
+
+**The threshold is a flat 30 seconds actually heard** (wall-clock time in `Playing`, excluding any
+paused span), regardless of `EndReason` or the track's own length — TIDAL's own rule, confirmed
+live by SONE's tests, not a guess or a Last.fm-style "half the track" heuristic. A track completed,
+skipped or failed after 30 real seconds of listening counts the same way; a 25-second track played
+in full never can.
+
+**Decided with the user** (recommended options in parens, chosen unless noted): (1) implement
+against TIDAL's real Recently Played via this event, accepting that it is an undocumented contract
+TIDAL could change without notice — a failure here is always silent and never touches playback
+(recommended, chosen); (2) `[tidal] report_plays`, file-only like `replaygain` (sending your own
+listening activity to your account is a deliberate, written-down choice), but **on by default**
+like the official apps — the one place the user went against the recommendation, which had argued
+for off-by-default on privacy-adjacent-decision grounds; (3) fire-and-forget with one in-memory
+retry, no disk-persisted outbox — anything still pending when the daemon exits is lost (recommended,
+chosen; the official SDKs' own persistent queue is solving a problem — surviving a mobile app being
+killed by the OS — that doesn't really apply to a desktop daemon); (4) ship with `ITEM` + track id
+now, leave real container attribution for a later issue (recommended, chosen).
+
+Everything about the exact identity phonia's events claim to be — the pinned app
+version/OS/device-model/vendor strings, whether `sid` is reliably present in the JWTs `tidlers`'
+PKCE flow produces, and whether a bare `playback_session` is sufficient on its own (versus needing
+a correlated `x-tidal-streamingsessionid` header on the playbackinfo request, or the separate
+`streaming_metrics` events TIDAL's SDKs also send) — is marked `PROVISIONAL (#120)` in
+`play_log.rs` and stays open until a live test against a real account confirms or corrects it in
+part 2.
+
+Part 1 (this part) adds `phonia-core`'s new `play_log.rs`: the event's body/headers/SQS-batch
+encoding as pure, unit-tested functions; `PlayLog::send`, which sends through the one TIDAL session
+the process already owns (`TidalOpener::play_log()`, the same pattern as `catalog()`); and
+`SessionTracker`, a pure state machine (every method takes an injected timestamp, not the real
+clock, so it needs no real time to test) that turns `Position`/pause/resume/seek/`TrackEnded`-shaped
+events into a finished `PlaybackSession` once 30s have actually been heard. Nothing is wired to the
+engine or the daemon yet — `[tidal] report_plays` exists and defaults to `true`, but nothing reads
+it outside a test. No change to the wire protocol: this is entirely a `phoniad`-side, best-effort
+side effect, not something any client needs to see or control.

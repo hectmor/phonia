@@ -2052,6 +2052,7 @@ dependencies = [
  "tidlers",
  "tokio",
  "toml",
+ "uuid",
  "zbus",
 ]
 

@@ -8,6 +8,7 @@ pub mod diag;
 pub mod engine;
 pub mod openers;
 pub mod output;
+pub mod play_log;
 pub mod queue;
 pub mod replaygain;
 mod session;

@@ -269,6 +269,11 @@ impl TidalOpener {
         crate::catalog::TidalCatalog::new(self.http.clone(), self.session.clone())
     }
 
+    /// Reports finished plays to TIDAL, through the same login.
+    pub fn play_log(&self) -> crate::play_log::PlayLog {
+        crate::play_log::PlayLog::new(self.http.clone(), self.session.clone())
+    }
+
     /// Name and length of a TIDAL track, without streaming it.
     pub async fn describe(&self, id: &str) -> Result<SourceInfo, DescribeError> {
         let client = self

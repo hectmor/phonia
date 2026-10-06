@@ -28,9 +28,9 @@ decisions log, and the issue tracker alone.
 |---|---|---|
 | 0 — CLI prototype | [Fase 0](https://github.com/hectmor/phonia/milestone/1) | Done (#1–#7, #46) |
 | 1 — Daemon and playback engine | [Fase 1](https://github.com/hectmor/phonia/milestone/2) | Done (#8–#16, #47, #52, #53) |
-| 2 — TUI base | [Fase 2](https://github.com/hectmor/phonia/milestone/3) | In progress (see below) |
-| 3 — Audio quality | [Fase 3](https://github.com/hectmor/phonia/milestone/4) | In progress (see below) |
-| 4 — SONE-like features | [Fase 4](https://github.com/hectmor/phonia/milestone/5) | Not started |
+| 2 — TUI base | [Fase 2](https://github.com/hectmor/phonia/milestone/3) | Done (#17–#24, tagged `v0.2.0`) |
+| 3 — Audio quality | [Fase 3](https://github.com/hectmor/phonia/milestone/4) | Done (#25–#31) |
+| 4 — SONE-like features | [Fase 4](https://github.com/hectmor/phonia/milestone/5) | In progress (see below) |
 | 5 — Extras and packaging | [Fase 5](https://github.com/hectmor/phonia/milestone/6) | Partly started |
 
 Phases 0 and 1 delivered: TIDAL PKCE login, HiRes/DASH streaming, bit-perfect
@@ -47,10 +47,10 @@ desktop keyring, and TOML configuration.
 | #18 | The TUI as an IPC client: connect, reconnect, subscribe | Closed |
 | #22 | Queue view with editing (play, remove, move, clear) | Closed |
 | #23 | Playback bar: progress, format/quality, volume, shuffle/repeat | Closed |
-| #19 | Search (tracks, albums, artists, playlists) | Code complete (PRs #82–#87 merged); **issue left open on GitHub, worth closing by hand** |
+| #19 | Search (tracks, albums, artists, playlists) | Closed (PRs #82–#87) |
 | #20 | Album and artist views, opened from a search result | Closed |
-| #21 | Library: favorite tracks/albums and the user's playlists | Code complete (PRs #95–#98) |
-| #24 | Covers in the terminal (`ratatui-image`) | Code complete (PRs #99–#105, all 7 parts); **issue left open on GitHub, worth closing by hand** |
+| #21 | Library: favorite tracks/albums and the user's playlists | Closed (PRs #95–#98) |
+| #24 | Covers in the terminal (`ratatui-image`) | Closed (PRs #99–#105, all 7 parts) |
 
 The catalog (search, an album, an artist, and now the library) is served by
 the **daemon**, not the TUI process: the TUI depends only on `phonia-ipc`, so
@@ -67,17 +67,22 @@ done — it is its own product decision, not a leftover.
 |---|---|---|
 | #27 | Gapless playback | Closed (verified bit-exact against real TIDAL over `snd-aloop`) |
 | #29 | Quality tiers, a floor, and automatic fallback | Closed (parts 1–3); an optional part 4 (AAC decode for the lossy tiers) is not started and not blocking |
-| #25 | DAC capability detection | Code complete (PRs #106–#109, all 4 parts); **issue left open on GitHub, worth closing by hand** |
-| #26 | Per-track sample rate switching | Code complete, same plan and PRs as #25; **issue left open on GitHub, worth closing by hand** |
-| #28 | Signal path indicator in the TUI | Code complete (PRs #110–#112, all 3 parts); **issue left open on GitHub, worth closing by hand** |
-| #30 | ReplayGain in shared mode | Code complete (all 4 parts); **issue left open on GitHub, worth closing by hand** |
-| #31 | Hardware mixer volume | Code complete (all 3 parts); **issue left open on GitHub, worth closing by hand** |
+| #25 | DAC capability detection | Closed (PRs #106–#109, all 4 parts) |
+| #26 | Per-track sample rate switching | Closed, same plan and PRs as #25 |
+| #28 | Signal path indicator in the TUI | Closed (PRs #110–#112, all 3 parts) |
+| #30 | ReplayGain in shared mode | Closed (all 4 parts) |
+| #31 | Hardware mixer volume | Closed (all 3 parts) |
 
-### Phases 4 and 5
+### Phase 4 — SONE-like features
 
-Not started, except CI (#42) and rustfmt-in-CI (#50), both closed. Nothing
-here is planned in detail yet; issues #32–#45 hold one-line descriptions each,
-to be scoped with Opus when their turn comes.
+| Issue | What | Status |
+|---|---|---|
+| #120 | Play reporting: finished plays reach TIDAL's own Recently Played | In progress, part 1/2 |
+
+The rest of Phase 4 and all of Phase 5 are not started, except CI (#42) and
+rustfmt-in-CI (#50), both closed. Nothing else is planned in detail yet;
+issues #32–#45 hold one-line descriptions each, to be scoped with Opus when
+their turn comes.
 
 ## Right now
 
@@ -383,8 +388,49 @@ watcher's detection is working as meant.
 
 This closes #31: all 3 parts of the approved plan are merged.
 
-#25, #26, #28 and #30 are all code-complete but still open on GitHub
-(see "Conventions" below) — close them by hand when convenient.
+Phase 3 is now fully closed: #25 and #26 were the last two issues left
+open on GitHub after being code-complete for a while, closed by hand
+on 2026-10-04 alongside this update.
+
+**Phase 4 starts with #120 (play reporting)**, planned with Opus. Its one-line
+body ("Reports finished plays to TIDAL so Recently Played reflects what you
+listen to in SONE") turned out to name a *different* open-source Linux TIDAL
+client (`lullabyX/sone`), not phonia itself — its README is where that exact
+wording came from, and reading its play-reporting module during planning
+(GPL-3; read only for the protocol facts it had already live-verified, no
+code copied) corrected and filled in several gaps a first reading of TIDAL's
+own open-source SDKs (`tidal-sdk-web`, `tidal-sdk-android`) had left open.
+There is no documented "mark this played" endpoint: official apps send a
+`playback_session` event (group `play_log`) through TIDAL's internal event
+pipeline, `https://ec.tidal.com/api/event-batch` — undocumented, and TIDAL
+could change it without notice, but a failure here is always silent and
+never touches playback. See `docs/DECISIONS.md` for the full reasoning,
+including why the event must use the *mobile/Android* body shape rather than
+the plainer one a literal web-SDK reading would suggest (phonia's own TIDAL
+login is a native, not a browser, client), why `sourceType`/`sourceId` are
+not optional (a sourceless play is accepted but never shows up in Recently
+Played), and the full list of what is still `PROVISIONAL (#120)`.
+
+Decided with the user: implement it for real (accepting the undocumented-
+contract risk); `[tidal] report_plays`, file-only, **on by default** (the
+one place the user went against the recommended off-by-default); a 30-second
+flat "actually heard" threshold, TIDAL's own rule, not a guess; fire-and-
+forget with one in-memory retry, no disk-persisted outbox; ship reporting
+every play as `ITEM` + the track's own id for now, real album/playlist
+attribution left for a later issue.
+
+Part 1 (merged) adds `phonia-core`'s `play_log.rs`: the event's
+body/headers/SQS-batch-form encoding as pure, unit-tested functions,
+`PlayLog::send` (through the one TIDAL session the process already owns,
+`TidalOpener::play_log()`), and `SessionTracker`, a pure, clock-injected
+state machine that turns playback events into a finished `PlaybackSession`
+once 30 real seconds have been heard. `[tidal] report_plays` exists (default
+`true`) but nothing reads it outside a test yet — no engine, daemon or wire
+protocol changes in this part.
+
+Part 2 (not started) wires it into `phoniad`'s event loop and is the first
+part that actually sends anything; it ends with a mandatory live check
+against a real account to confirm (or correct) what is still provisional.
 
 ## Conventions this file assumes
 

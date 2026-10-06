@@ -36,7 +36,7 @@ pub fn build_http_client() -> Result<reqwest::Client> {
 ///
 /// The value for lossless HiRes streaming is `"HI_RES_LOSSLESS"`; TIDAL's plain `"HI_RES"` is its
 /// legacy MQA tier, which is not what we want.
-fn api_quality(quality: Quality) -> &'static str {
+pub(crate) fn api_quality(quality: Quality) -> &'static str {
     match quality {
         Quality::Low => "LOW",
         Quality::High => "HIGH",

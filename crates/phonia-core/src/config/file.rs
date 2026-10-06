@@ -202,6 +202,10 @@ pub struct Tidal {
     /// quietly playing worse. Default `lossless`.
     pub min_quality: Option<Quality>,
     pub session_store: Option<SessionStoreKind>,
+    /// Report a track to TIDAL once it has been heard long enough, so it shows up in Recently
+    /// Played on the account. Default on, like the official apps. No command-line flag: sending
+    /// your own listening activity to your account is a deliberate, written-down choice.
+    pub report_plays: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -252,6 +256,7 @@ release_after_pause = 30
 max_quality = "lossless"
 min_quality = "high"
 session_store = "file"
+report_plays = false
 
 [daemon]
 socket = "/run/user/1000/phonia/phoniad.sock"
@@ -277,7 +282,8 @@ replaygain = "album"
                 tidal: Tidal {
                     max_quality: Some(Quality::Lossless),
                     min_quality: Some(Quality::High),
-                    session_store: Some(SessionStoreKind::File)
+                    session_store: Some(SessionStoreKind::File),
+                    report_plays: Some(false),
                 },
                 daemon: Daemon {
                     socket: Some("/run/user/1000/phonia/phoniad.sock".into()),
