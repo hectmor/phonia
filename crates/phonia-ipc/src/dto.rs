@@ -475,6 +475,27 @@ pub struct PlaylistSummary {
     pub cover: Option<String>,
 }
 
+/// A track's lyrics (since 1.10). `lines` is empty when there is no time-synced version; `plain`
+/// is still `Some` in that case, so a client can fall back to showing it unsynced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Lyrics {
+    #[serde(default)]
+    pub lines: Vec<LyricLine>,
+    #[serde(default)]
+    pub plain: Option<String>,
+    #[serde(default)]
+    pub right_to_left: bool,
+    #[serde(default)]
+    pub provider: Option<String>,
+}
+
+/// One line of synced lyrics, timed from the start of the track (since 1.10).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LyricLine {
+    pub at_ms: u64,
+    pub text: String,
+}
+
 /// One page of a list that may be longer: `total` is how many there are in all, `offset` where
 /// this page starts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

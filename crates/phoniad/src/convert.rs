@@ -198,6 +198,22 @@ pub fn artist_summary(artist: &tidal_catalog::Artist) -> ipc::ArtistSummary {
     }
 }
 
+pub fn lyrics(lyrics: &tidal_catalog::Lyrics) -> ipc::Lyrics {
+    ipc::Lyrics {
+        lines: lyrics
+            .lines
+            .iter()
+            .map(|line| ipc::LyricLine {
+                at_ms: ms(line.at),
+                text: line.text.clone(),
+            })
+            .collect(),
+        plain: lyrics.plain.clone(),
+        right_to_left: lyrics.right_to_left,
+        provider: lyrics.provider.clone(),
+    }
+}
+
 pub fn playlist_summary(playlist: &tidal_catalog::Playlist) -> ipc::PlaylistSummary {
     ipc::PlaylistSummary {
         id: playlist.id.clone(),
@@ -725,6 +741,31 @@ mod tests {
     fn milliseconds_saturate_instead_of_overflowing() {
         assert_eq!(ms(Duration::MAX), u64::MAX);
         assert_eq!(ms(Duration::from_micros(1_999)), 1);
+    }
+
+    #[test]
+    fn lyrics_lines_carry_their_time_in_milliseconds() {
+        let found = tidal_catalog::Lyrics {
+            lines: vec![
+                tidal_catalog::LyricLine {
+                    at: Duration::from_millis(12_440),
+                    text: "You get a shiver in the dark".into(),
+                },
+                tidal_catalog::LyricLine {
+                    at: Duration::from_secs(20),
+                    text: String::new(),
+                },
+            ],
+            plain: Some("You get a shiver in the dark".into()),
+            right_to_left: false,
+            provider: Some("MUSIXMATCH".into()),
+        };
+        let dto = lyrics(&found);
+        assert_eq!(dto.lines[0].at_ms, 12_440);
+        assert_eq!(dto.lines[0].text, "You get a shiver in the dark");
+        assert_eq!(dto.lines[1].text, "");
+        assert_eq!(dto.provider.as_deref(), Some("MUSIXMATCH"));
+        assert!(!dto.right_to_left);
     }
 
     #[test]

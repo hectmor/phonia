@@ -54,6 +54,43 @@ const DESCRIBE_CONCURRENCY: usize = 8;
 /// Events held for a slow subscriber before it is told to resync.
 const EVENT_BACKLOG: usize = 1024;
 
+/// How many tracks' lyrics [`LyricsCache`] keeps at once.
+const LYRICS_CACHE_CAPACITY: usize = 64;
+
+/// A bounded in-memory cache of lyrics by track id, lost when the daemon restarts. Only `Some`
+/// and `None` answers are kept, never a failure: a transient TIDAL error is worth retrying, not
+/// caching. Eviction is FIFO, the simplest policy that bounds memory; lyrics are not asked for
+/// often enough for something smarter to matter.
+struct LyricsCache {
+    order: std::collections::VecDeque<String>,
+    entries: std::collections::HashMap<String, Option<ipc::Lyrics>>,
+}
+
+impl LyricsCache {
+    fn new() -> Self {
+        Self {
+            order: std::collections::VecDeque::new(),
+            entries: std::collections::HashMap::new(),
+        }
+    }
+
+    fn get(&self, id: &str) -> Option<Option<ipc::Lyrics>> {
+        self.entries.get(id).cloned()
+    }
+
+    fn insert(&mut self, id: String, lyrics: Option<ipc::Lyrics>) {
+        if !self.entries.contains_key(&id) {
+            self.order.push_back(id.clone());
+            if self.order.len() > LYRICS_CACHE_CAPACITY
+                && let Some(oldest) = self.order.pop_front()
+            {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.entries.insert(id, lyrics);
+    }
+}
+
 /// A bit-perfect report, stamped with the route id of the output whose sink produced it (see
 /// `convert::sink_report`'s own doc comment for why that has to happen where the sink is built,
 /// not later).
@@ -104,6 +141,9 @@ pub struct Daemon {
     /// Gated against the rest of a status with `SinkReport::applies_to` before it is shown, since
     /// nothing announces a sink closing or changing on its own.
     last_report: Mutex<Option<ipc::SinkReport>>,
+    /// Lyrics already fetched this run, so reopening the same track's lyrics panel does not hit
+    /// TIDAL again.
+    lyrics_cache: Mutex<LyricsCache>,
 }
 
 impl Daemon {
@@ -143,6 +183,7 @@ impl Daemon {
                 pid: std::process::id(),
             },
             last_report: Mutex::new(None),
+            lyrics_cache: Mutex::new(LyricsCache::new()),
         });
 
         // The volume can be changed from the desktop's mixer too; the daemon follows and announces it.
@@ -322,9 +363,10 @@ impl Daemon {
             ipc::CAP_GAPLESS.to_string(),
             ipc::CAP_QUALITY.to_string(),
         ];
-        // Only a daemon with a login to browse with can search.
+        // Only a daemon with a login to browse with can search, or fetch lyrics.
         if self.catalog.is_some() {
             capabilities.push(ipc::CAP_CATALOG.to_string());
+            capabilities.push(ipc::CAP_LYRICS.to_string());
         }
         ipc::ServerHello {
             protocol: ipc::PROTOCOL,
@@ -378,6 +420,7 @@ impl Daemon {
                 limit,
             } => self.playlists(from, offset, limit).await,
             Request::Library { limit } => self.library(limit).await,
+            Request::Lyrics { id } => self.lyrics(id).await,
             Request::Search {
                 query,
                 kinds,
@@ -471,6 +514,30 @@ impl Daemon {
                 let (code, message) = convert::catalog_error(&failure);
                 self::error(code, &message)
             }
+        }
+    }
+
+    /// A track's lyrics, synced or plain, cached in memory so asking again for the same track
+    /// does not hit TIDAL again. Read-only like `search`, so it does not take the control lock;
+    /// the server also runs it beside the connection's other requests, in case TIDAL is slow.
+    async fn lyrics(&self, id: String) -> Reply {
+        let catalog = match self.catalog_or_refuse("show lyrics from") {
+            Ok(catalog) => catalog,
+            Err(reply) => return reply,
+        };
+        if let Some(cached) = self.lyrics_cache.lock().unwrap().get(&id) {
+            return Reply::Ok(Payload::Lyrics { id, lyrics: cached });
+        }
+        match catalog.track_lyrics(id.clone()).await {
+            Ok(found) => {
+                let dto = found.as_ref().map(convert::lyrics);
+                self.lyrics_cache
+                    .lock()
+                    .unwrap()
+                    .insert(id.clone(), dto.clone());
+                Reply::Ok(Payload::Lyrics { id, lyrics: dto })
+            }
+            Err(failure) => catalog_failure(&failure),
         }
     }
 

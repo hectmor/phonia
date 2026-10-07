@@ -286,9 +286,10 @@ fn the_server_banner() {
                 CAP_GAPLESS.into(),
                 CAP_QUALITY.into(),
                 CAP_CATALOG.into(),
+                CAP_LYRICS.into(),
             ],
         }),
-        r#"{"type":"hello","protocol":{"major":1,"minor":9},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","catalog"]}"#,
+        r#"{"type":"hello","protocol":{"major":1,"minor":10},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","catalog","lyrics"]}"#,
     );
 }
 
@@ -1124,7 +1125,7 @@ fn versions_are_compatible_across_minors_but_not_majors() {
     assert!(v(1, 0).compatible_with(v(1, 7)));
     assert!(v(1, 7).compatible_with(v(1, 0)));
     assert!(!v(1, 0).compatible_with(v(2, 0)));
-    assert_eq!(PROTOCOL, v(1, 9));
+    assert_eq!(PROTOCOL, v(1, 10));
 }
 
 #[test]
@@ -1319,4 +1320,64 @@ fn an_album_from_before_the_views_and_kinds_from_the_future_still_parse() {
     )
     .unwrap();
     assert!(matches!(payload, Payload::Artist { bio: None, .. }));
+}
+
+#[test]
+fn a_1_9_daemon_has_no_lyrics_capability() {
+    let hello = r#"{"type":"hello","protocol":{"major":1,"minor":9},"server":{"name":"phoniad","version":"0.1.0","pid":1},"capabilities":["volume","quality","catalog"]}"#;
+    let ServerMessage::Hello(hello) = serde_json::from_str(hello).unwrap() else {
+        panic!("not a hello")
+    };
+    assert!(!hello.capabilities.iter().any(|c| c == CAP_LYRICS));
+}
+
+#[test]
+fn the_lyrics_request_and_its_answers() {
+    request(
+        1,
+        Request::Lyrics {
+            id: "233059491".into(),
+        },
+        r#"{"id":1,"request":{"type":"lyrics","id":"233059491"}}"#,
+    );
+    // Synced: timestamped lines, kept in milliseconds, with the provider credited.
+    response(
+        1,
+        Reply::Ok(Payload::Lyrics {
+            id: "233059491".into(),
+            lyrics: Some(Lyrics {
+                lines: vec![LyricLine {
+                    at_ms: 12_440,
+                    text: "You get a shiver in the dark".into(),
+                }],
+                plain: Some("You get a shiver in the dark".into()),
+                right_to_left: false,
+                provider: Some("MUSIXMATCH".into()),
+            }),
+        }),
+        r#"{"type":"response","id":1,"ok":{"type":"lyrics","id":"233059491","lyrics":{"lines":[{"at_ms":12440,"text":"You get a shiver in the dark"}],"plain":"You get a shiver in the dark","right_to_left":false,"provider":"MUSIXMATCH"}}}"#,
+    );
+    // Plain only: TIDAL has the text but no time-synced version.
+    response(
+        2,
+        Reply::Ok(Payload::Lyrics {
+            id: "1".into(),
+            lyrics: Some(Lyrics {
+                lines: vec![],
+                plain: Some("Some words".into()),
+                right_to_left: false,
+                provider: None,
+            }),
+        }),
+        r#"{"type":"response","id":2,"ok":{"type":"lyrics","id":"1","lyrics":{"lines":[],"plain":"Some words","right_to_left":false,"provider":null}}}"#,
+    );
+    // None at all, for an instrumental.
+    response(
+        3,
+        Reply::Ok(Payload::Lyrics {
+            id: "518338".into(),
+            lyrics: None,
+        }),
+        r#"{"type":"response","id":3,"ok":{"type":"lyrics","id":"518338","lyrics":null}}"#,
+    );
 }

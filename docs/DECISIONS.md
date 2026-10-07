@@ -1730,3 +1730,54 @@ unlogged in the test output in favor of the already-correct `None` outcome eithe
 
 Part 2 (not started) is the wire protocol: `Request::Lyrics`, `CAP_LYRICS`, protocol 1.9 → 1.10,
 the daemon-side in-memory cache. Part 3 (not started) is the TUI panel itself.
+
+## 2026-10-07 — #32 part 2: `Request::Lyrics`, the daemon's own cache, `ctl lyrics`
+
+Protocol 1.9 → 1.10. `Request::Lyrics { id }`, answered with `Payload::Lyrics { id, lyrics:
+Option<Lyrics> }` — `id` is repeated in the answer, the same reason `Payload::Tracks`/`Albums`
+repeat the `from` they were asked about: a client that moved on to another track by the time a slow
+answer arrives needs to tell "stale" from "current" without guessing from arrival order alone. New
+wire DTOs `Lyrics { lines: Vec<LyricLine>, plain: Option<String>, right_to_left: bool, provider:
+Option<String> }` and `LyricLine { at_ms: u64, text: String }`, mirroring `phonia-core`'s own types
+from part 1 field for field except `at_ms` in place of a `Duration` (the wire is plain JSON
+everywhere else too: `TrackSummary::duration_ms`, `Status::position_ms`, etc. — nothing here is a
+new convention). A new `CAP_LYRICS` capability, announced only alongside `CAP_CATALOG` (no catalog,
+no lyrics either): `phoniad::Daemon::hello()` pushes it right after `CAP_CATALOG`, matching how
+`CAP_QUALITY` and the others were each added when their request shipped.
+
+`Daemon::lyrics()` is read-only like `search`/`album`/`artist` (no `control_lock`), refused with
+`ErrorCode::Unsupported` through the same `catalog_or_refuse` helper, and `server.rs` runs it
+through `run_beside` alongside them: TIDAL may take a moment, and a slow lyrics fetch must not hold
+up the rest of a connection's requests (covered by
+`asking_for_lyrics_does_not_hold_up_the_requests_behind_it`, copying the existing
+`asking_for_an_artist_does_not_hold_up_the_requests_behind_it`/`listing_an_album_does_not_hold_up_
+the_requests_behind_it` pattern with a `.delayed()` fake catalog).
+
+**The in-memory cache decided in part 1** is a new `LyricsCache` private to `daemon.rs`: a
+`HashMap<String, Option<ipc::Lyrics>>` plus a `VecDeque<String>` for FIFO insertion order, capped
+at 64 tracks (`LYRICS_CACHE_CAPACITY`) — hand-rolled rather than pulling in an `lru` crate, since
+nothing else in the workspace depends on one and a 64-line structure needs no library for
+eviction this simple. Critically, **only `Some`/`None` answers are cached, never a `CatalogError`**
+— a transient TIDAL failure (rate limited, briefly unavailable) must stay retryable the next time
+the panel is reopened, not stick as a cached failure until the daemon restarts; covered by
+`a_lyrics_failure_is_not_cached_and_can_be_retried` (two failing asks, two calls reaching the fake
+catalog) against `lyrics_answer_the_id_asked_for_and_are_cached_after_the_first_ask` (two successful
+asks, one call). Lost on restart, same as every other daemon-side cache in this project — nothing
+here is persisted to disk.
+
+A new `phonia ctl lyrics [<id>]` prints synced lines as `[m:ss] text` (via the existing
+`phonia_ipc::fmt::ms`) or the plain text with a "not synced" note, falls back to the track playing
+now (its `tidal:` source, stripped of the prefix) when no id is given, and refuses plainly for a
+local file playing (no TIDAL id to look up) or nothing playing at all — the same shape
+`require_catalog` already gives `album`/`artist`/`library`, extended with the extra `CAP_LYRICS`
+check since an older daemon could have `CAP_CATALOG` without it.
+
+**Verified live against the real daemon and the real account** (this part's end-to-end check,
+standing in for a client exercising `Request::Lyrics` before the TUI exists to do it): `phonia ctl
+lyrics 233059491` printed all 39 lines of "Sultans of Swing" timestamped `[m:ss]`, ending with
+"Lyrics via MUSIXMATCH"; `phonia ctl lyrics 518338` (the instrumental) answered "TIDAL has no
+lyrics for this track"; with Sultans of Swing queued and playing, `phonia ctl lyrics` with no id
+resolved to the same 39 lines automatically.
+
+Part 3 (not started, last) is the TUI panel itself: `Section::Lyrics`, current-line tracking for
+synced lyrics, manual scrolling for plain ones.
