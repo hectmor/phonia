@@ -1649,3 +1649,84 @@ next line, with the queue list and the bar's own compact line both still showing
 and below it.
 
 This closes #124: both parts of the approved plan are merged.
+
+## 2026-10-07 — #32 part 1: lyrics read raw, like search already does, not through `tidlers`
+
+The next issue of Phase 4, body: "Mostrar letras sincronizadas con la reproducción en la TUI,
+obtenidas a partir de la pista actual" (show lyrics synced to playback in the TUI, for the current
+track).
+
+TIDAL's endpoint is `GET /tracks/{id}/lyrics` on the same host `playbackinfopostpaywall` already
+uses (`tidlers::urls::API_V1_LOCATION`), confirmed externally (the `minim` Python library's
+documented `PrivateTracksAPI.get_track_lyrics`, and community LRC-export tools) before being
+confirmed again directly against a real account in this part. The answer has `lyrics` (plain,
+unsynced text) and `subtitles` (the time-synced version, LRC format: lines like
+`[01:02.34]Some words`).
+
+**`tidlers` 0.5.0 (already a dependency) wraps this exact endpoint, `TidalClient::get_track_lyrics`
+(`~/.cargo/registry/.../tidlers-0.5.0/src/client/api/track.rs:276-294`) — but its `LyricsResponse`
+type (`.../tidlers-0.5.0/src/client/models/track/mod.rs:64-72`) has no field for `subtitles` at
+all**, confirmed by reading the struct directly, not inferred: only `track_id`, `lyrics_provider`,
+`provider_commontrack_id`, `provider_lyrics_id`, `lyrics: String`, `right_to_left: bool`. No
+`#[serde(deny_unknown_fields)]` either, so calling `tidlers`' own wrapper parses successfully and
+silently drops exactly the field #32 is about. This is the same situation `catalog/remote.rs`'s own
+module doc already describes for why it makes its own HTTP calls instead of using `tidlers`'
+search/listing calls (required fields TIDAL sometimes omits, breaking the whole answer) — lyrics is
+the second, independent case of it, not a new problem to solve differently. `TidalCatalog::
+artist_bio`/`bio_from` (a 404 means "no bio," not an error) is the closest existing precedent and
+is what `track_lyrics`/`lyrics_from` mirror directly, down to folding a 200-with-everything-blank
+response into the same `None` a 404 gives (confirmed as a real, not hypothetical, case in part 2 of
+#25/#26's own investigation style: never assumed, always checked against a real response before
+shipping).
+
+**Decided with the user** (recommended options throughout, via `AskUserQuestion`): (1) **pull, not
+push** — a client asks for lyrics (a new `Request::Lyrics` protocol addition, part 2) only when it
+actually opens the Lyrics panel or the track changes while that panel is open, rather than the
+daemon fetching lyrics for every track regardless of whether anyone looks — avoids an unwanted
+network call per track and keeps the protocol simpler (no new `Event`, no staleness-gating logic
+like `SinkReport::applies_to` had to grow); the cost is a short loading state the first time a
+track's panel opens, gone on reopening thanks to the daemon's own cache; (2) when there's plain
+text but no synced version, show it unsynced with a "not synced" notice, rather than hiding lyrics
+that do exist just because they aren't timed; a track with nothing at all says so plainly; a local
+file says lyrics are TIDAL-only, since it has no TIDAL id to look up and guessing by title/artist
+risks the wrong song's lyrics entirely; (3) caching is in-memory only, bounded, on the daemon
+(matching `TidalOpener`'s own `delivered_tiers` precedent) — nothing persisted to disk, no
+precedent for that anywhere in this project; (4) a fourth TUI section, `Section::Lyrics`, not an
+overlay or a single-line hint under the title — synced lyrics follow playback on their own (current
+line centered and bold, sung lines dimmed, no manual scroll needed), plain lyrics scroll manually
+like the help panel already does; (5) right-to-left text (Arabic, Hebrew) is right-aligned and left
+to the terminal to order correctly — `ratatui` does no bidi shaping of its own, and attempting it
+by hand would be a lot of work for a corner case. A `CAP_LYRICS` capability bit is new (so an older
+daemon or a client talking to one can tell lyrics support apart from catalog support generally),
+settled without needing to ask, the same reasoning `CAP_QUALITY` already established when
+`SetMaxQuality` shipped.
+
+**Part 1 (this part, merged): `phonia-core` only, no protocol change.** `Catalog` (the trait both
+`TidalCatalog` and `fake::FakeCatalog` implement) gains `track_lyrics(id) -> Result<Option<Lyrics>,
+CatalogError>`; `Lyrics { lines: Vec<LyricLine>, plain: Option<String>, right_to_left: bool,
+provider: Option<String> }`, `LyricLine { at: Duration, text: String }`. `catalog/remote.rs` adds
+`RawLyrics`/`lyrics_from`/`parse_lyrics`, calling the endpoint through the catalog's own existing
+`get()` helper (the same one `search`/`album`/`artist_bio`/etc. already use) — no new session or
+credentials plumbing needed, it was already there. A new, pure `catalog/lrc.rs` module parses the
+LRC text: one or more leading `[mm:ss]`/`[mm:ss.xx]`/`[mm:ss.xxx]` tags per line (a repeated chorus
+line gets one `LyricLine` per tag), metadata tags (`[ar:]`, `[ti:]`, `[length:]`...) ignored,
+`[offset:±ms]` shifting every timestamp from that point on, a timestamp with nothing after it kept
+as an empty line (TIDAL's way of marking an instrumental gap — dropping it would make the display
+look stuck on the previous line during that gap instead), a malformed line skipped without losing
+the rest of the parse, output always sorted by time regardless of source order. `fake::FakeCatalog`
+gains `with_lyrics(id, Lyrics)` and records the call like every other method does, for tests
+upstream of this that need a track with (or without) lyrics.
+
+**Verified live against a real account, not assumed from documentation alone**: Dire Straits'
+"Sultans of Swing" (id `233059491`, the same track used throughout #30/#120's own real
+verifications) parsed into 39 correctly time-ordered lines, provider `MUSIXMATCH`, first line
+`12.44s "You get a shiver in the dark"` — matching the real song, confirming the LRC parser against
+a genuine response rather than a hand-built fixture. A genuinely instrumental track (id `518338`)
+correctly answered `None`, settling (for this account, this track) that a lyrics-less track folds
+cleanly into the same `bio_from`-style handling rather than needing a separate code path — though
+whether that specific track 404s or 200s-with-blank-fields on TIDAL's side was deliberately left
+unlogged in the test output in favor of the already-correct `None` outcome either way, since
+`lyrics_from`/`parse_lyrics` handle both identically by design.
+
+Part 2 (not started) is the wire protocol: `Request::Lyrics`, `CAP_LYRICS`, protocol 1.9 → 1.10,
+the daemon-side in-memory cache. Part 3 (not started) is the TUI panel itself.
