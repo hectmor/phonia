@@ -89,7 +89,7 @@ their turn comes.
 
 | Issue | What | Status |
 |---|---|---|
-| #124 | Layout and appearance modifying for better user experience | In progress, part 1/2 |
+| #124 | Layout and appearance modifying for better user experience | Closed (both parts merged) |
 
 Brand new milestone, started right after #120. The owner's concrete ask
 (from a screenshot of TIDAL's own web player): a visually bigger, bolder
@@ -495,9 +495,23 @@ them as `Artist - Title` everywhere that used to show the joined string
 header/bar/queue list), so the display reads exactly as before until
 part 2 changes it on purpose.
 
-Part 2 (not started) is the visual work itself: the bold title and the
-quieter artist line (with a small `◉` marker) in the header beside the
-cover.
+Part 2 (merged, last) is the visual work itself: `now_playing_header` now
+shows the title alone (bold, `theme.accent`, already the project's
+existing bold-and-colored style -- no new one needed), the artist on its
+own quieter line beneath it (`theme.dim`, prefixed `◉ `), and the quality
+tier, each line shown only when known. That header is now reserved by
+screen size alone whenever a track is playing, cover or no cover (a new
+`HEADER_TEXT_ROWS = 4` fixed-height path alongside the existing
+cover-sized one) -- the same "reserved on content existing, never on
+content having arrived" discipline #24's own cover reservation already
+established, just extended to "no cover at all." `BAR_HEIGHT` and #28's
+own fixed-bar-height invariant are untouched: the bar's own
+`connected_line()` still shows one compact `Artist - Title` line via
+part 1's `fmt::track_name`, unchanged. No protocol change, no new
+dependency, 16-color theme untouched -- all as decided.
+
+This closes #124: both parts of the approved plan are merged. Verified
+live against the real daemon and a real TIDAL track over a pty capture.
 
 ## Conventions this file assumes
 

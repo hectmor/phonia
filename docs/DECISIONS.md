@@ -1610,5 +1610,42 @@ list`/`watch`, the no-daemon `phonia play`'s own status line and queue listing, 
 genuine behavior change needed fixing before merge — it had asserted the old joined string, which
 is now the correct place to assert `title`/`artist` as two separate fields instead.
 
-Part 2 (not started) is the actual visual work: the bold title and the quieter `◉ Artist` line in
-the header, per decisions 1-3 above.
+Part 2 (merged, last) is the actual visual work, per decisions 1-3 above. `now_playing_header`
+(`view/mod.rs`) splits what used to be one `fmt::track_name` line into the title alone, styled
+`theme.accent` -- already bold (plus green, with color) since that style already existed for this
+exact line; no new theme style was needed, only reusing it for less text. The artist, when known,
+gets its own line beneath it in `theme.dim`, prefixed `◉ ` (a plain Unicode glyph, not a Nerd Font
+icon or a downloaded image -- portable, and the only one of the three icon options that didn't
+need a second image fetch or risk being illegible at 1-2 cells, per the investigation).
+
+**The header is now reserved whenever a track is playing, not only when a cover could show.** A
+new `HEADER_TEXT_ROWS = 4` fixed-height path in `draw_queue` sits alongside the existing
+image-sized one: when `covers.picker()` is `None`, there's no cover id, or the image genuinely
+doesn't fit, but a track is still playing, the header reserves exactly 4 rows (title, artist,
+quality, the same trailing blank line it always had) at full width instead of reserving nothing.
+This is deliberately *not* scaled to screen height the way the cover's own reservation is (`(area.
+height / 3).clamp(6, 12)`): that scaling exists so a *picture* looks reasonably sized on a tall
+terminal, which has no equivalent for plain text -- four lines of text never benefit from more
+room, so the height is simply fixed at exactly what the content can ever be, content is never
+taller than its own reservation. This follows the same "reserved on content existing, never on
+content having arrived" discipline #24's own cover reservation established (`draw_queue`'s
+existing comment on the image path), now applied to the no-cover path it never covered before.
+`BAR_HEIGHT` and #28's own fixed-height-bar invariant are completely untouched: `connected_line()`
+still shows one compact `Artist - Title` line via part 1's `fmt::track_name`, exactly as before.
+
+A new test, `the_title_and_artist_show_above_the_queue_even_with_no_cover_at_all`, pins this down
+directly (a track playing, no cover, `Covers::disabled()`, asserting both the title and `◉ Artist`
+render, with the queue list still visible beneath). The existing
+`with_covers_off_or_nothing_playing_the_queue_layout_is_exactly_as_before` test still passes
+unmodified -- not because nothing changed (the header's presence genuinely did), but because that
+test only ever compares two covers-disabled renders against *each other*, both of which gained the
+new header identically, so the comparison it actually makes (whether a cover id with no picker
+differs from no cover id at all) still holds.
+
+**Verified live, not only with `TestBackend` unit tests**: a scratch daemon on a PipeWire null
+sink, a real TIDAL track ("Sultans Of Swing," Dire Straits) played through a real pty, confirming
+`Sultans Of Swing` rendered as its own bold line immediately followed by `◉ Dire Straits` on the
+next line, with the queue list and the bar's own compact line both still showing correctly beneath
+and below it.
+
+This closes #124: both parts of the approved plan are merged.

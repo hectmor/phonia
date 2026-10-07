@@ -25,6 +25,11 @@ const SIDEBAR_WIDTH: u16 = 14;
 /// connection state, so the main panel's own height never depends on what is playing or whether a
 /// signal-path verdict has arrived yet.
 const BAR_HEIGHT: u16 = 5;
+/// The rows the now-playing header takes when there is no cover beside it to size it by (no
+/// picker, no cover id, or not enough room for one): title, artist, quality and a blank
+/// separator -- exactly what [`now_playing_header`] can ever produce, text never needing more
+/// room the way an image would.
+const HEADER_TEXT_ROWS: u16 = 4;
 
 /// The three areas of the screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,11 +157,11 @@ fn draw_queue(
         );
         return;
     };
-    let cover = state
+    let track = state
         .status
         .as_ref()
-        .and_then(|status| status.track.as_ref())
-        .and_then(|track| track.cover.as_deref());
+        .and_then(|status| status.track.as_ref());
+    let cover = track.and_then(|track| track.cover.as_deref());
     // Same rule as an opened album's or playlist's header (see `browse::draw_track_list`):
     // reserved only when a cover could actually show here, never on whether it has arrived yet.
     let reserved = covers.picker().and_then(|picker| {
@@ -173,6 +178,15 @@ fn draw_queue(
                 Layout::horizontal([Constraint::Length(cells.width), Constraint::Min(0)])
                     .areas(top);
             (Some((cover_area, url)), Some(header_area), list_area)
+        }
+        // No image to size the header by (no picker, no cover, or not enough room for one), but
+        // there is still a track to name: reserved on "is one playing", never on whether a cover
+        // could have shown -- the same discipline as the cover case above, just without a cover.
+        None if track.is_some() && area.height >= HEADER_TEXT_ROWS => {
+            let [header_area, list_area] =
+                Layout::vertical([Constraint::Length(HEADER_TEXT_ROWS), Constraint::Min(0)])
+                    .areas(area);
+            (None, Some(header_area), list_area)
         }
         None => (None, None, area),
     };
@@ -195,9 +209,10 @@ fn draw_queue(
     );
 }
 
-/// The currently playing track's name, and its quality tier when it is streamed from TIDAL, next
-/// to its cover. Only shown next to a cover that is itself only reserved when there is a track
-/// playing, so this is never called with nothing to show.
+/// The currently playing track: its title (bold, the thing to look at), the artist on its own
+/// quieter line beneath it, and the quality tier when it is streamed from TIDAL. Reserved
+/// whenever a track is playing, cover or no cover (see `draw_queue`), so this is never called
+/// with nothing to show.
 fn now_playing_header<'a>(state: &State, theme: &Theme) -> Vec<Line<'a>> {
     let Some(track) = state
         .status
@@ -206,12 +221,15 @@ fn now_playing_header<'a>(state: &State, theme: &Theme) -> Vec<Line<'a>> {
     else {
         return Vec::new();
     };
-    let name = phonia_ipc::fmt::track_name(
-        track.title.as_deref(),
-        track.artist.as_deref(),
-        track.source.as_deref(),
-    );
-    let mut lines = vec![Line::styled(name, theme.accent)];
+    let title = track
+        .title
+        .clone()
+        .or_else(|| track.source.clone())
+        .unwrap_or_else(|| "?".to_string());
+    let mut lines = vec![Line::styled(title, theme.accent)];
+    if let Some(artist) = &track.artist {
+        lines.push(Line::styled(format!("◉ {artist}"), theme.dim));
+    }
     if let Some(quality) = track.quality {
         lines.push(Line::styled(
             phonia_ipc::fmt::stream_quality(&quality),
@@ -2364,6 +2382,38 @@ mod tests {
         // Something playing with a cover id, but covers are off.
         let covers_off = screen_with(&playing_with_a_cover(), &Covers::disabled(), 100, 30);
         assert_eq!(covers_off, screen(&playing_with_a_cover(), 100, 30));
+    }
+
+    #[test]
+    fn the_title_and_artist_show_above_the_queue_even_with_no_cover_at_all() {
+        let mut state = connected();
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::TrackStarted {
+                item_id: None,
+                source: Some("tidal:1".into()),
+                title: Some("Sultans of Swing".into()),
+                artist: Some("Dire Straits".into()),
+                duration_ms: None,
+                spec: phonia_ipc::Spec {
+                    sample_rate: 44_100,
+                    channels: 2,
+                    bits_per_sample: 16,
+                },
+                gapless: false,
+                quality: None,
+                cover: None,
+                replay_gain: None,
+            }),
+        );
+        // Covers disabled entirely: no picker, so a cover could never show here either way.
+        let text = screen(&state, 100, 30);
+        assert!(text.contains("Sultans of Swing"), "{text}");
+        assert!(text.contains("◉ Dire Straits"), "{text}");
+        assert!(
+            text.contains("Queue (0)"),
+            "the list is still shown below the header: {text}"
+        );
     }
 
     #[test]
