@@ -32,6 +32,7 @@ decisions log, and the issue tracker alone.
 | 3 — Audio quality | [Fase 3](https://github.com/hectmor/phonia/milestone/4) | Done (#25–#31) |
 | 4 — SONE-like features | [Fase 4](https://github.com/hectmor/phonia/milestone/5) | In progress (see below) |
 | 5 — Extras and packaging | [Fase 5](https://github.com/hectmor/phonia/milestone/6) | Partly started |
+| 6 — Layout and appearance | [Fase 6](https://github.com/hectmor/phonia/milestone/7) | In progress (see below) |
 
 Phases 0 and 1 delivered: TIDAL PKCE login, HiRes/DASH streaming, bit-perfect
 ALSA output, a playback engine and in-memory queue, the daemon and its IPC
@@ -83,6 +84,18 @@ The rest of Phase 4 and all of Phase 5 are not started, except CI (#42) and
 rustfmt-in-CI (#50), both closed. Nothing else is planned in detail yet;
 issues #32–#45 hold one-line descriptions each, to be scoped with Opus when
 their turn comes.
+
+### Phase 6 — Layout and appearance
+
+| Issue | What | Status |
+|---|---|---|
+| #124 | Layout and appearance modifying for better user experience | In progress, part 1/2 |
+
+Brand new milestone, started right after #120. The owner's concrete ask
+(from a screenshot of TIDAL's own web player): a visually bigger, bolder
+track title with the artist on its own quieter line underneath, instead
+of today's single `Artist - Title` string — see `docs/DECISIONS.md` for
+the full design discussion and the decisions made.
 
 ## Right now
 
@@ -455,6 +468,36 @@ plan had set aside never had to be built). The pinned client identity in
 but nothing stops TIDAL from tightening what it accepts later.
 
 This closes #120: both parts of the approved plan are merged.
+
+**#124 (layout and appearance) is next**, planned with Opus from a
+screenshot of TIDAL's own web player. Decided with the user (recommended
+options throughout): bold-weight hierarchy for now, not a literal big-text
+widget (`tui-big-text`'s `font8x8` glyphs don't cover enough of TIDAL's
+real catalog — no Cyrillic/CJK beyond hiragana, no curly quotes/em dashes
+without normalizing, and at 4 columns per character most real titles
+wouldn't fit anyway); the 16-ANSI-color deferral stays in place, untouched;
+the bigger title lives in the header beside the cover (reserved even with
+no picker/cover), never in the fixed-height bottom bar, so `BAR_HEIGHT`
+and #28's own invariant are untouched; a real `artist` field is added to
+the protocol as its own prerequisite PR, not folded into the visual work.
+
+Part 1 (merged) is that prerequisite: protocol 1.8 → 1.9. `artist:
+Option<String>` is new on `Track`, `QueueItem` and `TrackStarted`
+(`#[serde(default)]`, so an older 1.8 client still works — it just shows
+the title alone); `title` itself no longer includes the artist.
+`TidalOpener::describe()` (`openers.rs`) keeps them separate from TIDAL's
+own response instead of joining them immediately, threaded through
+`SourceInfo`/`QueueTrack`/`TrackMeta` the same way `cover`/`album_id`
+already are. **No visible change in this part**: a new
+`phonia_ipc::fmt::track_name(title, artist, source)` helper recombines
+them as `Artist - Title` everywhere that used to show the joined string
+(`phonia ctl status`/`queue`/`watch`, the no-daemon player, and the TUI's
+header/bar/queue list), so the display reads exactly as before until
+part 2 changes it on purpose.
+
+Part 2 (not started) is the visual work itself: the bold title and the
+quieter artist line (with a small `◉` marker) in the header beside the
+cover.
 
 ## Conventions this file assumes
 

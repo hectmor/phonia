@@ -656,6 +656,7 @@ fn on_daemon_event(state: &mut State, event: Event) -> Effects {
             item_id,
             source,
             title,
+            artist,
             duration_ms,
             spec,
             quality,
@@ -668,6 +669,7 @@ fn on_daemon_event(state: &mut State, event: Event) -> Effects {
                     item_id,
                     source,
                     title,
+                    artist,
                     duration_ms,
                     quality,
                     cover,
@@ -2513,6 +2515,7 @@ mod tests {
                 item_id: None,
                 source: Some("tidal:1".into()),
                 title: Some("Song".into()),
+                artist: None,
                 duration_ms: None,
                 spec: phonia_ipc::Spec {
                     sample_rate: 44_100,
@@ -2571,6 +2574,7 @@ mod tests {
                 item_id: None,
                 source: Some("tidal:2".into()),
                 title: Some("Another Song".into()),
+                artist: None,
                 duration_ms: None,
                 spec: phonia_ipc::Spec {
                     sample_rate: 44_100,
@@ -2673,6 +2677,7 @@ mod tests {
                 id: ItemId(n),
                 source: format!("file:/t{n}.flac"),
                 title: None,
+                artist: None,
                 duration_ms: None,
                 cover: None,
             })

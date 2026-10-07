@@ -206,11 +206,11 @@ fn now_playing_header<'a>(state: &State, theme: &Theme) -> Vec<Line<'a>> {
     else {
         return Vec::new();
     };
-    let name = track
-        .title
-        .clone()
-        .or_else(|| track.source.clone())
-        .unwrap_or_default();
+    let name = phonia_ipc::fmt::track_name(
+        track.title.as_deref(),
+        track.artist.as_deref(),
+        track.source.as_deref(),
+    );
     let mut lines = vec![Line::styled(name, theme.accent)];
     if let Some(quality) = track.quality {
         lines.push(Line::styled(
@@ -252,7 +252,11 @@ fn queue_lines<'a>(
         .map(|(index, item)| {
             let current = queue.current == Some(item.id);
             let marker = if current { ">" } else { " " };
-            let name = item.title.clone().unwrap_or_else(|| item.source.clone());
+            let name = phonia_ipc::fmt::track_name(
+                item.title.as_deref(),
+                item.artist.as_deref(),
+                Some(&item.source),
+            );
             let length = item
                 .duration_ms
                 .map(|ms| format!("  [{}]", phonia_ipc::fmt::ms(ms)))
@@ -280,11 +284,14 @@ fn connected_line<'a>(state: &State, theme: &Theme) -> Line<'a> {
     let Some(status) = &state.status else {
         return Line::styled("Connected", theme.text);
     };
-    let name = status
-        .track
-        .as_ref()
-        .and_then(|track| track.title.clone().or_else(|| track.source.clone()))
-        .unwrap_or_else(|| "Nothing playing".to_string());
+    let name = match &status.track {
+        Some(track) => phonia_ipc::fmt::track_name(
+            track.title.as_deref(),
+            track.artist.as_deref(),
+            track.source.as_deref(),
+        ),
+        None => "Nothing playing".to_string(),
+    };
     // Format, rate and quality move to the signal-path line below, next to the device they
     // actually reached: saying them here too would mean every playing track reads them twice.
     Line::styled(format!("{}  {name}", state_word(status.state)), theme.text)
@@ -676,6 +683,7 @@ mod tests {
                 item_id: None,
                 source: Some("tidal:1".into()),
                 title: Some("Aerodynamic".into()),
+                artist: None,
                 duration_ms: Some(343_000),
                 spec: phonia_ipc::Spec {
                     sample_rate: 44_100,
@@ -740,6 +748,7 @@ mod tests {
                             id: ItemId(1),
                             source: "file:/a.flac".into(),
                             title: Some("A".into()),
+                            artist: None,
                             duration_ms: Some(65_000),
                             cover: None,
                         },
@@ -747,6 +756,7 @@ mod tests {
                             id: ItemId(2),
                             source: "tidal:9".into(),
                             title: None,
+                            artist: None,
                             duration_ms: None,
                             cover: None,
                         },
@@ -868,6 +878,7 @@ mod tests {
             item_id: None,
             source: Some("tidal:1".into()),
             title: Some("Song".into()),
+            artist: None,
             duration_ms: None,
             quality: None,
             cover: None,
@@ -927,6 +938,7 @@ mod tests {
                 item_id: None,
                 source: None,
                 title: Some("Song".into()),
+                artist: None,
                 duration_ms: Some(60_000),
                 spec: phonia_ipc::Spec {
                     sample_rate: 96_000,
@@ -959,6 +971,7 @@ mod tests {
                 item_id: None,
                 source: Some("tidal:1".into()),
                 title: Some("Aerodynamic".into()),
+                artist: None,
                 duration_ms: Some(343_000),
                 spec,
                 gapless: false,
@@ -1095,6 +1108,7 @@ mod tests {
                 item_id: None,
                 source: Some("tidal:2".into()),
                 title: Some("Another Song".into()),
+                artist: None,
                 duration_ms: None,
                 spec: SPEC_96K,
                 gapless: false,
@@ -1281,6 +1295,7 @@ mod tests {
                 id: ItemId(n),
                 source: format!("file:/t{n}.flac"),
                 title: Some(format!("Track {n}")),
+                artist: None,
                 duration_ms: None,
                 cover: None,
             })
@@ -2251,6 +2266,7 @@ mod tests {
                 item_id: None,
                 source: Some("tidal:1".into()),
                 title: Some("Aerodynamic".into()),
+                artist: None,
                 duration_ms: Some(343_000),
                 spec: phonia_ipc::Spec {
                     sample_rate: 44_100,
@@ -2324,6 +2340,7 @@ mod tests {
                     item_id: None,
                     source: Some("tidal:1".into()),
                     title: Some("Aerodynamic".into()),
+                    artist: None,
                     duration_ms: None,
                     spec: phonia_ipc::Spec {
                         sample_rate: 44_100,

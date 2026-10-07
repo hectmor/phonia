@@ -254,6 +254,7 @@ impl TestSupplier {
             let meta = TrackMeta {
                 track,
                 title: None,
+                artist: None,
                 duration: None,
                 quality: None,
                 cover: None,
@@ -858,6 +859,7 @@ fn load_results_nobody_asked_for_are_ignored() {
         TrackMeta {
             track: TrackRef("ghost".into()),
             title: None,
+            artist: None,
             duration: None,
             quality: None,
             cover: None,

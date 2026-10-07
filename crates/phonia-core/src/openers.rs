@@ -78,6 +78,9 @@ impl Source {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SourceInfo {
     pub title: Option<String>,
+    /// The performing artist(s), joined `", "` like the catalog's own listings; `None` for a
+    /// local file, or a TIDAL track with none credited.
+    pub artist: Option<String>,
     pub duration: Option<Duration>,
     /// The track's album's cover id (a UUID); `None` for a local file, or a TIDAL track with no
     /// album.
@@ -131,6 +134,7 @@ impl FileOpener {
                 title: path
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned()),
+                artist: None,
                 duration: decoder.duration(),
                 cover: None,
                 album_id: None,
@@ -151,6 +155,7 @@ impl TrackOpener for FileOpener {
                 title: path
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned()),
+                artist: None,
                 duration: None,
                 quality: None,
                 cover: None,
@@ -282,12 +287,25 @@ impl TidalOpener {
             .await
             .map_err(|error| DescribeError::Unavailable(format!("{error:#}")))?;
         match client.get_track(id).await {
-            Ok(track) => Ok(SourceInfo {
-                title: Some(format!("{} - {}", track.artist.name, track.title)),
-                duration: Some(Duration::from_secs(track.duration)),
-                album_id: track.album.as_ref().map(|album| album.id.to_string()),
-                cover: track.album.and_then(|album| album.cover),
-            }),
+            Ok(track) => {
+                let artist = if track.artists.is_empty() {
+                    track.artist.name.clone()
+                } else {
+                    track
+                        .artists
+                        .iter()
+                        .map(|artist| artist.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                Ok(SourceInfo {
+                    title: Some(track.title),
+                    artist: Some(artist),
+                    duration: Some(Duration::from_secs(track.duration)),
+                    album_id: track.album.as_ref().map(|album| album.id.to_string()),
+                    cover: track.album.and_then(|album| album.cover),
+                })
+            }
             Err(error) => Err(classify_track_error(id, &error)),
         }
     }
@@ -376,6 +394,7 @@ impl TrackOpener for TidalOpener {
             let mut meta = TrackMeta {
                 track,
                 title: None,
+                artist: None,
                 duration: None,
                 quality: Some(quality),
                 cover: None,

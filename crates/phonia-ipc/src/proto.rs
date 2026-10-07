@@ -29,7 +29,7 @@ pub const CAP_QUALITY: &str = "quality";
 pub const CAP_CATALOG: &str = "catalog";
 
 /// The protocol version this crate speaks.
-pub const PROTOCOL: Version = Version { major: 1, minor: 8 };
+pub const PROTOCOL: Version = Version { major: 1, minor: 9 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Version {
@@ -403,7 +403,11 @@ pub enum Event {
     TrackStarted {
         item_id: Option<ItemId>,
         source: Option<String>,
+        /// The track's own title; no longer includes the artist (since 1.9).
         title: Option<String>,
+        /// The performing artist(s), joined `", "`; see [`crate::dto::Track::artist`] (since 1.9).
+        #[serde(default)]
+        artist: Option<String>,
         duration_ms: Option<u64>,
         spec: Spec,
         /// The track was joined to the one before it with no gap: playback never stopped, so no

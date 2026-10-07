@@ -43,6 +43,7 @@ fn status() -> Status {
             item_id: Some(ItemId(7)),
             source: Some("file:/music/a.flac".into()),
             title: Some("a.flac".into()),
+            artist: None,
             duration_ms: Some(215_000),
             quality: None,
             cover: None,
@@ -59,7 +60,7 @@ fn status() -> Status {
     }
 }
 
-const STATUS_JSON: &str = r#"{"state":"playing","track":{"item_id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000,"quality":null,"cover":null,"replay_gain":null},"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"position_ms":1234,"duration_ms":215000,"output":{"state":"open"},"route":null,"volume":null,"quality_range":null,"sink_report":null}"#;
+const STATUS_JSON: &str = r#"{"state":"playing","track":{"item_id":7,"source":"file:/music/a.flac","title":"a.flac","artist":null,"duration_ms":215000,"quality":null,"cover":null,"replay_gain":null},"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"position_ms":1234,"duration_ms":215000,"output":{"state":"open"},"route":null,"volume":null,"quality_range":null,"sink_report":null}"#;
 
 fn queue() -> Queue {
     Queue {
@@ -69,6 +70,7 @@ fn queue() -> Queue {
                 id: ItemId(7),
                 source: "file:/music/a.flac".into(),
                 title: Some("a.flac".into()),
+                artist: None,
                 duration_ms: Some(215_000),
                 cover: None,
             },
@@ -76,6 +78,7 @@ fn queue() -> Queue {
                 id: ItemId(8),
                 source: "tidal:233059491".into(),
                 title: None,
+                artist: Some("Dire Straits".into()),
                 duration_ms: None,
                 cover: Some("abc123-def4".into()),
             },
@@ -87,7 +90,7 @@ fn queue() -> Queue {
     }
 }
 
-const QUEUE_JSON: &str = r#"{"version":5,"items":[{"id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000,"cover":null},{"id":8,"source":"tidal:233059491","title":null,"duration_ms":null,"cover":"abc123-def4"}],"order":[8,7],"current":7,"shuffle":true,"repeat":"all"}"#;
+const QUEUE_JSON: &str = r#"{"version":5,"items":[{"id":7,"source":"file:/music/a.flac","title":"a.flac","artist":null,"duration_ms":215000,"cover":null},{"id":8,"source":"tidal:233059491","title":null,"artist":"Dire Straits","duration_ms":null,"cover":"abc123-def4"}],"order":[8,7],"current":7,"shuffle":true,"repeat":"all"}"#;
 
 // ---- requests ------------------------------------------------------------------------------
 
@@ -285,7 +288,7 @@ fn the_server_banner() {
                 CAP_CATALOG.into(),
             ],
         }),
-        r#"{"type":"hello","protocol":{"major":1,"minor":8},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","catalog"]}"#,
+        r#"{"type":"hello","protocol":{"major":1,"minor":9},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","catalog"]}"#,
     );
 }
 
@@ -301,7 +304,7 @@ fn successful_responses() {
         Reply::Ok(Payload::Status(status())),
         &format!(
             r#"{{"type":"response","id":2,"ok":{{"type":"status","state":"playing","track":{},"spec":{},"position_ms":1234,"duration_ms":215000,"output":{{"state":"open"}},"route":null,"volume":null,"quality_range":null,"sink_report":null}}}}"#,
-            r#"{"item_id":7,"source":"file:/music/a.flac","title":"a.flac","duration_ms":215000,"quality":null,"cover":null,"replay_gain":null}"#,
+            r#"{"item_id":7,"source":"file:/music/a.flac","title":"a.flac","artist":null,"duration_ms":215000,"quality":null,"cover":null,"replay_gain":null}"#,
             r#"{"sample_rate":96000,"channels":2,"bits_per_sample":24}"#
         ),
     );
@@ -389,6 +392,7 @@ fn events() {
             item_id: Some(ItemId(7)),
             source: Some("tidal:1".into()),
             title: Some("t".into()),
+            artist: Some("Dire Straits".into()),
             duration_ms: Some(1000),
             spec: spec(),
             gapless: false,
@@ -399,7 +403,7 @@ fn events() {
                 millibels: -290,
             }),
         },
-        r#"{"type":"event","seq":2,"event":{"type":"track_started","item_id":7,"source":"tidal:1","title":"t","duration_ms":1000,"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"gapless":false,"quality":null,"cover":"cover-uuid","replay_gain":{"kind":"album","millibels":-290}}}"#,
+        r#"{"type":"event","seq":2,"event":{"type":"track_started","item_id":7,"source":"tidal:1","title":"t","artist":"Dire Straits","duration_ms":1000,"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"gapless":false,"quality":null,"cover":"cover-uuid","replay_gain":{"kind":"album","millibels":-290}}}"#,
     );
     event(
         21,
@@ -407,6 +411,7 @@ fn events() {
             item_id: Some(ItemId(8)),
             source: None,
             title: None,
+            artist: None,
             duration_ms: None,
             spec: spec(),
             gapless: true,
@@ -417,7 +422,7 @@ fn events() {
             cover: None,
             replay_gain: None,
         },
-        r#"{"type":"event","seq":21,"event":{"type":"track_started","item_id":8,"source":null,"title":null,"duration_ms":null,"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"gapless":true,"quality":{"requested":"hires","delivered":"lossless"},"cover":null,"replay_gain":null}}"#,
+        r#"{"type":"event","seq":21,"event":{"type":"track_started","item_id":8,"source":null,"title":null,"artist":null,"duration_ms":null,"spec":{"sample_rate":96000,"channels":2,"bits_per_sample":24},"gapless":true,"quality":{"requested":"hires","delivered":"lossless"},"cover":null,"replay_gain":null}}"#,
     );
     event(
         3,
@@ -1119,7 +1124,7 @@ fn versions_are_compatible_across_minors_but_not_majors() {
     assert!(v(1, 0).compatible_with(v(1, 7)));
     assert!(v(1, 7).compatible_with(v(1, 0)));
     assert!(!v(1, 0).compatible_with(v(2, 0)));
-    assert_eq!(PROTOCOL, v(1, 8));
+    assert_eq!(PROTOCOL, v(1, 9));
 }
 
 #[test]

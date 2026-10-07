@@ -36,7 +36,13 @@ pub struct Track {
     pub item_id: Option<ItemId>,
     /// `file:/abs/path` or `tidal:<id>` (see [`crate::source`]).
     pub source: Option<String>,
+    /// The track's own title; no longer includes the artist (since 1.9 -- a 1.8 client shows the
+    /// title without the artist, which still reads fine on its own).
     pub title: Option<String>,
+    /// The performing artist(s), joined `", "`; absent for a local file, or a TIDAL track with
+    /// none credited (since 1.9).
+    #[serde(default)]
+    pub artist: Option<String>,
     pub duration_ms: Option<u64>,
     /// What TIDAL delivered, for a track that is streamed from TIDAL (since 1.5).
     #[serde(default)]
@@ -244,7 +250,12 @@ pub enum ReleaseReason {
 pub struct QueueItem {
     pub id: ItemId,
     pub source: String,
+    /// The track's own title; no longer includes the artist (since 1.9).
     pub title: Option<String>,
+    /// The performing artist(s), joined `", "`; absent for a local file, or a TIDAL track with
+    /// none credited (since 1.9).
+    #[serde(default)]
+    pub artist: Option<String>,
     pub duration_ms: Option<u64>,
     /// The track's album's cover id, to turn into a URL with [`crate::image::url`]; absent for a
     /// local file or a TIDAL track with no album (since 1.6).

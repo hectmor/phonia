@@ -77,6 +77,7 @@ pub fn queue_dto(queue: &QueueSnapshot) -> ipc::Queue {
                 id: ipc::ItemId(item.id.0),
                 source: item.track.source.0.clone(),
                 title: item.track.title.clone(),
+                artist: item.track.artist.clone(),
                 duration_ms: item.track.duration.map(ms),
                 cover: item.track.cover.clone(),
             })
@@ -255,6 +256,7 @@ pub fn status_dto(
                 item_id,
                 source,
                 title: meta.title.clone(),
+                artist: meta.artist.clone(),
                 duration_ms: meta.duration.map(ms),
                 quality: meta.quality.as_ref().map(stream_quality),
                 cover: meta.cover.clone(),
@@ -351,6 +353,7 @@ pub fn event(event: &engine::Event, queue: &QueueSnapshot) -> ipc::Event {
                 item_id,
                 source,
                 title: meta.title.clone(),
+                artist: meta.artist.clone(),
                 duration_ms: meta.duration.map(ms),
                 spec: spec(*format),
                 gapless: *gapless,
@@ -399,6 +402,7 @@ mod tests {
                     track: QueueTrack {
                         source: TrackRef(source.to_string()),
                         title: title.map(str::to_string),
+                        artist: None,
                         duration: secs.map(Duration::from_secs),
                         cover: cover.map(str::to_string),
                         album_id: None,
@@ -442,6 +446,7 @@ mod tests {
             track: Some(TrackMeta {
                 track: ItemId(7).track_ref(),
                 title: Some("a.flac".into()),
+                artist: None,
                 duration: Some(Duration::from_secs(215)),
                 quality: None,
                 cover: Some("cover-uuid".into()),
@@ -487,6 +492,7 @@ mod tests {
         let meta = TrackMeta {
             track: TrackRef("999".into()),
             title: None,
+            artist: None,
             duration: None,
             quality: Some(delivered),
             cover: None,
@@ -527,6 +533,7 @@ mod tests {
         let meta = TrackMeta {
             track: ItemId(7).track_ref(),
             title: None,
+            artist: None,
             duration: None,
             quality: None,
             cover: None,
@@ -577,6 +584,7 @@ mod tests {
         let meta = TrackMeta {
             track: TrackRef("999".into()),
             title: None,
+            artist: None,
             duration: None,
             quality: None,
             cover: None,

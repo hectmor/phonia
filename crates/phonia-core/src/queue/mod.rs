@@ -51,6 +51,8 @@ pub enum Repeat {
 pub struct QueueTrack {
     pub source: TrackRef,
     pub title: Option<String>,
+    /// The performing artist(s); `None` for a local file, or a TIDAL track with none credited.
+    pub artist: Option<String>,
     pub duration: Option<Duration>,
     /// The track's album's cover id (a UUID); `None` for a local file, or a TIDAL track with no
     /// album.
@@ -258,6 +260,7 @@ impl Queue {
             // seeks in a stream that can't rewind: it has to be one the queue understands.
             loaded.meta.track = id.track_ref();
             loaded.meta.title = loaded.meta.title.or(item.track.title);
+            loaded.meta.artist = loaded.meta.artist.or(item.track.artist);
             loaded.meta.duration = loaded.meta.duration.or(item.track.duration);
             loaded.meta.cover = loaded.meta.cover.or(item.track.cover);
             if let Some(queue) = me.upgrade() {

@@ -14,6 +14,8 @@ pub struct TrackRef(pub String);
 pub struct TrackMeta {
     pub track: TrackRef,
     pub title: Option<String>,
+    /// The performing artist(s); `None` for a local file, or a TIDAL track with none credited.
+    pub artist: Option<String>,
     pub duration: Option<Duration>,
     /// What TIDAL delivered for the track; `None` for a track that isn't streamed.
     pub quality: Option<Delivered>,

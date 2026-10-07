@@ -1964,7 +1964,8 @@ async fn an_album_is_added_with_the_titles_and_lengths_that_came_with_its_listin
             .collect::<Vec<_>>(),
         ["tidal:1001", "tidal:1002", "tidal:1003"]
     );
-    assert_eq!(queue.items[0].title.as_deref(), Some("Korn - Song 1"));
+    assert_eq!(queue.items[0].title.as_deref(), Some("Song 1"));
+    assert_eq!(queue.items[0].artist.as_deref(), Some("Korn"));
     assert_eq!(queue.items[0].duration_ms, Some(271_000));
     // One listing, and nothing asked about track by track (there is no TIDAL to ask here, which
     // would have left the titles out).

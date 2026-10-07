@@ -31,10 +31,11 @@ pub async fn wait_for_shutdown(signal: &mut watch::Receiver<bool>) {
     let _ = signal.wait_for(|stopping| *stopping).await;
 }
 
-/// A track on its way into the queue: what it is, its title, length, cover and album id if known,
-/// and why they are not known, if they are not.
+/// A track on its way into the queue: what it is, its title, artist, length, cover and album id
+/// if known, and why they are not known, if they are not.
 type Accepted = (
     Source,
+    Option<String>,
     Option<String>,
     Option<std::time::Duration>,
     Option<String>,
@@ -836,13 +837,14 @@ impl Daemon {
                 Outcome::Ready(source, info) => accepted.push((
                     source,
                     info.title,
+                    info.artist,
                     info.duration,
                     info.cover,
                     info.album_id,
                     None,
                 )),
                 Outcome::Unresolved(source, reason) => {
-                    accepted.push((source, None, None, None, None, Some(reason)))
+                    accepted.push((source, None, None, None, None, None, Some(reason)))
                 }
                 Outcome::Rejected(source, reason) => {
                     rejected.push(ipc::Rejected { source, reason })
@@ -866,13 +868,16 @@ impl Daemon {
         let _serial = self.control_lock.lock().await;
         let tracks: Vec<QueueTrack> = accepted
             .iter()
-            .map(|(source, title, duration, cover, album_id, _)| QueueTrack {
-                source: phonia_core::engine::TrackRef(source.to_wire()),
-                title: title.clone(),
-                duration: *duration,
-                cover: cover.clone(),
-                album_id: album_id.clone(),
-            })
+            .map(
+                |(source, title, artist, duration, cover, album_id, _)| QueueTrack {
+                    source: phonia_core::engine::TrackRef(source.to_wire()),
+                    title: title.clone(),
+                    artist: artist.clone(),
+                    duration: *duration,
+                    cover: cover.clone(),
+                    album_id: album_id.clone(),
+                },
+            )
             .collect();
         let queue = self.controller.queue();
         let ids = match at {
@@ -880,7 +885,7 @@ impl Daemon {
             AddAt::Next => queue.play_next(tracks),
             AddAt::Index { index } => queue.insert(index, tracks),
         };
-        for (id, (_, _, _, _, _, reason)) in ids.iter().zip(&accepted) {
+        for (id, (_, _, _, _, _, _, reason)) in ids.iter().zip(&accepted) {
             if let Some(reason) = reason {
                 unresolved_reasons.push(ipc::Unresolved {
                     id: ipc::ItemId(id.0),
@@ -945,13 +950,25 @@ impl Daemon {
         for track in &tracks {
             let source = Source::Tidal(track.id.clone());
             if track.streamable {
-                let name = match track.artists.first() {
-                    Some(artist) => format!("{} - {}", artist.name, track.title),
-                    None => track.title.clone(),
-                };
+                let artist = (!track.artists.is_empty()).then(|| {
+                    track
+                        .artists
+                        .iter()
+                        .map(|artist| artist.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                });
                 let cover = track.album.as_ref().and_then(|album| album.cover.clone());
                 let album_id = track.album.as_ref().map(|album| album.id.clone());
-                accepted.push((source, Some(name), track.duration, cover, album_id, None));
+                accepted.push((
+                    source,
+                    Some(track.title.clone()),
+                    artist,
+                    track.duration,
+                    cover,
+                    album_id,
+                    None,
+                ));
             } else {
                 rejected.push(ipc::Rejected {
                     source: source.to_wire(),
@@ -1080,6 +1097,7 @@ mod play_log_tests {
             track: QueueTrack {
                 source: TrackRef(source.to_string()),
                 title: None,
+                artist: None,
                 duration: None,
                 cover: None,
                 album_id: None,
@@ -1099,6 +1117,7 @@ mod play_log_tests {
         TrackMeta {
             track: ItemId(id).track_ref(),
             title: None,
+            artist: None,
             duration: None,
             quality,
             cover: None,

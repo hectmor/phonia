@@ -20,6 +20,17 @@ pub fn ms(ms: u64) -> String {
     }
 }
 
+/// The currently-playing track's name for a single-line display: `Artist - Title`, just the
+/// title if there is no artist, or the source (`tidal:12345`) if even the title is not known yet.
+/// `"?"` only when none of the three is known at all.
+pub fn track_name(title: Option<&str>, artist: Option<&str>, source: Option<&str>) -> String {
+    match (title, artist) {
+        (Some(title), Some(artist)) => format!("{artist} - {title}"),
+        (Some(title), None) => title.to_string(),
+        (None, _) => source.unwrap_or("?").to_string(),
+    }
+}
+
 /// What TIDAL delivered: the tier, and what was asked for if it was more.
 pub fn stream_quality(quality: &StreamQuality) -> String {
     if quality.fell_back() {
@@ -211,6 +222,17 @@ mod tests {
         assert_eq!(ms(3_599_000), "59:59");
         assert_eq!(ms(3_600_000), "1:00:00");
         assert_eq!(ms(3_723_000), "1:02:03");
+    }
+
+    #[test]
+    fn a_track_name_combines_artist_and_title_or_falls_back() {
+        assert_eq!(
+            track_name(Some("Sultans of Swing"), Some("Dire Straits"), None),
+            "Dire Straits - Sultans of Swing"
+        );
+        assert_eq!(track_name(Some("a.flac"), None, None), "a.flac");
+        assert_eq!(track_name(None, None, Some("tidal:1")), "tidal:1");
+        assert_eq!(track_name(None, None, None), "?");
     }
 
     #[test]

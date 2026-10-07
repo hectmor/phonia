@@ -141,7 +141,11 @@ fn format_queue(queue: &QueueSnapshot) -> String {
         } else {
             ' '
         };
-        let name = item.track.title.as_deref().unwrap_or(&item.track.source.0);
+        let name = phonia_ipc::fmt::track_name(
+            item.track.title.as_deref(),
+            item.track.artist.as_deref(),
+            Some(&item.track.source.0),
+        );
         text.push_str(&format!("\n {marker} {:>3}. {name}", index + 1));
     }
     text
@@ -321,7 +325,11 @@ fn handle_event(
         Event::TrackStarted { meta, gapless, .. } => {
             console.line(format!(
                 "Playing: {}{}{}",
-                meta.title.as_deref().unwrap_or(&meta.track.0),
+                phonia_ipc::fmt::track_name(
+                    meta.title.as_deref(),
+                    meta.artist.as_deref(),
+                    Some(&meta.track.0)
+                ),
                 meta.quality
                     .map(|quality| format!(" [{}]", quality_text(&quality)))
                     .unwrap_or_default(),
@@ -432,6 +440,7 @@ mod tests {
                 track: QueueTrack {
                     source: TrackRef(format!("/music/{title}.flac")),
                     title: Some(title.to_string()),
+                    artist: None,
                     duration: None,
                     cover: None,
                     album_id: None,
