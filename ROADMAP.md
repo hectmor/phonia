@@ -79,7 +79,7 @@ done — it is its own product decision, not a leftover.
 | Issue | What | Status |
 |---|---|---|
 | #120 | Play reporting: finished plays reach TIDAL's own Recently Played | Closed (verified live against a real account) |
-| #32 | Letras sincronizadas: lyrics synced to playback in the TUI | In progress, part 1/3 |
+| #32 | Letras sincronizadas: lyrics synced to playback in the TUI | In progress, part 2/3 |
 
 The rest of Phase 4 and all of Phase 5 are not started, except CI (#42) and
 rustfmt-in-CI (#50), both closed. Nothing else is planned in detail yet;
@@ -545,9 +545,23 @@ correctly time-ordered lines, provider `MUSIXMATCH`, the first line's
 text and timestamp matching the real song; a genuinely instrumental
 track correctly answered `None`.
 
-Part 2 (not started) is the wire protocol: `Request::Lyrics`, a new
-`CAP_LYRICS` capability, protocol 1.9 → 1.10. Part 3 (not started) is the
-TUI panel itself.
+Part 2 (merged) is the wire protocol: protocol 1.9 → 1.10, a new
+`CAP_LYRICS` capability (announced alongside `CAP_CATALOG`), `Request::Lyrics
+{ id }` answered with `Payload::Lyrics { id, lyrics }` (`id` repeated so a
+client can discard a stale answer once the track has moved on), and new
+`Lyrics`/`LyricLine` DTOs (`at_ms` rather than a `Duration`, so the wire
+stays plain JSON). `phoniad` caches `Some`/`None` answers in memory (a
+small FIFO-bounded cache, lost on restart) but never a failure, so a
+transient TIDAL error can be retried instead of sticking; the request runs
+beside a connection's others (like `search`/`album`), since TIDAL may be
+slow to answer. A new `phonia ctl lyrics [<id>]` defaults to the track
+playing now. **Verified live** against the real daemon and the real
+account: `ctl lyrics 233059491` printed all 39 lines timestamped
+`[m:ss]`, credited `MUSIXMATCH`; the instrumental id answered "TIDAL has
+no lyrics for this track"; asking with no id while Sultans of Swing was
+playing resolved to the same track automatically.
+
+Part 3 (not started) is the TUI panel itself.
 
 ## Conventions this file assumes
 

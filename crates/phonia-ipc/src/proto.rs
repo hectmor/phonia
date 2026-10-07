@@ -1,7 +1,7 @@
 //! The messages: what a client may ask, and what the daemon answers and announces.
 
 use crate::dto::{
-    AlbumListRef, AlbumSummary, ArtistSummary, CatalogKind, CatalogRef, EndReason, ItemId,
+    AlbumListRef, AlbumSummary, ArtistSummary, CatalogKind, CatalogRef, EndReason, ItemId, Lyrics,
     OutputInfo, Page, PlaylistListRef, PlaylistSummary, Quality, Queue, ReleaseReason, Repeat,
     ReplayGain, Route, SinkReport, Spec, State, Status, StreamQuality, TrackSummary,
 };
@@ -28,8 +28,15 @@ pub const CAP_QUALITY: &str = "quality";
 /// that has a TIDAL login to do it with.
 pub const CAP_CATALOG: &str = "catalog";
 
+/// Capability: the daemon can fetch a track's lyrics from TIDAL, synced or plain (protocol 1.10).
+/// Only advertised alongside [`CAP_CATALOG`].
+pub const CAP_LYRICS: &str = "lyrics";
+
 /// The protocol version this crate speaks.
-pub const PROTOCOL: Version = Version { major: 1, minor: 9 };
+pub const PROTOCOL: Version = Version {
+    major: 1,
+    minor: 10,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Version {
@@ -216,6 +223,11 @@ pub enum Request {
         #[serde(default)]
         limit: Option<u32>,
     },
+    /// A track's lyrics, synced or plain (since 1.10). Answered with [`Payload::Lyrics`], which
+    /// repeats `id` so a client can discard a stale answer after the track has moved on.
+    Lyrics {
+        id: String,
+    },
     /// Adds the tracks of an album or a playlist (since 1.6): the daemon lists them from TIDAL
     /// itself, so their titles and lengths come with them, and answers like `queue_add`, with
     /// [`Payload::Added`]. A track TIDAL lists but does not stream where the daemon is comes back
@@ -370,6 +382,13 @@ pub enum Payload {
         favorite_tracks: Page<TrackSummary>,
         favorite_albums: Page<AlbumSummary>,
         my_playlists: Page<PlaylistSummary>,
+    },
+    /// A track's lyrics, or `None` when TIDAL has none for it at all (since 1.10). `id` is the
+    /// track the request asked about, so a client can discard this if it no longer matches the
+    /// track playing by the time the answer arrives.
+    Lyrics {
+        id: String,
+        lyrics: Option<Lyrics>,
     },
     /// The state right now, and the sequence number of the last event it includes.
     Snapshot {

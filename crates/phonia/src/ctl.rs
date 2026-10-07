@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use phonia_ipc::{
-    AddAt, CAP_CATALOG, CAP_OUTPUT_RELEASE, CAP_OUTPUT_SELECT, CAP_QUALITY, CAP_VOLUME,
+    AddAt, CAP_CATALOG, CAP_LYRICS, CAP_OUTPUT_RELEASE, CAP_OUTPUT_SELECT, CAP_QUALITY, CAP_VOLUME,
     CatalogKind, CatalogRef, Client, ClientError, ClientInfo, Event, ItemId, NewTrack, Output,
     OutputInfo, OutputMode, Payload, Quality, QualityRange, Queue, ReleaseReason, Repeat, Request,
     SeekTarget, State, Status, Volume,
@@ -95,6 +95,12 @@ pub enum CtlCommand {
     Library {
         #[arg(long)]
         limit: Option<u32>,
+    },
+    /// Shows a track's lyrics: synced to the timestamp if TIDAL has them, plain text otherwise.
+    /// Without an id, the track playing now (it must be a TIDAL one).
+    Lyrics {
+        /// The track's id, as `search` prints it.
+        id: Option<String>,
     },
     /// Mutes (`on`), unmutes (`off`) or flips (`toggle`, the default) an output that has a volume
     /// of its own (shared, or exclusive with a hardware mixer control); the level is kept.
@@ -290,6 +296,7 @@ pub async fn run(args: CtlArgs, config_flag: Option<&Path>) -> Result<()> {
         CtlCommand::Album { id, limit } => album(&client, json, id, limit).await,
         CtlCommand::Artist { id, limit } => artist(&client, json, id, limit).await,
         CtlCommand::Library { limit } => library(&client, json, limit).await,
+        CtlCommand::Lyrics { id } => lyrics(&client, json, id).await,
         CtlCommand::Mute { mode } => mute(&client, json, mode.unwrap_or(MuteMode::Toggle)).await,
         CtlCommand::Output { action } => output(&client, json, action).await,
         CtlCommand::Queue { action } => queue(&client, json, action).await,
@@ -591,6 +598,38 @@ async fn library(client: &Client, json: bool, limit: Option<u32>) -> Result<()> 
     print_payload(json, &payload, || format_library(&payload))
 }
 
+async fn lyrics(client: &Client, json: bool, id: Option<String>) -> Result<()> {
+    require_catalog(client, "lyrics")?;
+    if !client
+        .server()
+        .capabilities
+        .iter()
+        .any(|capability| capability == CAP_LYRICS)
+    {
+        bail!(
+            "this phoniad cannot show lyrics: it needs protocol 1.10 (restart it after updating)"
+        );
+    }
+    let id = match id {
+        Some(id) => id,
+        None => {
+            let status = client.status().await?;
+            let source = status
+                .track
+                .and_then(|track| track.source)
+                .ok_or_else(|| anyhow!("nothing is playing: give a track id"))?;
+            source
+                .strip_prefix("tidal:")
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    anyhow!("the track playing is a local file, not a TIDAL one: give a track id")
+                })?
+        }
+    };
+    let payload = client.request(Request::Lyrics { id }).await?;
+    print_payload(json, &payload, || format_lyrics(&payload))
+}
+
 /// The URL of a cover or a picture, at a size fit for opening in a browser rather than for a
 /// terminal cell; `None` when there is no id to build one from.
 fn cover_url(kind: phonia_ipc::image::Kind, id: Option<&str>) -> Option<String> {
@@ -750,6 +789,34 @@ fn format_library(payload: &Payload) -> String {
             playlist.id
         )
     });
+    text
+}
+
+/// Synced lines timestamped `[mm:ss]`, falling back to the plain text when there is no synced
+/// version, or a clear message when TIDAL has neither.
+fn format_lyrics(payload: &Payload) -> String {
+    let Payload::Lyrics { lyrics, .. } = payload else {
+        return "unexpected answer".to_string();
+    };
+    let Some(lyrics) = lyrics else {
+        return "TIDAL has no lyrics for this track".to_string();
+    };
+    let mut text = if lyrics.lines.is_empty() {
+        match &lyrics.plain {
+            Some(plain) => format!("{plain}\n(no time-synced version)"),
+            None => "TIDAL has no lyrics for this track".to_string(),
+        }
+    } else {
+        lyrics
+            .lines
+            .iter()
+            .map(|line| format!("[{}] {}", phonia_ipc::fmt::ms(line.at_ms), line.text))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    if let Some(provider) = &lyrics.provider {
+        text.push_str(&format!("\n\nLyrics via {provider}"));
+    }
     text
 }
 

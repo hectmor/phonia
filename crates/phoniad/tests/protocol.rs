@@ -2457,6 +2457,7 @@ async fn without_a_catalog_none_of_them_can_be_answered() {
             limit: None,
         },
         Request::Library { limit: None },
+        Request::Lyrics { id: "9".into() },
     ] {
         let error = client.request(request).await.unwrap_err();
         assert_eq!(protocol_code(error), ErrorCode::Unsupported);
@@ -2627,5 +2628,137 @@ async fn asking_for_an_artist_does_not_hold_up_the_requests_behind_it() {
     };
     assert_eq!(id, RequestId(2));
     assert!(matches!(reply, Reply::Ok(Payload::Artist { .. })));
+    f.finish().await;
+}
+
+// --- Lyrics (protocol 1.10) -------------------------------------------------------------------
+
+fn synced_lyrics() -> catalog::Lyrics {
+    catalog::Lyrics {
+        lines: vec![catalog::LyricLine {
+            at: Duration::from_millis(12_440),
+            text: "You get a shiver in the dark".into(),
+        }],
+        plain: Some("You get a shiver in the dark".into()),
+        right_to_left: false,
+        provider: Some("MUSIXMATCH".into()),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lyrics_answer_the_id_asked_for_and_are_cached_after_the_first_ask() {
+    let catalog = FakeCatalog::new().with_lyrics("1", synced_lyrics());
+    let f = fixture_with_catalog("lyrics", Some(Arc::new(catalog.clone()))).await;
+    let client = f.client().await;
+    let Payload::Lyrics { id, lyrics } = client
+        .request(Request::Lyrics { id: "1".into() })
+        .await
+        .unwrap()
+    else {
+        panic!("not a lyrics answer");
+    };
+    assert_eq!(id, "1");
+    let lyrics = lyrics.expect("this track has lyrics");
+    assert_eq!(lyrics.lines[0].text, "You get a shiver in the dark");
+    assert_eq!(lyrics.lines[0].at_ms, 12_440);
+    assert_eq!(lyrics.provider.as_deref(), Some("MUSIXMATCH"));
+    assert_eq!(catalog.calls().len(), 1);
+
+    // Asked again: answered from the cache, not from the catalog a second time.
+    let Payload::Lyrics { lyrics, .. } = client
+        .request(Request::Lyrics { id: "1".into() })
+        .await
+        .unwrap()
+    else {
+        panic!("not a lyrics answer");
+    };
+    assert!(lyrics.is_some());
+    assert_eq!(
+        catalog.calls().len(),
+        1,
+        "the second ask was answered from the cache"
+    );
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_instrumental_track_has_no_lyrics_and_that_is_not_cached_as_a_failure() {
+    let catalog = FakeCatalog::new();
+    let f = fixture_with_catalog("lyrics-none", Some(Arc::new(catalog))).await;
+    let client = f.client().await;
+    let Payload::Lyrics { lyrics, .. } = client
+        .request(Request::Lyrics {
+            id: "518338".into(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("not a lyrics answer");
+    };
+    assert_eq!(lyrics, None);
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lyrics_failure_is_not_cached_and_can_be_retried() {
+    let catalog = FakeCatalog::new().failing(CatalogError::RateLimited);
+    let f = fixture_with_catalog("lyrics-limited", Some(Arc::new(catalog.clone()))).await;
+    let client = f.client().await;
+    let error = client
+        .request(Request::Lyrics { id: "1".into() })
+        .await
+        .unwrap_err();
+    assert_eq!(protocol_code(error), ErrorCode::RateLimited);
+    assert_eq!(catalog.calls().len(), 1);
+    // Asked again: hits the catalog again, not a cached failure.
+    let error = client
+        .request(Request::Lyrics { id: "1".into() })
+        .await
+        .unwrap_err();
+    assert_eq!(protocol_code(error), ErrorCode::RateLimited);
+    assert_eq!(catalog.calls().len(), 2);
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn without_a_catalog_lyrics_cannot_be_answered() {
+    let f = fixture_with_catalog("lyrics-nocatalog", None).await;
+    let client = f.client().await;
+    let error = client
+        .request(Request::Lyrics { id: "1".into() })
+        .await
+        .unwrap_err();
+    assert_eq!(protocol_code(error), ErrorCode::Unsupported);
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_daemon_with_a_catalog_announces_the_lyrics_capability() {
+    let f = fixture_with_catalog("lyrics-hello", Some(Arc::new(FakeCatalog::new()))).await;
+    let client = f.client().await;
+    assert!(client.server().capabilities.iter().any(|c| c == CAP_LYRICS));
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn asking_for_lyrics_does_not_hold_up_the_requests_behind_it() {
+    let catalog = FakeCatalog::new()
+        .with_lyrics("1", synced_lyrics())
+        .delayed(Duration::from_millis(700));
+    let f = fixture_with_catalog("lyrics-slow", Some(Arc::new(catalog))).await;
+    let mut raw = f.raw().await;
+    raw.hello().await;
+    raw.send(r#"{"id":2,"request":{"type":"lyrics","id":"1"}}"#)
+        .await;
+    raw.send(r#"{"id":3,"request":{"type":"status"}}"#).await;
+    let Some(ServerMessage::Response { id, .. }) = raw.recv().await else {
+        panic!("no response");
+    };
+    assert_eq!(id, RequestId(3), "the status comes first");
+    let Some(ServerMessage::Response { id, reply }) = raw.recv().await else {
+        panic!("no response");
+    };
+    assert_eq!(id, RequestId(2));
+    assert!(matches!(reply, Reply::Ok(Payload::Lyrics { .. })));
     f.finish().await;
 }
