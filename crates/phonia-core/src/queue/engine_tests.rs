@@ -62,6 +62,7 @@ impl TrackOpener for TestOpener {
             let meta = TrackMeta {
                 track: track.clone(),
                 title,
+                artist: None,
                 duration: None,
                 quality: None,
                 cover: None,
@@ -104,6 +105,7 @@ fn entry(name: &str) -> QueueTrack {
     QueueTrack {
         source: TrackRef(name.to_string()),
         title: Some(name.to_string()),
+        artist: None,
         duration: None,
         cover: None,
         album_id: None,
@@ -273,6 +275,7 @@ fn opening_an_entry_rewrites_the_reference_and_fills_in_what_the_queue_did_not_k
     let ids = queue.add([QueueTrack {
         source: TrackRef("x".into()),
         title: None,
+        artist: None,
         duration: None,
         cover: None,
         album_id: None,

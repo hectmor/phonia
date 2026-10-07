@@ -119,6 +119,7 @@ mod tests {
                 let meta = TrackMeta {
                     track,
                     title: None,
+                    artist: None,
                     duration: None,
                     quality: None,
                     cover: None,
@@ -140,6 +141,7 @@ mod tests {
         QueueTrack {
             source: TrackRef(frames.to_string()),
             title: Some(title.to_string()),
+            artist: None,
             duration: None,
             cover: None,
             album_id: None,

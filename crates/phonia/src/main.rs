@@ -305,6 +305,7 @@ async fn run_play_file(
             title: path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned()),
+            artist: None,
             duration: None,
             cover: None,
             album_id: None,
@@ -348,6 +349,7 @@ async fn run_play(
         queue.add([QueueTrack {
             source: TrackRef(Source::parse(&format!("tidal:{id}"))?.to_wire()),
             title: Some(id.clone()),
+            artist: None,
             duration: None,
             cover: None,
             album_id: None,

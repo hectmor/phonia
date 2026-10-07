@@ -9,6 +9,7 @@ fn track(name: &str) -> QueueTrack {
     QueueTrack {
         source: TrackRef(name.to_string()),
         title: Some(name.to_string()),
+        artist: None,
         duration: None,
         cover: None,
         album_id: None,
@@ -591,6 +592,7 @@ fn opening_a_track_fills_in_only_what_was_missing() {
     let ids = inner.add([QueueTrack {
         source: TrackRef("a".into()),
         title: None,
+        artist: None,
         duration: None,
         cover: None,
         album_id: None,

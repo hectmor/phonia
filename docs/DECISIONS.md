@@ -1533,3 +1533,82 @@ undocumented contract TIDAL could tighten or change without notice, which is exa
 here stays silent and never touches playback.
 
 This closes #120: both parts of the approved plan are merged and verified against a real account.
+
+## 2026-10-06 — #124: a bigger title, bold not big-text; artist split out as its own prerequisite
+
+A brand new milestone, "Fase 6 — Layout and appearance modifying," created for one issue (#124),
+whose one-line body is the title itself. The owner's concrete ask came from a screenshot of
+TIDAL's own web player's now-playing view: a visually bigger, bolder track title, with the artist
+on its own quieter line underneath next to a small circular marker — a clear two-tier hierarchy,
+not today's single `Artist - Title` string.
+
+**Four open design questions, decided with the user (recommended options throughout, via
+`AskUserQuestion`):**
+
+1. **How to make the title visually bigger.** Investigated concretely, not assumed: the only
+   literal (multi-row-glyph) option is the `tui-big-text` crate (`font8x8` bitmap glyphs,
+   `ratatui`-compatible). Its charset covers Basic Latin, Latin-1 and — usefully — Hiragana, so
+   "Beyoncé"/"Mötley Crüe"/"Björk" render fine, but **not** Latin Extended-A ("Dvořák," Turkish
+   ı/ğ), Cyrillic, Katakana/Kanji, Hangul, or the typographic punctuation TIDAL's own metadata
+   actually uses (curly quotes, em/en dashes, ellipses) unless normalized first. A missing glyph
+   silently renders as a blank cell — worse than a visible failure, since nothing looks wrong at a
+   glance. The bigger problem is width, not characters: every size tier costs at least 4 terminal
+   columns per character (`Quadrant`, the only tier using glyphs common to ordinary terminal
+   fonts, costs exactly 4; `Full`/`*Height` cost 8), against a guaranteed ~20 columns next to the
+   cover (`MIN_TEXT_WIDTH`, `covers.rs:243`) — most real TIDAL titles simply would not fit even at
+   the cheapest tier. **Decided: bold-weight hierarchy only for #124** (`Modifier::BOLD` on its
+   own line, no new dependency) — `tui-big-text` stays a possible, explicitly optional follow-up
+   PR, not blocking this issue, with a normalize-then-fits-or-fall-back-to-bold rule already
+   designed if it's ever picked up (never truncate a big-text title, never leave blank cells).
+2. **Whether to lift the 16-ANSI-color deferral.** That deferral (see the 2026-09-xx entries
+   above) was explicitly left open-ended — "once covers make it worth having" — and covers have
+   shipped. **Decided: no, not now.** #124 is solved entirely with weight (bold vs. dim) inside
+   the existing 16-color system; true color (or a cover-derived accent) is real scope for a
+   separate issue, not something to fold in here just because the deferral's own condition
+   technically became true.
+3. **Where the bigger title lives.** The bottom bar's height (`BAR_HEIGHT = 5`) is a deliberate,
+   tested invariant from #28 — "the bar's height never depends on what is playing," with a
+   regression test pinning the quit-key row to the same screen row in every connection state.
+   Growing the bar to fit a taller title would reopen that invariant. **Decided: the title lives
+   in the header beside the cover instead** (`now_playing_header`, untouched by #28's own
+   invariant), and that header is now reserved by screen size even with no cover/no image-capable
+   terminal, so the bigger title is not conditional on `ratatui-image`'s own capability detection.
+   The bar's own `connected_line()` keeps showing one compact line (state + `Artist - Title`, via
+   the new `fmt::track_name` below) exactly as before.
+4. **Whether splitting the artist out of `title` belongs in #124 at all.** It is really a
+   prerequisite data-model change (a protocol version bump), not itself a layout change.
+   **Decided: yes, but as its own PR, landed before any visual work**, so the two concerns (wire
+   shape vs. presentation) stay cleanly separated and neither PR is stuck waiting on the other's
+   review.
+
+**Part 1 (this part, merged): protocol 1.8 → 1.9, no visible change.** The artist name was always
+available from TIDAL at track-open time — `tidlers`' `Track.artist`/`Track.artists` — but
+`TidalOpener::describe()` (`openers.rs`) joined it into `title` immediately
+(`format!("{} - {}", artist.name, title)`), before the daemon, the protocol or the TUI ever saw
+them apart. Catalog views (search/album/artist/library) already carried a real, structured
+`artists: Vec<ArtistRef>` the whole time — this was never a TIDAL limitation, only something
+thrown away specifically on the now-playing path.
+
+Kept them separate instead: `SourceInfo.artist`/`QueueTrack.artist`/`engine::TrackMeta.artist`,
+all `Option<String>`, threaded through `Queue::open_entry`'s existing title/cover/duration
+fill-in (`.or(item.track.artist)`, same pattern as the rest) and `phoniad`'s `queue_add_from`
+(joining multiple credited artists with `", "`, matching the catalog's own `fmt::artists`
+convention, rather than only ever using the first). On the wire, `artist: Option<String>` is new
+on `dto::Track`, `dto::QueueItem` and `proto::Event::TrackStarted`, each `#[serde(default)]` so an
+older 1.8 client deserializing a 1.9 server's message just gets `None` and keeps working — `title`
+itself changes meaning (no longer includes the artist), which is a real, if harmless, behavior
+change for any 1.8 client: documented here rather than silently shipped.
+
+**"No visible change" was a deliberate constraint on this part, not just a description**: a new
+`phonia_ipc::fmt::track_name(title, artist, source)` (the shared formatting module every client
+already uses for `ms`/`verdict`/etc.) recombines `title`+`artist` back into the same `Artist -
+Title` shown before, with the same source/`"?"` fallbacks `title.as_deref().or(source)` used to
+have — applied everywhere that string used to be built ad hoc: `phonia ctl status`/`queue
+list`/`watch`, the no-daemon `phonia play`'s own status line and queue listing, and the TUI's
+`now_playing_header`/`connected_line`/queue list. One regression test
+(`an_album_is_added_with_the_titles_and_lengths_that_came_with_its_listing`) caught the one
+genuine behavior change needed fixing before merge — it had asserted the old joined string, which
+is now the correct place to assert `title`/`artist` as two separate fields instead.
+
+Part 2 (not started) is the actual visual work: the bold title and the quieter `◉ Artist` line in
+the header, per decisions 1-3 above.

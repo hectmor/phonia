@@ -1084,11 +1084,11 @@ fn format_status(status: &Status) -> String {
         }
     }
     if let Some(track) = &status.track {
-        let name = track
-            .title
-            .as_deref()
-            .or(track.source.as_deref())
-            .unwrap_or("?");
+        let name = phonia_ipc::fmt::track_name(
+            track.title.as_deref(),
+            track.artist.as_deref(),
+            track.source.as_deref(),
+        );
         text.push_str(&format!("\nTrack:    {name}"));
         let total = status
             .duration_ms
@@ -1155,7 +1155,11 @@ fn format_queue(queue: &Queue) -> String {
         } else {
             ' '
         };
-        let name = item.title.as_deref().unwrap_or(&item.source);
+        let name = phonia_ipc::fmt::track_name(
+            item.title.as_deref(),
+            item.artist.as_deref(),
+            Some(&item.source),
+        );
         let length = item
             .duration_ms
             .map(|ms| format!("  [{}]", phonia_ipc::fmt::ms(ms)))
@@ -1195,6 +1199,7 @@ fn format_event(event: &Event) -> String {
         Event::StateChanged { state } => format!("state {}", state_name(*state)),
         Event::TrackStarted {
             title,
+            artist,
             source,
             spec,
             gapless,
@@ -1202,7 +1207,7 @@ fn format_event(event: &Event) -> String {
             ..
         } => format!(
             "started {} ({}-bit / {} Hz){}{}",
-            title.as_deref().or(source.as_deref()).unwrap_or("?"),
+            phonia_ipc::fmt::track_name(title.as_deref(), artist.as_deref(), source.as_deref()),
             spec.bits_per_sample,
             spec.sample_rate,
             quality
@@ -1332,6 +1337,7 @@ mod tests {
             id: ItemId(id),
             source: format!("file:/m/{id}.flac"),
             title: title.map(str::to_string),
+            artist: None,
             duration_ms: ms,
             cover: None,
         };
@@ -1372,6 +1378,36 @@ mod tests {
     }
 
     #[test]
+    fn the_track_line_combines_the_artist_and_the_title() {
+        let status = Status {
+            state: State::Playing,
+            track: Some(Track {
+                item_id: Some(ItemId(10)),
+                source: Some("tidal:1".into()),
+                title: Some("Sultans of Swing".into()),
+                artist: Some("Dire Straits".into()),
+                duration_ms: Some(348_680),
+                quality: None,
+                cover: None,
+                replay_gain: None,
+            }),
+            spec: None,
+            position_ms: 0,
+            duration_ms: None,
+            output: Output::Open,
+            route: None,
+            volume: None,
+            quality_range: None,
+            sink_report: None,
+        };
+        assert!(
+            format_status(&status).contains("Track:    Dire Straits - Sultans of Swing"),
+            "{}",
+            format_status(&status)
+        );
+    }
+
+    #[test]
     fn the_status_shows_what_is_known() {
         let status = Status {
             state: State::Playing,
@@ -1379,6 +1415,7 @@ mod tests {
                 item_id: Some(ItemId(10)),
                 source: Some("tidal:1".into()),
                 title: Some("Song".into()),
+                artist: None,
                 duration_ms: Some(348_680),
                 quality: None,
                 cover: None,
@@ -1779,6 +1816,7 @@ mod tests {
             item_id: None,
             source: Some("tidal:1".into()),
             title: Some("Song".into()),
+            artist: None,
             duration_ms: None,
             spec: Spec {
                 sample_rate: 96_000,
@@ -1811,6 +1849,7 @@ mod tests {
             item_id: None,
             source: None,
             title: Some("Song".into()),
+            artist: None,
             duration_ms: None,
             spec: Spec {
                 sample_rate: 44_100,
@@ -1842,6 +1881,7 @@ mod tests {
                 item_id: None,
                 source: Some("tidal:1".into()),
                 title: None,
+                artist: None,
                 duration_ms: None,
                 quality: Some(phonia_ipc::StreamQuality {
                     requested: Quality::Hires,
