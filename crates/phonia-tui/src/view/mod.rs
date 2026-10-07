@@ -3,11 +3,21 @@
 mod browse;
 mod help;
 mod library;
+mod lyrics;
 mod search;
 
 /// How far the help can scroll on a screen `rows` tall.
 pub fn help_overflow(rows: u16) -> usize {
     help::overflow(rows)
+}
+
+/// The rows the Lyrics panel's own body has, inside `state.size`: the main panel, less its
+/// border. Shared with `app::scroll_lyrics` so the two cannot disagree about how much there is to
+/// scroll (the notice and the footer, when either shows, take their own row out of this in turn --
+/// see `lyrics::body_rows`).
+pub fn lyrics_panel_rows(state: &State) -> usize {
+    let area = areas(Rect::new(0, 0, state.size.0, state.size.1)).main;
+    usize::from(area.height.saturating_sub(2))
 }
 
 use crate::app::{Connection, Focus, Section, State, seconds_left};
@@ -127,6 +137,24 @@ fn draw_main(state: &State, theme: &Theme, covers: &Covers, frame: &mut Frame, a
         } else {
             browse::draw(state, &state.library_views, theme, covers, frame, inner);
         }
+        return;
+    }
+    if state.section() == Section::Lyrics {
+        let title = match state
+            .status
+            .as_ref()
+            .and_then(|status| status.track.as_ref())
+        {
+            Some(track) => format!(
+                "Lyrics \u{203a} {}",
+                phonia_ipc::fmt::track_name(track.title.as_deref(), track.artist.as_deref(), None)
+            ),
+            None => "Lyrics".to_string(),
+        };
+        let block = panel(&title, focused, theme);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        lyrics::draw(state, theme, frame, inner);
         return;
     }
     // The queue: the currently playing track's own cover, when there is one, above the list.
@@ -617,6 +645,7 @@ mod tests {
             "1 Queue",
             "2 Search",
             "3 Library",
+            "4 Lyrics",
             "Not connected yet",
             "Connecting",
             "? help",
@@ -2440,5 +2469,201 @@ mod tests {
         for (w, h) in [(0, 0), (1, 1), (16, 4), (20, 5), (40, 8)] {
             let _ = screen(&state, w, h);
         }
+    }
+
+    // --- The Lyrics section --------------------------------------------------------------
+
+    fn in_the_lyrics(source: &str) -> State {
+        let mut playing = crate::app::tests_support::status();
+        playing.track = Some(phonia_ipc::Track {
+            item_id: None,
+            source: Some(source.to_string()),
+            title: Some("Song".into()),
+            artist: None,
+            duration_ms: Some(300_000),
+            quality: None,
+            cover: None,
+            replay_gain: None,
+        });
+        let mut state = State::default();
+        update(
+            &mut state,
+            Msg::Connected {
+                server: phonia_ipc::ServerInfo {
+                    name: "phoniad".into(),
+                    version: "0.1.0".into(),
+                    pid: 1,
+                },
+                protocol: phonia_ipc::Version {
+                    major: 1,
+                    minor: 10,
+                },
+                capabilities: vec!["catalog".into(), "lyrics".into()],
+                status: playing,
+                queue: crate::app::tests_support::queue(),
+            },
+        );
+        press(&mut state, '4');
+        state
+    }
+
+    fn answer_lyrics(state: &mut State, id: &str, lyrics: Option<phonia_ipc::Lyrics>) {
+        update(
+            state,
+            Msg::Response {
+                tag: crate::app::Tag::Lyrics { generation: 1 },
+                result: Ok(phonia_ipc::Payload::Lyrics {
+                    id: id.to_string(),
+                    lyrics,
+                }),
+            },
+        );
+    }
+
+    #[test]
+    fn before_an_answer_the_lyrics_panel_says_loading() {
+        let state = in_the_lyrics("tidal:9");
+        let text = screen(&state, 80, 14);
+        assert!(text.contains("Loading..."), "{text}");
+    }
+
+    #[test]
+    fn a_local_file_has_no_lyrics_to_ask_for() {
+        let state = in_the_lyrics("file:/a.flac");
+        let text = screen(&state, 80, 14);
+        assert!(text.contains("this track is a local file"), "{text}");
+    }
+
+    #[test]
+    fn no_lyrics_at_all_says_so_plainly() {
+        let mut state = in_the_lyrics("tidal:518338");
+        answer_lyrics(&mut state, "518338", None);
+        let text = screen(&state, 80, 14);
+        assert!(
+            text.contains("TIDAL has no lyrics for this track."),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn synced_lyrics_mark_the_current_line_and_show_the_provider() {
+        let mut state = in_the_lyrics("tidal:9");
+        answer_lyrics(
+            &mut state,
+            "9",
+            Some(phonia_ipc::Lyrics {
+                lines: vec![
+                    phonia_ipc::LyricLine {
+                        at_ms: 0,
+                        text: "intro".into(),
+                    },
+                    phonia_ipc::LyricLine {
+                        at_ms: 1_000,
+                        text: "verse one".into(),
+                    },
+                    phonia_ipc::LyricLine {
+                        at_ms: 2_000,
+                        text: "verse two".into(),
+                    },
+                ],
+                plain: None,
+                right_to_left: false,
+                provider: Some("MUSIXMATCH".into()),
+            }),
+        );
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::Position {
+                position_ms: 1_500,
+                duration_ms: Some(300_000),
+            }),
+        );
+        let text = screen(&state, 80, 14);
+        assert!(text.contains("> verse one"), "{text}");
+        assert!(text.contains("  verse two"), "{text}");
+        assert!(text.contains("Lyrics via MUSIXMATCH"), "{text}");
+    }
+
+    #[test]
+    fn plain_lyrics_show_a_not_synced_notice() {
+        let mut state = in_the_lyrics("tidal:9");
+        answer_lyrics(
+            &mut state,
+            "9",
+            Some(phonia_ipc::Lyrics {
+                lines: vec![],
+                plain: Some("some words".into()),
+                right_to_left: false,
+                provider: None,
+            }),
+        );
+        let text = screen(&state, 80, 14);
+        assert!(text.contains("Not synced to the music"), "{text}");
+        assert!(text.contains("some words"), "{text}");
+    }
+
+    #[test]
+    fn a_long_synced_list_scrolls_to_keep_the_current_line_on_screen() {
+        let mut state = in_the_lyrics("tidal:9");
+        let lines: Vec<phonia_ipc::LyricLine> = (0..40)
+            .map(|n| phonia_ipc::LyricLine {
+                at_ms: n * 1_000,
+                text: format!("line {n}"),
+            })
+            .collect();
+        answer_lyrics(
+            &mut state,
+            "9",
+            Some(phonia_ipc::Lyrics {
+                lines,
+                plain: None,
+                right_to_left: false,
+                provider: None,
+            }),
+        );
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::Position {
+                position_ms: 30_000,
+                duration_ms: Some(60_000),
+            }),
+        );
+        let text = screen(&state, 80, 14);
+        assert!(text.contains("> line 30"), "{text}");
+        assert!(
+            !text.contains("line 0 "),
+            "the early lines have scrolled off: {text}"
+        );
+    }
+
+    #[test]
+    fn right_to_left_lyrics_are_right_aligned() {
+        let mut state = in_the_lyrics("tidal:9");
+        answer_lyrics(
+            &mut state,
+            "9",
+            Some(phonia_ipc::Lyrics {
+                lines: vec![phonia_ipc::LyricLine {
+                    at_ms: 0,
+                    text: "שלום".into(),
+                }],
+                plain: None,
+                right_to_left: true,
+                provider: None,
+            }),
+        );
+        let text = screen(&state, 40, 14);
+        let line = text
+            .lines()
+            .find(|l| l.contains('ש'))
+            .expect("the line is on screen");
+        // Right-aligned: the marker sits in the right half of the row, not flush against the
+        // sidebar the way a left-aligned line's would.
+        let marker = line.chars().position(|c| c == '>').expect("the marker");
+        let total = line.chars().count();
+        assert!(
+            marker * 2 > total,
+            "expected the text pushed toward the right: {line:?} (marker at {marker} of {total})"
+        );
     }
 }

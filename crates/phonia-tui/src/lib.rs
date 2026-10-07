@@ -15,6 +15,7 @@ pub mod input;
 pub mod keymap;
 pub mod library;
 pub mod list;
+pub mod lyrics;
 pub mod search;
 pub mod theme;
 pub mod view;

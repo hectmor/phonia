@@ -4,6 +4,7 @@ use crate::browse::{self as browse, Header, Stack};
 use crate::cursor::Cursor;
 use crate::keymap::{self, Action, Key, Resolution};
 use crate::library::{self, LibraryState, LibraryTab};
+use crate::lyrics::{self, LyricsState};
 use crate::search::{Phase, SearchState, Selected, Tab};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use phonia_ipc::{
@@ -34,16 +35,23 @@ pub enum Section {
     Queue,
     Search,
     Library,
+    Lyrics,
 }
 
 impl Section {
-    pub const ALL: [Section; 3] = [Section::Queue, Section::Search, Section::Library];
+    pub const ALL: [Section; 4] = [
+        Section::Queue,
+        Section::Search,
+        Section::Library,
+        Section::Lyrics,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
             Section::Queue => "Queue",
             Section::Search => "Search",
             Section::Library => "Library",
+            Section::Lyrics => "Lyrics",
         }
     }
 }
@@ -115,6 +123,12 @@ pub struct State {
     pub library: Option<LibraryState>,
     /// The album and playlist views opened from the library.
     pub library_views: Stack,
+    /// The track whose lyrics are loaded, loading, or failed; `None` until the Lyrics section has
+    /// been opened once with a TIDAL track playing (pull, not pushed for every track -- see
+    /// `maybe_load_lyrics`).
+    pub lyrics: Option<LyricsState>,
+    /// The generation the next `Request::Lyrics` is tagged with; see `LyricsState::generation`.
+    pub lyrics_generation: u64,
     /// The number the next view opened is pushed with.
     pub next_serial: u64,
 }
@@ -151,6 +165,8 @@ impl State {
             }
             Section::Search => &self.search_views,
             Section::Library => &self.library_views,
+            // Nothing to show here: the lyrics have no cover of their own.
+            Section::Lyrics => return None,
         };
         match stack.top()? {
             browse::View::TrackList(view) => {
@@ -243,6 +259,10 @@ pub enum Tag {
     Library { generation: u64 },
     /// The next page of one of the library's three lists.
     LibraryMore { tab: LibraryTab, generation: u64 },
+    /// A track's lyrics; counts only for the generation asked last, so an answer that arrives
+    /// after a newer one was asked for (a different track, or a reconnect that retried) is
+    /// dropped rather than shown under the wrong id.
+    Lyrics { generation: u64 },
 }
 
 /// What [`update`] decided.
@@ -269,15 +289,29 @@ impl Effects {
     }
 }
 
-/// Applies one message to the state, then, unlike a search, the library has no key that starts
-/// loading it: it is asked for the moment its section is first shown, whatever brought the state
-/// there (a key, or the connection completing while it was already the section shown).
+/// Applies one message to the state, then, unlike a search, the library and the lyrics have no
+/// key that starts loading them: each is asked for the moment its section is first shown,
+/// whatever brought the state there (a key, or the connection completing while it was already the
+/// section shown).
 pub fn update(state: &mut State, msg: Msg) -> Effects {
+    let section_before = state.section();
+    let connected_before = state.connection == Connection::Connected;
     let mut effects = update_now(state, msg);
     if let Some(request) = maybe_load_library(state) {
         effects.redraw = true;
         effects.commands.push(Cmd::Request {
             tag: Tag::Library { generation: 0 },
+            request,
+        });
+    }
+    // Entering the panel, or reconnecting while already in it, is also the retry for a fetch that
+    // failed: pulling, not pushing, means there is otherwise no moment that asks again on its own.
+    let retry = section_before != Section::Lyrics && state.section() == Section::Lyrics
+        || !connected_before && state.connection == Connection::Connected;
+    if let Some((generation, request)) = maybe_load_lyrics(state, retry) {
+        effects.redraw = true;
+        effects.commands.push(Cmd::Request {
+            tag: Tag::Lyrics { generation },
             request,
         });
     }
@@ -318,6 +352,9 @@ fn update_now(state: &mut State, msg: Msg) -> Effects {
                 library.connection_lost();
             }
             state.library_views.connection_lost();
+            if let Some(lyrics) = &mut state.lyrics {
+                lyrics.connection_lost();
+            }
             Effects::redraw()
         }
         Msg::Refused { reason } => {
@@ -347,6 +384,36 @@ fn maybe_load_library(state: &mut State) -> Option<Request> {
     let (library, request) = LibraryState::new();
     state.library = Some(library);
     Some(request)
+}
+
+/// The request that loads the current track's lyrics, when the Lyrics panel is open and there is
+/// a reason to ask: nothing has been asked for this track yet, it is a different track than what
+/// is held, or `retry` (entering the panel, or reconnecting while already in it) and the last
+/// answer was a failure. Silently refused, the same as the library, until there is a connection
+/// with the catalog to ask, and besides that needs `CAP_LYRICS` and a TIDAL track actually
+/// playing: a local file has no id to ask with, and nothing playing has no track at all.
+fn maybe_load_lyrics(state: &mut State, retry: bool) -> Option<(u64, Request)> {
+    if state.section() != Section::Lyrics
+        || state.connection != Connection::Connected
+        || !state.has(phonia_ipc::CAP_CATALOG)
+        || !state.has(phonia_ipc::CAP_LYRICS)
+    {
+        return None;
+    }
+    let id = lyrics::tidal_id(state.status.as_ref()?.track.as_ref()?)?;
+    let should_fetch = match &state.lyrics {
+        None => true,
+        Some(current) if current.id != id => true,
+        Some(current) => retry && matches!(current.phase, browse::Phase::Failed(_)),
+    };
+    if !should_fetch {
+        return None;
+    }
+    state.lyrics_generation += 1;
+    let generation = state.lyrics_generation;
+    let (lyrics, request) = LyricsState::begin(id.to_string(), generation);
+    state.lyrics = Some(lyrics);
+    Some((generation, request))
 }
 
 /// Starts a search for `query`, if there is a daemon that can do it; if there is not, says why
@@ -441,6 +508,21 @@ fn on_response(state: &mut State, tag: Tag, result: Result<Payload, String>) -> 
                     state.last_error =
                         Some(format!("could not load more of the library: {reason}"));
                 }
+            }
+            Effects::redraw()
+        }
+        Tag::Lyrics { generation } => {
+            let Some(lyrics) = &mut state.lyrics else {
+                return Effects::default();
+            };
+            if generation != lyrics.generation {
+                return Effects::default();
+            }
+            match result {
+                Ok(payload) => {
+                    lyrics.finish(payload);
+                }
+                Err(reason) => lyrics.fail(reason),
             }
             Effects::redraw()
         }
@@ -887,6 +969,49 @@ fn scroll_help(state: &mut State, action: Action) -> Effects {
     }
 }
 
+/// Scrolls the Lyrics panel: synced or plain alike, since both share one offset (see the doc
+/// comment on `lyrics.rs`). With nothing loaded yet, or nothing to show once it has, there is
+/// nothing to scroll.
+fn scroll_lyrics(state: &mut State, action: Action) -> Effects {
+    let panel_rows = crate::view::lyrics_panel_rows(state);
+    let page = state.half_page();
+    let position_ms = state.status.as_ref().map_or(0, |status| status.position_ms);
+    let Some(current) = &mut state.lyrics else {
+        return Effects::default();
+    };
+    let Some(lyrics) = &current.lyrics else {
+        return Effects::default();
+    };
+    let rows = lyrics::body_rows(lyrics, panel_rows);
+    let max = lyrics::max_scroll(lyrics, rows);
+    let auto = lyrics::auto_offset(lyrics, position_ms, rows);
+    let before = current.scroll.unwrap_or(auto);
+    let new = match action {
+        Action::Down => before + 1,
+        Action::Up => before.saturating_sub(1),
+        Action::First => 0,
+        Action::Last => max,
+        Action::HalfPageDown => before + page,
+        Action::HalfPageUp => before.saturating_sub(page),
+        _ => before,
+    }
+    .min(max);
+    // Nothing actually moved: stay in auto-follow rather than locking onto a value that only
+    // coincidentally matches it right now (there is nowhere to scroll to yet, or the key is
+    // already at an end auto-follow sits at too) -- it would otherwise stop following the
+    // current line later for no visible reason once there is somewhere to scroll to.
+    if current.scroll.is_none() && new == auto {
+        return Effects::default();
+    }
+    let changed = current.scroll != Some(new);
+    current.scroll = Some(new);
+    if changed {
+        Effects::redraw()
+    } else {
+        Effects::default()
+    }
+}
+
 /// What might have changed visibly, taken before and after handling an action that does not
 /// already know on its own whether to redraw: cursor positions (the sidebar, the queue, a search's
 /// or the library's own lists, and whatever is open on top of either one's stack), which tab and
@@ -979,6 +1104,11 @@ fn apply(state: &mut State, action: Action) -> Effects {
         | Action::Last
         | Action::HalfPageDown
         | Action::HalfPageUp => {
+            // The lyrics have no cursor to move (see the module doc comment on `lyrics.rs`):
+            // these keys scroll the panel instead, synced or plain alike.
+            if state.focus == Focus::Main && state.section() == Section::Lyrics {
+                return scroll_lyrics(state, action);
+            }
             move_cursor(state, action);
             let commands = load_more_results(state);
             if !commands.is_empty() {
@@ -1018,6 +1148,9 @@ fn apply(state: &mut State, action: Action) -> Effects {
                 } else {
                     act_in_view(state, action)
                 };
+            } else if state.section() == Section::Lyrics {
+                // Nothing to open or play from here.
+                return Effects::default();
             } else {
                 return edit_queue(state, action);
             }
@@ -1033,7 +1166,7 @@ fn apply(state: &mut State, action: Action) -> Effects {
                     act_on_library_result(state, action)
                 }
                 Section::Library => act_in_view(state, action),
-                Section::Queue => Effects::default(),
+                Section::Queue | Section::Lyrics => Effects::default(),
             };
         }
         Action::StartSearch => {
@@ -1277,7 +1410,7 @@ fn load_more_results(state: &mut State) -> Vec<Cmd> {
                 None => Vec::new(),
             }
         }
-        Section::Queue => Vec::new(),
+        Section::Queue | Section::Lyrics => Vec::new(),
     }
 }
 
@@ -1519,6 +1652,9 @@ fn move_cursor(state: &mut State, action: Action) {
                 let (cursor, len) = library.list_of(library_tab.unwrap_or_default());
                 (len, cursor)
             }
+            // `apply` returns through `scroll_lyrics` before this is ever reached for Lyrics;
+            // only here for exhaustiveness.
+            (Focus::Main, Section::Lyrics) => return,
         }
     };
     match action {
@@ -1911,7 +2047,7 @@ mod tests {
         assert_eq!(state.section(), Section::Search);
         ch(&mut state, 'j');
         ch(&mut state, 'j');
-        assert_eq!(state.section(), Section::Library);
+        assert_eq!(state.section(), Section::Lyrics);
         assert!(!ch(&mut state, 'j').redraw, "already at the bottom");
     }
 
@@ -1928,7 +2064,7 @@ mod tests {
     fn gg_goes_to_the_top_and_capital_g_to_the_bottom() {
         let mut state = State::default();
         ch(&mut state, 'G');
-        assert_eq!(state.section(), Section::Library);
+        assert_eq!(state.section(), Section::Lyrics);
         assert!(
             !ch(&mut state, 'g').redraw,
             "half a binding changes nothing"
@@ -1946,7 +2082,7 @@ mod tests {
         ch(&mut state, 'g');
         ch(&mut state, 'x');
         assert!(state.pending.is_empty());
-        assert_eq!(state.section(), Section::Library, "nothing moved");
+        assert_eq!(state.section(), Section::Lyrics, "nothing moved");
     }
 
     #[test]
@@ -1954,7 +2090,7 @@ mod tests {
         let mut state = State::default();
         update(&mut state, Msg::Resize(80, 40));
         ctrl(&mut state, 'd');
-        assert_eq!(state.section(), Section::Library, "20 rows is past the end");
+        assert_eq!(state.section(), Section::Lyrics, "20 rows is past the end");
         ctrl(&mut state, 'u');
         assert_eq!(state.section(), Section::Queue);
 
@@ -1968,6 +2104,8 @@ mod tests {
         let mut state = State::default();
         ch(&mut state, '3');
         assert_eq!(state.section(), Section::Library);
+        ch(&mut state, '4');
+        assert_eq!(state.section(), Section::Lyrics);
         ch(&mut state, '2');
         assert_eq!(state.section(), Section::Search);
         ch(&mut state, '1');
@@ -4715,5 +4853,421 @@ mod tests {
         press(&mut search_state, KeyCode::Enter);
         assert!(!search_state.search_views.is_empty());
         assert!(search_state.library_views.is_empty());
+    }
+
+    // --- The Lyrics section -----------------------------------------------------------------
+
+    fn connected_with_track(source: &str, capabilities: &[&str]) -> State {
+        let mut playing = status();
+        playing.track = Some(Track {
+            item_id: None,
+            source: Some(source.to_string()),
+            title: Some("Song".into()),
+            artist: None,
+            duration_ms: Some(300_000),
+            quality: None,
+            cover: None,
+            replay_gain: None,
+        });
+        let mut state = State::default();
+        update(
+            &mut state,
+            Msg::Connected {
+                server: ServerInfo {
+                    name: "phoniad".into(),
+                    version: "0.1.0".into(),
+                    pid: 7,
+                },
+                protocol: Version {
+                    major: 1,
+                    minor: 10,
+                },
+                capabilities: capabilities.iter().map(|c| c.to_string()).collect(),
+                status: playing,
+                queue: queue(),
+            },
+        );
+        state
+    }
+
+    fn connected_on_tidal_track(id: &str) -> State {
+        connected_with_track(&format!("tidal:{id}"), &["catalog", "lyrics"])
+    }
+
+    fn track_started(source: &str) -> Msg {
+        Msg::Daemon(Event::TrackStarted {
+            item_id: None,
+            source: Some(source.to_string()),
+            title: Some("Another Song".into()),
+            artist: None,
+            duration_ms: None,
+            spec: phonia_ipc::Spec {
+                sample_rate: 44_100,
+                channels: 2,
+                bits_per_sample: 16,
+            },
+            gapless: false,
+            quality: None,
+            cover: None,
+            replay_gain: None,
+        })
+    }
+
+    fn synced_lyrics_payload(id: &str, lines: Vec<(u64, &str)>) -> Payload {
+        Payload::Lyrics {
+            id: id.to_string(),
+            lyrics: Some(phonia_ipc::Lyrics {
+                lines: lines
+                    .into_iter()
+                    .map(|(at_ms, text)| phonia_ipc::LyricLine {
+                        at_ms,
+                        text: text.to_string(),
+                    })
+                    .collect(),
+                plain: None,
+                right_to_left: false,
+                provider: Some("MUSIXMATCH".into()),
+            }),
+        }
+    }
+
+    fn plain_lyrics_payload(id: &str, text: &str) -> Payload {
+        Payload::Lyrics {
+            id: id.to_string(),
+            lyrics: Some(phonia_ipc::Lyrics {
+                lines: vec![],
+                plain: Some(text.to_string()),
+                right_to_left: false,
+                provider: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn opening_the_lyrics_panel_asks_once_for_the_current_tidal_track() {
+        let mut state = connected_on_tidal_track("9");
+        let effects = ch(&mut state, '4');
+        let (tag, request) = search_request(effects);
+        assert_eq!(tag, Tag::Lyrics { generation: 1 });
+        assert_eq!(request, Request::Lyrics { id: "9".into() });
+        assert_eq!(state.lyrics.as_ref().unwrap().phase, browse::Phase::Loading);
+        assert_eq!(state.lyrics.as_ref().unwrap().id, "9");
+
+        update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Ok(synced_lyrics_payload("9", vec![(0, "a")])),
+            },
+        );
+        assert_eq!(state.lyrics.as_ref().unwrap().phase, browse::Phase::Done);
+
+        // Leaving and coming back to the same, already-loaded track does not ask again.
+        ch(&mut state, '1');
+        assert!(ch(&mut state, '4').commands.is_empty());
+    }
+
+    #[test]
+    fn without_a_connection_a_tidal_track_or_the_right_capabilities_nothing_is_asked_for() {
+        // Not connected at all.
+        let mut state = State::default();
+        assert!(ch(&mut state, '4').commands.is_empty());
+        assert!(state.lyrics.is_none());
+
+        // Connected, but the track is a local file.
+        let mut state = connected_with_track("file:/a.flac", &["catalog", "lyrics"]);
+        assert!(ch(&mut state, '4').commands.is_empty());
+        assert!(state.lyrics.is_none());
+
+        // Connected to a TIDAL track, but this daemon has no lyrics support.
+        let mut state = connected_with_track("tidal:9", &["catalog"]);
+        assert!(ch(&mut state, '4').commands.is_empty());
+        assert!(state.lyrics.is_none());
+    }
+
+    #[test]
+    fn a_track_change_while_the_panel_is_open_asks_again_and_drops_the_old_track_at_once() {
+        let mut state = connected_on_tidal_track("9");
+        let effects = ch(&mut state, '4');
+        let (tag, _) = search_request(effects);
+        update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Ok(synced_lyrics_payload("9", vec![(0, "a")])),
+            },
+        );
+
+        let effects = update(&mut state, track_started("tidal:10"));
+        let (tag, request) = search_request(effects);
+        assert_eq!(tag, Tag::Lyrics { generation: 2 });
+        assert_eq!(request, Request::Lyrics { id: "10".into() });
+        let lyrics = state.lyrics.as_ref().unwrap();
+        assert_eq!(lyrics.id, "10");
+        assert_eq!(
+            lyrics.phase,
+            browse::Phase::Loading,
+            "the old track's lyrics are not shown under the new one's title"
+        );
+    }
+
+    #[test]
+    fn a_track_change_while_the_panel_is_closed_asks_for_nothing() {
+        let mut state = connected_on_tidal_track("9");
+        let effects = ch(&mut state, '4');
+        let (tag, _) = search_request(effects);
+        update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Ok(synced_lyrics_payload("9", vec![(0, "a")])),
+            },
+        );
+        ch(&mut state, '1'); // back to the queue: the panel is closed
+
+        let effects = update(&mut state, track_started("tidal:10"));
+        assert!(
+            effects.commands.is_empty(),
+            "pull: nothing is asked while the panel is not open"
+        );
+        assert_eq!(
+            state.lyrics.as_ref().unwrap().id,
+            "9",
+            "left exactly as it was"
+        );
+    }
+
+    #[test]
+    fn a_stale_answer_for_a_track_no_longer_current_is_dropped() {
+        let mut state = connected_on_tidal_track("9");
+        let effects = ch(&mut state, '4');
+        let (old_tag, _) = search_request(effects);
+        update(&mut state, track_started("tidal:10"));
+
+        update(
+            &mut state,
+            Msg::Response {
+                tag: old_tag,
+                result: Ok(synced_lyrics_payload("9", vec![(0, "a")])),
+            },
+        );
+        let lyrics = state.lyrics.as_ref().unwrap();
+        assert_eq!(lyrics.id, "10", "still about the new track");
+        assert_eq!(
+            lyrics.phase,
+            browse::Phase::Loading,
+            "the stale answer for the old one changed nothing"
+        );
+    }
+
+    #[test]
+    fn a_stale_error_for_a_superseded_request_is_also_dropped() {
+        let mut state = connected_on_tidal_track("9");
+        let effects = ch(&mut state, '4');
+        let (old_tag, _) = search_request(effects);
+        update(&mut state, track_started("tidal:10"));
+
+        update(
+            &mut state,
+            Msg::Response {
+                tag: old_tag,
+                result: Err("not logged in to TIDAL".into()),
+            },
+        );
+        assert_eq!(
+            state.lyrics.as_ref().unwrap().phase,
+            browse::Phase::Loading,
+            "the stale error did not fail the current track's fetch"
+        );
+    }
+
+    #[test]
+    fn leaving_and_returning_after_a_failure_retries() {
+        let mut state = connected_on_tidal_track("9");
+        let effects = ch(&mut state, '4');
+        let (tag, _) = search_request(effects);
+        update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Err("not logged in to TIDAL".into()),
+            },
+        );
+        assert!(matches!(
+            state.lyrics.as_ref().unwrap().phase,
+            browse::Phase::Failed(_)
+        ));
+
+        ch(&mut state, '1');
+        let effects = ch(&mut state, '4');
+        let (tag, request) = search_request(effects);
+        assert_eq!(tag, Tag::Lyrics { generation: 2 });
+        assert_eq!(request, Request::Lyrics { id: "9".into() });
+    }
+
+    #[test]
+    fn reconnecting_while_the_panel_is_still_open_retries_a_fetch_the_disconnect_failed() {
+        let mut state = connected_on_tidal_track("9");
+        ch(&mut state, '4');
+        disconnected(&mut state, Duration::from_secs(1));
+        assert!(matches!(
+            state.lyrics.as_ref().unwrap().phase,
+            browse::Phase::Failed(_)
+        ));
+
+        let mut playing = status();
+        playing.track = Some(Track {
+            item_id: None,
+            source: Some("tidal:9".into()),
+            title: Some("Song".into()),
+            artist: None,
+            duration_ms: Some(300_000),
+            quality: None,
+            cover: None,
+            replay_gain: None,
+        });
+        let effects = update(
+            &mut state,
+            Msg::Connected {
+                server: ServerInfo {
+                    name: "phoniad".into(),
+                    version: "0.1.0".into(),
+                    pid: 7,
+                },
+                protocol: Version {
+                    major: 1,
+                    minor: 10,
+                },
+                capabilities: vec!["catalog".into(), "lyrics".into()],
+                status: playing,
+                queue: queue(),
+            },
+        );
+        let (_, request) = search_request(effects);
+        assert_eq!(request, Request::Lyrics { id: "9".into() });
+        assert_eq!(state.lyrics.as_ref().unwrap().phase, browse::Phase::Loading);
+    }
+
+    #[test]
+    fn disconnecting_with_lyrics_already_loaded_keeps_them_shown() {
+        let mut state = connected_on_tidal_track("9");
+        let effects = ch(&mut state, '4');
+        let (tag, _) = search_request(effects);
+        update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Ok(synced_lyrics_payload("9", vec![(0, "a")])),
+            },
+        );
+        disconnected(&mut state, Duration::from_secs(1));
+        assert_eq!(state.lyrics.as_ref().unwrap().phase, browse::Phase::Done);
+    }
+
+    #[test]
+    fn scrolling_overrides_auto_follow_until_the_track_changes() {
+        // More lines than any reasonable terminal shows at once, so there is always room to
+        // scroll regardless of how tall the test's own terminal is.
+        let many_lines: Vec<(u64, &str)> = vec![
+            (0, "a"),
+            (1_000, "b"),
+            (2_000, "c"),
+            (3_000, "d"),
+            (4_000, "e"),
+            (5_000, "f"),
+            (6_000, "g"),
+            (7_000, "h"),
+            (8_000, "i"),
+            (9_000, "j"),
+            (10_000, "k"),
+            (11_000, "l"),
+            (12_000, "m"),
+            (13_000, "n"),
+            (14_000, "o"),
+            (15_000, "p"),
+        ];
+        let mut state = connected_on_tidal_track("9");
+        update(&mut state, Msg::Resize(80, 14));
+        let effects = ch(&mut state, '4');
+        let (tag, _) = search_request(effects);
+        update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Ok(synced_lyrics_payload("9", many_lines.clone())),
+            },
+        );
+        ch(&mut state, 'l'); // focus the panel: movement keys reach it only from Focus::Main
+
+        assert_eq!(
+            state.lyrics.as_ref().unwrap().scroll,
+            None,
+            "auto-follow until something scrolls it"
+        );
+        assert!(ch(&mut state, 'j').redraw);
+        assert_eq!(state.lyrics.as_ref().unwrap().scroll, Some(1));
+
+        ch(&mut state, 'G');
+        let Payload::Lyrics {
+            lyrics: Some(lyrics),
+            ..
+        } = synced_lyrics_payload("9", many_lines)
+        else {
+            unreachable!()
+        };
+        let rows = crate::view::lyrics_panel_rows(&state);
+        let max = lyrics::max_scroll(&lyrics, lyrics::body_rows(&lyrics, rows));
+        assert!(max > 1, "the test needs more lines than fit on screen");
+        assert_eq!(state.lyrics.as_ref().unwrap().scroll, Some(max));
+
+        // A new track resets to auto-follow.
+        update(&mut state, track_started("tidal:10"));
+        assert_eq!(state.lyrics.as_ref().unwrap().scroll, None);
+    }
+
+    #[test]
+    fn scrolling_plain_lyrics_is_clamped_to_how_many_lines_there_are() {
+        let mut state = connected_on_tidal_track("9");
+        update(&mut state, Msg::Resize(80, 14));
+        let effects = ch(&mut state, '4');
+        let (tag, _) = search_request(effects);
+        // More lines than any reasonable terminal shows at once, so there is always room to
+        // scroll regardless of how tall the test's own terminal is.
+        let text = (0..30)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Ok(plain_lyrics_payload("9", &text)),
+            },
+        );
+        ch(&mut state, 'l');
+        for _ in 0..40 {
+            ch(&mut state, 'j');
+        }
+        let Payload::Lyrics {
+            lyrics: Some(lyrics),
+            ..
+        } = plain_lyrics_payload("9", &text)
+        else {
+            unreachable!()
+        };
+        let rows = crate::view::lyrics_panel_rows(&state);
+        let max = lyrics::max_scroll(&lyrics, lyrics::body_rows(&lyrics, rows));
+        assert!(max > 0, "the test needs more lines than fit on screen");
+        assert_eq!(state.lyrics.as_ref().unwrap().scroll, Some(max));
+    }
+
+    #[test]
+    fn the_lyrics_panel_has_no_cover_and_adds_nothing_to_the_queue() {
+        let mut state = connected_on_tidal_track("9");
+        ch(&mut state, '4');
+        assert_eq!(state.open_cover(), None);
+        ch(&mut state, 'l');
+        assert!(ch(&mut state, 'a').commands.is_empty());
+        assert!(press(&mut state, KeyCode::Enter).commands.is_empty());
     }
 }

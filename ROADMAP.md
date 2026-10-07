@@ -79,7 +79,7 @@ done — it is its own product decision, not a leftover.
 | Issue | What | Status |
 |---|---|---|
 | #120 | Play reporting: finished plays reach TIDAL's own Recently Played | Closed (verified live against a real account) |
-| #32 | Letras sincronizadas: lyrics synced to playback in the TUI | In progress, part 2/3 |
+| #32 | Letras sincronizadas: lyrics synced to playback in the TUI | Code complete, all 3 parts merged |
 
 The rest of Phase 4 and all of Phase 5 are not started, except CI (#42) and
 rustfmt-in-CI (#50), both closed. Nothing else is planned in detail yet;
@@ -561,7 +561,31 @@ account: `ctl lyrics 233059491` printed all 39 lines timestamped
 no lyrics for this track"; asking with no id while Sultans of Swing was
 playing resolved to the same track automatically.
 
-Part 3 (not started) is the TUI panel itself.
+Part 3 (merged, last) is the TUI panel: a fourth sidebar section,
+`Section::Lyrics` (key `4`), asking the daemon the moment it is opened or
+the track changes while it is (pull, never pushed for a track nobody is
+looking at), following the current line automatically as it plays
+(`current_line`/`centered_first` in the new `lyrics.rs`, the same
+`theme.accent`-marked-row styling `queue_lines` already established for
+"the current one") -- overridable by scrolling manually (`j`/`k` and the
+rest), which then stays put until the track changes, since the user asked
+for that rather than synced lyrics being auto-follow-only. Plain text (no
+sync) shows a notice and scrolls the same way; no lyrics at all, a local
+file, a missing capability, and a failed fetch (retried by leaving the
+panel and coming back) each say so plainly. Right-to-left text is
+right-aligned, no bidi shaping. A stale answer (the track moved on before
+it arrived) is dropped through the same `Tag`/generation pattern the
+rest of the TUI's panels already use, not a new mechanism. **Verified
+live against the real daemon, the real account and a track actually
+playing** (as a second, read-only client of a daemon already in use, so
+as not to disturb it): Watain's "De Profundis" showed its real synced
+lyrics, auto-centered
+on the line being sung, credited "Lyrics via MUSIXMATCH" -- this live
+check caught a real bug (scrolling when there was nothing yet to scroll
+silently turned off auto-follow the moment the terminal was resized
+smaller later), fixed before merging.
+
+This closes #32: all three parts are merged.
 
 ## Conventions this file assumes
 
