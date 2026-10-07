@@ -1781,3 +1781,81 @@ resolved to the same 39 lines automatically.
 
 Part 3 (not started, last) is the TUI panel itself: `Section::Lyrics`, current-line tracking for
 synced lyrics, manual scrolling for plain ones.
+
+## 2026-10-07 — #32 part 3 (last): one scroll offset, auto or manual, for both kinds of lyrics
+
+A fourth sidebar section, `Section::Lyrics` (key `4`, `Group::Panels`), closing #32. Planned with
+Opus from a read-only Explore investigation of `phonia-tui`'s existing precedents (`view/mod.rs`'s
+`draw_main` dispatch, `queue_lines`' current-row styling, `view/library.rs`'s loading/failed/done
+pattern, `cursor.rs`'s lack of a stored viewport offset, `Found<T>`'s TIDAL-pagination shape, and
+the project's several existing "is this answer stale" mechanisms); the user then chose, against the
+plan's own recommendation, to allow overriding the auto-follow of synced lyrics by scrolling
+manually (not just of unsynced plain text) — the rest of this entry reflects that choice, not the
+original recommendation.
+
+**State** (`crates/phonia-tui/src/lyrics.rs`, new): `LyricsState { id, generation, phase:
+browse::Phase, lyrics: Option<phonia_ipc::Lyrics>, scroll: Option<usize> }`, one held in
+`app::State.lyrics`, replaced (never mutated in place) whenever a fetch starts for a different id —
+a track change while the panel is open drops the old track's lyrics and shows "Loading..." for the
+new one at once, not the old lyrics under the new title, since lyrics are pulled per track, not
+merged. `browse::Phase` (already shared by the library and every browse view) is reused rather than
+inventing a fourth loading-state enum.
+
+**One scroll model for both kinds of answer.** `LyricsState.scroll: Option<usize>` is `None`
+(auto) until the user scrolls, then an explicit row offset kept until the track changes. With no
+override, synced lyrics center on the line being sung (`lyrics::current_line` -- the last line
+whose timestamp has passed, by `partition_point`; `lyrics::centered_first` -- `current -
+rows/2`, clamped) and plain text starts at the top (`lyrics::auto_offset`, 0 for plain, computed
+for synced). `app::scroll_lyrics` (mirroring `scroll_help`'s shape) computes the same baseline,
+applies the pressed key's delta, clamps to `lyrics::max_scroll` (the line count, or the plain
+text's line count, less however many rows the panel has), and stores the result as the new
+override. This was deliberately **not** two separate mechanisms (an auto-follow cursor for synced,
+a stored offset like `help_scroll` for plain) since one model that can be either computed or
+overridden covers both without a "normally computed, but sometimes not" special case in the view
+itself, and it is what let scrolling-with-override fall out of the help-scroll precedent almost for
+free once the user asked for it.
+
+**A bug the live check against a real daemon caught, not a review**: the first version set
+`scroll` to `Some(new)` on every keypress, including one that happened to change nothing (nowhere
+yet to scroll, every line already fit on screen). That quietly locked the panel out of auto-follow
+from then on, invisibly, until the terminal was later resized smaller and it stopped centering on
+the current line for no apparent reason. Fixed by only committing to manual mode when the computed
+offset actually differs from what auto-follow is showing right now
+(`current.scroll.is_none() && new == auto` stays in auto mode) -- caught by testing the TUI live
+against the user's own already-running daemon (a second, read-only client, careful not to send any
+request that would disturb its paused track), not by the unit tests, none of which happened to
+resize the terminal mid-session the way a real one can.
+
+**Fetch trigger**: one hook, `app::maybe_load_lyrics`, called from `update()` right after
+`maybe_load_library`'s own (same "ask the moment the section is shown, not on a dedicated key"
+shape). It fetches when the Lyrics section is open, the connection has `CAP_CATALOG` and the new
+`CAP_LYRICS`, the current track has a TIDAL id (`lyrics::tidal_id`, stripping `tidal:` the same way
+`phonia ctl lyrics` already does), and either nothing is held for this id yet, it is a different
+id, or `retry` is set and the last fetch failed. `retry` is true on entering the section and on
+reconnecting while already in it (the daemon caches `Some`/`None` but never a failure, so a failed
+fetch is worth trying again without a dedicated retry key) -- leaving the panel and returning is
+the other retry path. Pull, never pushed: a `TrackStarted` while the panel is closed changes
+nothing, since the hook only acts when the section is actually shown.
+
+**Staleness**: `Tag::Lyrics { generation }` (not the id itself -- `Tag` derives `Copy`, which a
+`String` field would break). `on_response` drops an answer whose generation no longer matches
+`state.lyrics`'s, the same pattern `Tag::Search`/`Tag::Library` already use, rather than a new one.
+
+**Rendering** (`crates/phonia-tui/src/view/lyrics.rs`, new): the current line is marked `>` (not
+`▶`, so it reads identically on a terminal with poor Unicode support, and matches the exact glyph
+`queue_lines` already uses for "the entry playing") in `theme.accent`; lines already sung are
+`theme.dim`; upcoming ones are plain `theme.text` -- the same three-tier styling `queue_lines`
+established for "selected / current / plain", just without a `theme.selected` tier, since there is
+no cursor to select a row with here. Right-to-left text is right-aligned per line
+(`Line::alignment(Alignment::Right)`), no bidi shaping attempted. The provider credit
+("Lyrics via {provider}") is a dim footer row outside the scrollable body when there is one; an
+unsynced plain answer gets a dim notice row above it. No lyrics at all, a local file, a missing
+capability, and a failed fetch each say so in place of the body, the same message styles
+`view/library.rs` already established for its own no-data cases.
+
+**Verified live against the real daemon, the real account, and a track actually playing** (not a
+synthetic fixture): with the user's own `phoniad` already running a paused track (Watain, "De
+Profundis"), `phonia tui` connected as a second, read-only client (no playback-affecting key
+pressed, so as to not disturb the session already in progress) showed its real synced lyrics,
+correctly auto-centered on the line being sung, "Lyrics via MUSIXMATCH" credited at the bottom --
+and, as above, is what caught the auto-follow-lockout bug before it shipped.

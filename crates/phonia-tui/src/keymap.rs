@@ -256,6 +256,7 @@ pub const BINDINGS: &[Binding] = &[
     bind(&[c('1')], "1", Action::Section(0), "Queue", Group::Panels),
     bind(&[c('2')], "2", Action::Section(1), "Search", Group::Panels),
     bind(&[c('3')], "3", Action::Section(2), "Library", Group::Panels),
+    bind(&[c('4')], "4", Action::Section(3), "Lyrics", Group::Panels),
     bind(
         &[Key::plain(KeyCode::Char(' '))],
         "Space",

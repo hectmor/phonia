@@ -32,7 +32,7 @@ chain works with real hardware (a Fosi Audio DS2 during development).
   engine and ALSA output, without touching TIDAL. Useful for testing the DAC in isolation.
 
 - **`phonia tui [--socket <path>]`** -- the terminal interface, a client of a running `phoniad`. It
-  has a sidebar (Queue, Search, Library), a main panel and a bar at the bottom. The queue is listed
+  has a sidebar (Queue, Search, Library, Lyrics), a main panel and a bar at the bottom. The queue is listed
   live, in queue order (the order `phonia ctl queue list` shows and that edits act on, not the
   shuffled play order), with the one playing marked and the row under the cursor highlighted. With
   the focus on the list (`l`), `j`/`k` select an entry, `Enter` plays it, `d` removes it, `J`/`K`
@@ -238,6 +238,13 @@ replaygain = "off"      # off | track | album | auto: apply TIDAL's ReplayGain? 
   three at once, the same way `artist` does for its own lists; `tracks`/`albums`/`playlists` give
   the next pages. `phonia ctl library` prints all three, `--limit` sets the size of a page (at most
   100).
+- **Lyrics** (the request `lyrics` of protocol 1.10, advertised as the `lyrics` capability
+  alongside `catalog`): synced lines (LRC format) when TIDAL has them, plain text otherwise, pulled
+  only for the track playing now and only once a client actually asks -- `phonia ctl lyrics
+  [<id>]` (defaults to the current track) for the CLI, and the TUI's own Lyrics section, which asks
+  the moment it is opened (or the track changes while it is) and follows the line being sung as it
+  plays; `j`/`k` (and the other movement keys) scroll it manually, overriding that until the track
+  changes. A local file has no TIDAL id to ask with, so its lyrics are never looked up.
 - `phonia config path` prints which file is used, and `phonia config show` prints every setting
   with where its value comes from (the file or the default). `--config <file>` (or the
   `PHONIA_CONFIG` environment variable) selects another file, also for `phoniad`.
