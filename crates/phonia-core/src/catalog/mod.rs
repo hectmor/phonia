@@ -12,6 +12,7 @@ use std::fmt;
 use std::time::Duration;
 
 pub mod fake;
+mod lrc;
 mod remote;
 
 pub use remote::TidalCatalog;
@@ -67,6 +68,29 @@ pub struct Track {
     pub quality: Option<Quality>,
     /// Whether it can be played at all (TIDAL lists tracks that are not available where you are).
     pub streamable: bool,
+}
+
+/// A track's lyrics, synced or not. `lines` is empty when TIDAL has the plain text but no
+/// time-synced version of it: `plain` is still `Some` in that case, so a caller can fall back to
+/// showing it unsynced instead of nothing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lyrics {
+    /// Time-synced lines, in order. Empty when there is no synced version.
+    pub lines: Vec<LyricLine>,
+    /// The plain text TIDAL has, whether or not a synced version also exists.
+    pub plain: Option<String>,
+    /// Read right to left (Arabic, Hebrew...): ratatui does no bidi shaping itself, so a caller
+    /// can only right-align the text and let the terminal order the characters.
+    pub right_to_left: bool,
+    /// Who transcribed them (e.g. "Musixmatch"), when TIDAL says: most lyric providers require
+    /// crediting them wherever the text is shown.
+    pub provider: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LyricLine {
+    pub at: Duration,
+    pub text: String,
 }
 
 /// What kind of release an album is.
@@ -265,4 +289,7 @@ pub trait Catalog: Send + Sync {
         offset: u32,
         limit: u32,
     ) -> BoxFuture<'static, Result<Page<Playlist>, CatalogError>>;
+
+    /// A track's lyrics; `None` when TIDAL has none for it at all.
+    fn track_lyrics(&self, id: String) -> BoxFuture<'static, Result<Option<Lyrics>, CatalogError>>;
 }

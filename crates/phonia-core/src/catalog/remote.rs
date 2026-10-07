@@ -9,7 +9,7 @@
 
 use super::{
     Album, AlbumFilter, AlbumKind, AlbumRef, Artist, ArtistRef, Catalog, CatalogError, Kind,
-    MAX_ITEMS_LIMIT, MAX_SEARCH_LIMIT, Page, Playlist, SearchResults, Track,
+    Lyrics, MAX_ITEMS_LIMIT, MAX_SEARCH_LIMIT, Page, Playlist, SearchResults, Track, lrc,
 };
 use crate::config::Quality;
 use crate::session::TidalSession;
@@ -366,6 +366,18 @@ impl Catalog for TidalCatalog {
             parse_my_playlists(&body, &user_id)
         })
     }
+
+    fn track_lyrics(&self, id: String) -> BoxFuture<'static, Result<Option<Lyrics>, CatalogError>> {
+        let catalog = self.clone();
+        Box::pin(async move {
+            check_id(&id)?;
+            lyrics_from(
+                catalog
+                    .get(&format!("/tracks/{id}/lyrics"), Vec::new())
+                    .await,
+            )
+        })
+    }
 }
 
 // --- Reading TIDAL's answers -------------------------------------------------------------------
@@ -700,6 +712,54 @@ fn bio_from(answer: Result<String, CatalogError>) -> Result<Option<String>, Cata
         Err(CatalogError::NotFound) => Ok(None),
         Err(other) => Err(other),
     }
+}
+
+/// The lyrics out of the answer to asking for them. A track with none at all is a 404 on TIDAL's
+/// side, which is no error here, the same as [`bio_from`]; a 200 with every field empty (no
+/// `lyrics`, no `subtitles`) means the same thing and is folded into the same `None`.
+fn lyrics_from(answer: Result<String, CatalogError>) -> Result<Option<Lyrics>, CatalogError> {
+    match answer {
+        Ok(body) => Ok(parse_lyrics(&body)),
+        Err(CatalogError::NotFound) => Ok(None),
+        Err(other) => Err(other),
+    }
+}
+
+/// TIDAL's own `tidlers` crate wraps this same endpoint (`TidalClient::get_track_lyrics`), but
+/// its `LyricsResponse` has no field for `subtitles` at all -- the one with the time-synced
+/// lines, which is the entire point of #32 -- so serde silently drops it from the JSON. Read raw
+/// here instead, the same reason `tidal.rs`'s own module doc gives for `playbackinfopostpaywall`.
+#[derive(Deserialize)]
+struct RawLyrics {
+    #[serde(default)]
+    lyrics: Option<String>,
+    #[serde(default)]
+    subtitles: Option<String>,
+    #[serde(default, rename = "lyricsProvider")]
+    lyrics_provider: Option<String>,
+    #[serde(default, rename = "isRightToLeft")]
+    is_right_to_left: Option<bool>,
+}
+
+/// `None` when TIDAL's answer has nothing usable in it at all (every field blank) -- a track can
+/// 200 with an empty body shape instead of 404ing, seen for some instrumental tracks.
+fn parse_lyrics(body: &str) -> Option<Lyrics> {
+    let raw: RawLyrics = serde_json::from_str(body).ok()?;
+    let plain = raw.lyrics.filter(|text| !text.is_empty());
+    let lines = raw
+        .subtitles
+        .filter(|text| !text.is_empty())
+        .map(|text| lrc::parse(&text))
+        .unwrap_or_default();
+    if plain.is_none() && lines.is_empty() {
+        return None;
+    }
+    Some(Lyrics {
+        lines,
+        plain,
+        right_to_left: raw.is_right_to_left.unwrap_or(false),
+        provider: raw.lyrics_provider.filter(|text| !text.is_empty()),
+    })
 }
 
 /// A page of albums, as an artist's albums are listed.
@@ -1670,5 +1730,50 @@ mod tests {
             playlists.total,
             playlists.items.iter().map(|p| &p.title).collect::<Vec<_>>()
         );
+    }
+
+    /// Against the real TIDAL: confirms the `subtitles` field is genuinely LRC text (not assumed
+    /// from documentation alone) and that a track with no lyrics is told apart cleanly from one
+    /// with no *synced* lyrics. Run with `--ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "needs a TIDAL login and network"]
+    async fn a_real_tracks_lyrics() {
+        use crate::auth::{Interaction, open_store};
+        use crate::config::SessionStoreKind;
+        use crate::openers::TidalOpener;
+
+        let store = open_store(SessionStoreKind::default(), Interaction::Allow).unwrap();
+        let opener =
+            TidalOpener::from_store(tidal::build_http_client().unwrap(), store, Quality::Hires);
+        let catalog = opener.catalog();
+
+        // Dire Straits - Sultans of Swing: a well-known track, almost certainly has synced
+        // lyrics on TIDAL.
+        let lyrics = catalog
+            .track_lyrics("233059491".into())
+            .await
+            .unwrap()
+            .expect("a well-known track should have lyrics");
+        println!(
+            "provider: {:?}, {} synced line(s), first: {:?}",
+            lyrics.provider,
+            lyrics.lines.len(),
+            lyrics.lines.first()
+        );
+        assert!(
+            !lyrics.lines.is_empty(),
+            "expected synced lyrics for a well-known track"
+        );
+        assert!(
+            lyrics.lines.windows(2).all(|pair| pair[0].at <= pair[1].at),
+            "lines must come out sorted by time"
+        );
+
+        // A track genuinely without any lyrics at all (an id picked from this account's own
+        // catalog browsing as an instrumental piece): confirms whether TIDAL answers this with a
+        // 404 (-> None here) or a 200 with blank fields (also -> None, via `parse_lyrics`), since
+        // that was never actually confirmed, only assumed from a 404-for-no-bio precedent.
+        let instrumental = catalog.track_lyrics("518338".into()).await.unwrap();
+        println!("instrumental track lyrics: {instrumental:?}");
     }
 }

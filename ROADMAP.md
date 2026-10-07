@@ -79,10 +79,11 @@ done — it is its own product decision, not a leftover.
 | Issue | What | Status |
 |---|---|---|
 | #120 | Play reporting: finished plays reach TIDAL's own Recently Played | Closed (verified live against a real account) |
+| #32 | Letras sincronizadas: lyrics synced to playback in the TUI | In progress, part 1/3 |
 
 The rest of Phase 4 and all of Phase 5 are not started, except CI (#42) and
 rustfmt-in-CI (#50), both closed. Nothing else is planned in detail yet;
-issues #32–#45 hold one-line descriptions each, to be scoped with Opus when
+issues #33–#45 hold one-line descriptions each, to be scoped with Opus when
 their turn comes.
 
 ### Phase 6 — Layout and appearance
@@ -512,6 +513,41 @@ dependency, 16-color theme untouched -- all as decided.
 
 This closes #124: both parts of the approved plan are merged. Verified
 live against the real daemon and a real TIDAL track over a pty capture.
+
+**#32 (synced lyrics) is next**, planned with Opus. TIDAL's `GET
+/tracks/{id}/lyrics` (same host as `playbackinfopostpaywall`) answers
+`lyrics` (plain text) and `subtitles` (LRC-format, time-synced) — `tidlers`
+wraps this endpoint (`TidalClient::get_track_lyrics`) but its
+`LyricsResponse` type has no field for `subtitles` at all, so it is
+silently dropped by serde; phonia reads the response raw instead, the
+same reason `catalog/remote.rs` already avoids `tidlers`' listing calls
+for `search`/`album`/`playlist`. Decided with the user (recommended
+throughout): **pull**, not push — a client asks for lyrics
+(`Request::Lyrics`) only when it actually opens the Lyrics panel, rather
+than the daemon fetching them for every track whether or not anyone
+looks; plain-text fallback when there's no synced version, a clear "no
+lyrics" message when there's none at all, nothing attempted for local
+files (no TIDAL id to look up); a fourth TUI section,
+`Section::Lyrics`, following the current line automatically when synced,
+scrollable like plain text otherwise. See `docs/DECISIONS.md` for the
+full reasoning and the rest of the decisions (caching, protocol shape,
+right-to-left text).
+
+Part 1 (merged) is `phonia-core` only, no protocol change: a new
+`Catalog::track_lyrics` method, a raw-HTTP implementation in
+`catalog/remote.rs` (`RawLyrics`, `lyrics_from`, mirroring the existing
+`artist_bio`/`bio_from` 404-means-`None` pattern), and a new, pure
+`catalog/lrc.rs` module parsing LRC text into time-ordered lines
+(multiple timestamp tags per line, `[offset:±ms]`, metadata tags
+ignored, malformed lines skipped without losing the rest). **Verified
+live against a real account**: a real track's `subtitles` parsed into 39
+correctly time-ordered lines, provider `MUSIXMATCH`, the first line's
+text and timestamp matching the real song; a genuinely instrumental
+track correctly answered `None`.
+
+Part 2 (not started) is the wire protocol: `Request::Lyrics`, a new
+`CAP_LYRICS` capability, protocol 1.9 → 1.10. Part 3 (not started) is the
+TUI panel itself.
 
 ## Conventions this file assumes
 

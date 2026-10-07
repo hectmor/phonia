@@ -1,8 +1,8 @@
 //! A catalog that answers from what it was given, for tests of everything that uses one.
 
 use super::{
-    Album, AlbumFilter, Artist, Catalog, CatalogError, Kind, MAX_ITEMS_LIMIT, MAX_SEARCH_LIMIT,
-    Page, Playlist, SearchResults, Track,
+    Album, AlbumFilter, Artist, Catalog, CatalogError, Kind, Lyrics, MAX_ITEMS_LIMIT,
+    MAX_SEARCH_LIMIT, Page, Playlist, SearchResults, Track,
 };
 use futures_util::future::BoxFuture;
 use std::collections::HashMap;
@@ -60,6 +60,9 @@ pub enum Call {
         offset: u32,
         limit: u32,
     },
+    Lyrics {
+        id: String,
+    },
 }
 
 /// What a [`FakeCatalog`] knows of one artist.
@@ -82,6 +85,7 @@ struct State {
     favorite_tracks: Vec<Track>,
     favorite_albums: Vec<Album>,
     my_playlists: Vec<Playlist>,
+    lyrics: HashMap<String, Lyrics>,
     error: Option<CatalogError>,
     delay: Duration,
     calls: Vec<Call>,
@@ -168,6 +172,17 @@ impl FakeCatalog {
     /// The user's own playlists, for `my_playlists`.
     pub fn with_my_playlists(self, playlists: Vec<Playlist>) -> Self {
         self.state.lock().unwrap().my_playlists = playlists;
+        self
+    }
+
+    /// A track's lyrics, for `track_lyrics`. A track with no entry here answers `Ok(None)`, the
+    /// same as TIDAL answering a 404.
+    pub fn with_lyrics(self, id: &str, lyrics: Lyrics) -> Self {
+        self.state
+            .lock()
+            .unwrap()
+            .lyrics
+            .insert(id.to_string(), lyrics);
         self
     }
 
@@ -397,6 +412,11 @@ impl Catalog for FakeCatalog {
         self.answer(call, move |state| {
             Ok(page_of(&state.my_playlists, offset, limit))
         })
+    }
+
+    fn track_lyrics(&self, id: String) -> BoxFuture<'static, Result<Option<Lyrics>, CatalogError>> {
+        let call = Call::Lyrics { id: id.clone() };
+        self.answer(call, move |state| Ok(state.lyrics.get(&id).cloned()))
     }
 }
 
