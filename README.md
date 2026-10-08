@@ -256,6 +256,11 @@ replaygain = "off"      # off | track | album | auto: apply TIDAL's ReplayGain? 
   "Your playlists" tab is this same root, browsable exactly like an opened album or artist: Enter
   on a sub-folder nests into it (and nests further from there), Enter on a playlist opens it; `h`
   (or Esc) backs out one level at a time, down to the root.
+- **A track's radio** (`CatalogRef::TrackRadio` since protocol 1.12, reusing the existing
+  `tracks`/`queue_add_from` requests -- no new request type): tracks TIDAL picks to follow a
+  track, seeded by it, with the seed itself always filtered out of the answer (TIDAL's own API
+  lists it first). `phonia ctl radio <id>` prints it (`--limit`, at most 100); `queue add
+  radio:<id>` adds it whole, the same way `album:<id>`/`playlist:<id>` already do.
 - `phonia config path` prints which file is used, and `phonia config show` prints every setting
   with where its value comes from (the file or the default). `--config <file>` (or the
   `PHONIA_CONFIG` environment variable) selects another file, also for `phoniad`.

@@ -2498,6 +2498,60 @@ async fn an_artists_top_tracks_can_be_added_to_the_queue_whole() {
     f.finish().await;
 }
 
+// --- A track's radio (protocol 1.12, #33) ------------------------------------------------------
+
+/// A seed track followed by 3 others TIDAL's radio picked, in the same shape the real
+/// `/tracks/{id}/radio` answers with the seed itself as the first item.
+fn radio_with_seed(seed: &str) -> Vec<catalog::Track> {
+    let mut items = vec![a_track(seed, "The seed itself")];
+    items.extend(tracks(3));
+    items
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_page_of_a_tracks_radio_never_includes_the_seed() {
+    let catalog = browsable().with_radio("1", radio_with_seed("1"));
+    let f = fixture_with_catalog("radio", Some(Arc::new(catalog))).await;
+    let client = f.client().await;
+    let Payload::Tracks { from, page } = client
+        .request(Request::Tracks {
+            from: CatalogRef::TrackRadio { id: "1".into() },
+            offset: 0,
+            limit: None,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("not tracks");
+    };
+    assert_eq!(from, CatalogRef::TrackRadio { id: "1".into() });
+    // The fake filters the seed the same way the real catalog does: of the 4 given, "1" itself
+    // (the seed, given first) is left out.
+    assert_eq!(page.items.len(), 3);
+    assert!(page.items.iter().all(|track| track.id != "1"));
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tracks_radio_can_be_added_to_the_queue_whole() {
+    let catalog = browsable().with_radio("1", radio_with_seed("1"));
+    let f = fixture_with_catalog("add-radio", Some(Arc::new(catalog))).await;
+    let client = f.client().await;
+    let Payload::Added { ids, .. } = client
+        .request(add_from(
+            CatalogRef::TrackRadio { id: "1".into() },
+            AddAt::End,
+        ))
+        .await
+        .unwrap()
+    else {
+        panic!("not an added answer");
+    };
+    // 4 given, minus the seed ("1") itself.
+    assert_eq!(ids.len(), 3);
+    f.finish().await;
+}
+
 // --- The library (protocol 1.6, #21) ---------------------------------------------------------
 
 fn playlist_named(id: &str, title: &str) -> catalog::Playlist {
