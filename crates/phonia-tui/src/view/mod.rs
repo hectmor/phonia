@@ -2,6 +2,7 @@
 
 mod browse;
 mod help;
+mod home;
 mod library;
 mod lyrics;
 mod search;
@@ -104,6 +105,13 @@ fn draw_sidebar(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
 
 fn draw_main(state: &State, theme: &Theme, covers: &Covers, frame: &mut Frame, area: Rect) {
     let focused = state.focus == Focus::Main;
+    if state.section() == Section::Home {
+        let block = panel(Section::Home.title(), focused, theme);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        home::draw(state, theme, focused, frame, inner);
+        return;
+    }
     // The search has its own layout inside the panel: the line, the tabs and the results, or an
     // album or a playlist opened from one of them.
     if state.section() == Section::Search {
@@ -645,11 +653,12 @@ mod tests {
     fn the_screen_has_a_sidebar_a_main_panel_and_a_bar() {
         let screen = screen(&State::default(), 60, 12);
         for wanted in [
-            "1 Queue",
-            "2 Search",
-            "3 Library",
-            "4 Lyrics",
-            "Not connected yet",
+            "1 Home",
+            "2 Queue",
+            "3 Search",
+            "4 Library",
+            "5 Lyrics",
+            "Nothing to continue yet",
             "Connecting",
             "? help",
         ] {
@@ -663,7 +672,7 @@ mod tests {
     #[test]
     fn the_main_panel_is_titled_with_the_selected_section() {
         let mut state = State::default();
-        press(&mut state, '2');
+        press(&mut state, '3');
         let screen = screen(&state, 60, 12);
         assert!(screen.contains(" Search "), "{screen}");
     }
@@ -788,6 +797,7 @@ mod tests {
     fn the_queue_is_listed_in_queue_order_even_when_shuffled_with_the_current_one_marked() {
         use phonia_ipc::{ItemId, Queue, QueueItem, Repeat};
         let mut state = connected();
+        press(&mut state, '2');
         update(
             &mut state,
             Msg::Daemon(phonia_ipc::Event::QueueChanged {
@@ -1374,6 +1384,7 @@ mod tests {
                 },
             }),
         );
+        press(&mut state, '2');
         state
     }
 
@@ -1483,7 +1494,7 @@ mod tests {
                 queue: crate::app::tests_support::queue(),
             },
         );
-        press(&mut state, '2');
+        press(&mut state, '3');
         state
     }
 
@@ -1657,7 +1668,7 @@ mod tests {
                 queue: crate::app::tests_support::queue(),
             },
         );
-        press(&mut state, '3');
+        press(&mut state, '4');
         state
     }
 
@@ -1770,7 +1781,7 @@ mod tests {
                 queue: crate::app::tests_support::queue(),
             },
         );
-        press(&mut state, '3');
+        press(&mut state, '4');
         let text = screen(&state, 80, 14);
         assert!(text.contains("no TIDAL login"), "{text}");
     }
@@ -2048,7 +2059,7 @@ mod tests {
             cover: Some("3c6247c7-d0d7-4978-91b1-0bddc13f45b5".into()),
         };
         let mut state = State::default();
-        press(&mut state, '2'); // Search
+        press(&mut state, '3'); // Search
         state.search_views.push(
             0,
             View::TrackList(TrackListView::new(
@@ -2111,7 +2122,7 @@ mod tests {
 
         let with_cover = |cover: Option<&str>| {
             let mut state = State::default();
-            press(&mut state, '2');
+            press(&mut state, '3');
             state.search_views.push(
                 0,
                 View::TrackList(TrackListView::new(
@@ -2332,7 +2343,7 @@ mod tests {
         use ratatui_image::picker::Picker;
 
         let mut state = State::default();
-        press(&mut state, '2'); // Search
+        press(&mut state, '3'); // Search
         state.search_views.push(
             0,
             View::Artist(ArtistView::new(
@@ -2398,7 +2409,7 @@ mod tests {
 
         let with_picture = |picture: Option<&str>| {
             let mut state = State::default();
-            press(&mut state, '2');
+            press(&mut state, '3');
             state.search_views.push(
                 0,
                 View::Artist(ArtistView::new(
@@ -2433,6 +2444,7 @@ mod tests {
 
         let cover_id = "3c6247c7-d0d7-4978-91b1-0bddc13f45b5";
         let mut state = connected();
+        press(&mut state, '2');
         update(
             &mut state,
             Msg::Daemon(phonia_ipc::Event::TrackStarted {
@@ -2542,6 +2554,7 @@ mod tests {
     #[test]
     fn the_title_and_artist_show_above_the_queue_even_with_no_cover_at_all() {
         let mut state = connected();
+        press(&mut state, '2');
         update(
             &mut state,
             Msg::Daemon(phonia_ipc::Event::TrackStarted {
@@ -2629,7 +2642,7 @@ mod tests {
                 queue: crate::app::tests_support::queue(),
             },
         );
-        press(&mut state, '4');
+        press(&mut state, '5');
         state
     }
 

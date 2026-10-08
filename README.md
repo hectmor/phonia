@@ -32,7 +32,10 @@ chain works with real hardware (a Fosi Audio DS2 during development).
   engine and ALSA output, without touching TIDAL. Useful for testing the DAC in isolation.
 
 - **`phonia tui [--socket <path>]`** -- the terminal interface, a client of a running `phoniad`. It
-  has a sidebar (Queue, Search, Library, Lyrics), a main panel and a bar at the bottom. The queue is listed
+  has a sidebar (Home, Queue, Search, Library, Lyrics), a main panel and a bar at the bottom. It
+  opens on Home, whose one row so far (#139, in progress) continues whatever the queue was doing:
+  resumes a paused track at its exact position, replays a stopped one from the start, or starts the
+  queue if nothing has played yet this session; `Enter` on it does that. The queue is listed
   live, in queue order (the order `phonia ctl queue list` shows and that edits act on, not the
   shuffled play order), with the one playing marked and the row under the cursor highlighted. With
   the focus on the list (`l`), `j`/`k` select an entry, `Enter` plays it, `d` removes it, `J`/`K`

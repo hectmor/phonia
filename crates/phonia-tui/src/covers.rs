@@ -492,7 +492,7 @@ mod tests {
     fn opened_album(cover: Option<&str>) -> app::State {
         use crate::browse::{TrackListView, View};
         let mut state = app::State::default();
-        state.sidebar.select(1, app::Section::ALL.len()); // Search
+        state.sidebar.select(2, app::Section::ALL.len()); // Search
         state.search_views.push(
             0,
             View::TrackList(TrackListView::new(
@@ -553,7 +553,7 @@ mod tests {
     fn opened_artist(picture: Option<&str>) -> app::State {
         use crate::browse::{ArtistView, View};
         let mut state = app::State::default();
-        state.sidebar.select(1, app::Section::ALL.len()); // Search
+        state.sidebar.select(2, app::Section::ALL.len()); // Search
         state.search_views.push(
             0,
             View::Artist(ArtistView::new(

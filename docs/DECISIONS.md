@@ -2323,3 +2323,29 @@ of #139.
 Parts 2-4 (next): the `Section::Home` shell with only the Continue row (part 2); the three
 favorites/folders blocks plus "See all" (part 3); opening albums/playlists/folders nested inside
 Home, closing #139 (part 4).
+
+## 2026-10-08 — #139 part 2: the Home section shell, Continue row only
+
+Added `Section::Home` as the plan called for: first in `Section::ALL`, so it is key `1` and (via
+`Cursor::default()`) the section the TUI now opens on, with Queue/Search/Library/Lyrics shifting to
+`2`-`5`. No `HomeState`/`home_views` yet — with a single row, part 2 has nothing to hold a cursor
+or a stack over, so those are deferred to part 3 (rows) and part 4 (nested navigation) rather than
+added early and left unused. `home::continuation(&State)` is a pure function straight off
+`state.status`/`state.queue`, exactly as planned: `status.track` present means resume at its exact
+position; absent but `queue.current` still set means a real Stop happened (which clears
+`status.track` but never the queue's own `current`) — replay that entry from 0:00 since the
+position is gone; a queue with items but no `current` yet starts it from the top; otherwise there
+is nothing to continue. `view::home::draw` renders just that row's text, highlighted when Home has
+the focus.
+
+Five exhaustive `Section` match sites needed a `Home` arm (the compiler found them all): the
+sidebar's cover lookup (reuses Queue's — Home's Continue row is about the same now-playing track),
+the `Activate` dispatch (new `act_on_home`, sending whatever `continuation().request()` returns),
+`AddToQueue`/`AddNext` and `OpenRadio` (both no-ops on Home, like Queue and Lyrics already are),
+`load_more_results` (nothing paginated), and `move_cursor` (no-op, like Lyrics — one row, nothing
+to move between yet).
+
+Renumbering the keys broke no production logic, only ~80 tests that either pressed a now-shifted
+number or relied on `State::default()` starting on Queue — each fixed by using the new key or
+adding the one navigation step now needed to reach the section the test actually exercises; no
+assertion about a section's own behavior changed. Full workspace green, fmt+clippy clean.

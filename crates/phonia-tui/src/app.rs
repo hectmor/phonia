@@ -2,6 +2,7 @@
 
 use crate::browse::{self as browse, Header, Stack};
 use crate::cursor::Cursor;
+use crate::home;
 use crate::keymap::{self, Action, Key, Resolution};
 use crate::library::{self, LibraryState, LibraryTab};
 use crate::lyrics::{self, LyricsState};
@@ -32,6 +33,7 @@ pub enum Focus {
 /// The things the sidebar lists; the main panel shows the selected one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
+    Home,
     Queue,
     Search,
     Library,
@@ -39,7 +41,8 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 4] = [
+    pub const ALL: [Section; 5] = [
+        Section::Home,
         Section::Queue,
         Section::Search,
         Section::Library,
@@ -48,6 +51,7 @@ impl Section {
 
     pub fn title(self) -> &'static str {
         match self {
+            Section::Home => "Home",
             Section::Queue => "Queue",
             Section::Search => "Search",
             Section::Library => "Library",
@@ -159,7 +163,8 @@ impl State {
     /// playing track's own album cover. `None` with nothing open, nothing playing, or no cover.
     pub fn open_cover(&self) -> Option<(phonia_ipc::image::Kind, &str)> {
         let stack = match self.section() {
-            Section::Queue => {
+            // Home's own "Continue" row is about the same now-playing track Queue shows.
+            Section::Home | Section::Queue => {
                 let cover = self.status.as_ref()?.track.as_ref()?.cover.as_deref()?;
                 return Some((phonia_ipc::image::Kind::AlbumCover, cover));
             }
@@ -1211,6 +1216,8 @@ fn apply(state: &mut State, action: Action) -> Effects {
             } else if state.section() == Section::Lyrics {
                 // Nothing to open or play from here.
                 return Effects::default();
+            } else if state.section() == Section::Home {
+                return act_on_home(state, action);
             } else {
                 return edit_queue(state, action);
             }
@@ -1226,7 +1233,7 @@ fn apply(state: &mut State, action: Action) -> Effects {
                     act_on_library_result(state, action)
                 }
                 Section::Library => act_in_view(state, action),
-                Section::Queue | Section::Lyrics => Effects::default(),
+                Section::Home | Section::Queue | Section::Lyrics => Effects::default(),
             };
         }
         Action::OpenRadio => {
@@ -1240,7 +1247,7 @@ fn apply(state: &mut State, action: Action) -> Effects {
                 // A queue entry (and "now playing" generally) is a deliberate follow-up: it
                 // needs its own place to show an opened radio in, which neither section has
                 // today (see docs/DECISIONS.md).
-                Section::Queue | Section::Lyrics => Effects::default(),
+                Section::Home | Section::Queue | Section::Lyrics => Effects::default(),
             };
         }
         Action::StartSearch => {
@@ -1506,7 +1513,7 @@ fn load_more_results(state: &mut State) -> Vec<Cmd> {
                 None => Vec::new(),
             }
         }
-        Section::Queue | Section::Lyrics => Vec::new(),
+        Section::Home | Section::Queue | Section::Lyrics => Vec::new(),
     }
 }
 
@@ -1844,6 +1851,8 @@ fn move_cursor(state: &mut State, action: Action) {
             // `apply` returns through `scroll_lyrics` before this is ever reached for Lyrics;
             // only here for exhaustiveness.
             (Focus::Main, Section::Lyrics) => return,
+            // One row, nothing to move a cursor between yet (see #139's later parts).
+            (Focus::Main, Section::Home) => return,
         }
     };
     match action {
@@ -2125,6 +2134,22 @@ fn send_add_from(state: &mut State, of: phonia_ipc::CatalogRef, play_at: Option<
     }
 }
 
+/// Enter on Home's "Continue" row: sends whatever it currently offers (resume, replay, or start
+/// the queue), and does nothing for an empty queue or while disconnected.
+fn act_on_home(state: &mut State, action: Action) -> Effects {
+    if action != Action::Activate || state.connection != Connection::Connected {
+        return Effects::default();
+    }
+    let Some(request) = home::continuation(state).request() else {
+        return Effects::default();
+    };
+    state.last_error = None;
+    Effects {
+        redraw: false,
+        commands: vec![Cmd::Send(request)],
+    }
+}
+
 /// The queue's edits and Enter, on the selected entry: sent while connected and looking at the
 /// queue, and refused silently otherwise, like the playback keys.
 fn edit_queue(state: &mut State, action: Action) -> Effects {
@@ -2260,10 +2285,11 @@ mod tests {
     #[test]
     fn j_and_k_move_through_the_sections_and_stop_at_the_ends() {
         let mut state = State::default();
-        assert_eq!(state.section(), Section::Queue);
+        assert_eq!(state.section(), Section::Home);
         assert!(!ch(&mut state, 'k').redraw, "already at the top");
         assert!(ch(&mut state, 'j').redraw);
-        assert_eq!(state.section(), Section::Search);
+        assert_eq!(state.section(), Section::Queue);
+        ch(&mut state, 'j');
         ch(&mut state, 'j');
         ch(&mut state, 'j');
         assert_eq!(state.section(), Section::Lyrics);
@@ -2274,9 +2300,9 @@ mod tests {
     fn the_arrows_do_what_j_and_k_do() {
         let mut state = State::default();
         press(&mut state, KeyCode::Down);
-        assert_eq!(state.section(), Section::Search);
-        press(&mut state, KeyCode::Up);
         assert_eq!(state.section(), Section::Queue);
+        press(&mut state, KeyCode::Up);
+        assert_eq!(state.section(), Section::Home);
     }
 
     #[test]
@@ -2290,7 +2316,7 @@ mod tests {
         );
         assert_eq!(state.pending.len(), 1);
         assert!(ch(&mut state, 'g').redraw);
-        assert_eq!(state.section(), Section::Queue);
+        assert_eq!(state.section(), Section::Home);
         assert!(state.pending.is_empty());
     }
 
@@ -2311,24 +2337,26 @@ mod tests {
         ctrl(&mut state, 'd');
         assert_eq!(state.section(), Section::Lyrics, "20 rows is past the end");
         ctrl(&mut state, 'u');
-        assert_eq!(state.section(), Section::Queue);
+        assert_eq!(state.section(), Section::Home);
 
         update(&mut state, Msg::Resize(80, 1));
         ctrl(&mut state, 'd');
-        assert_eq!(state.section(), Section::Search, "one row at least");
+        assert_eq!(state.section(), Section::Queue, "one row at least");
     }
 
     #[test]
     fn the_numbers_jump_to_a_section() {
         let mut state = State::default();
-        ch(&mut state, '3');
-        assert_eq!(state.section(), Section::Library);
         ch(&mut state, '4');
+        assert_eq!(state.section(), Section::Library);
+        ch(&mut state, '5');
         assert_eq!(state.section(), Section::Lyrics);
-        ch(&mut state, '2');
+        ch(&mut state, '3');
         assert_eq!(state.section(), Section::Search);
-        ch(&mut state, '1');
+        ch(&mut state, '2');
         assert_eq!(state.section(), Section::Queue);
+        ch(&mut state, '1');
+        assert_eq!(state.section(), Section::Home);
     }
 
     #[test]
@@ -2355,7 +2383,7 @@ mod tests {
             !ch(&mut state, 'j').redraw,
             "the list is empty: nothing to move"
         );
-        assert_eq!(state.section(), Section::Queue, "the sidebar did not move");
+        assert_eq!(state.section(), Section::Home, "the sidebar did not move");
     }
 
     #[test]
@@ -2367,7 +2395,7 @@ mod tests {
         ch(&mut state, 'j');
         assert_eq!(
             state.section(),
-            Section::Queue,
+            Section::Home,
             "the keys behind the help are off"
         );
         assert!(
@@ -3070,6 +3098,7 @@ mod tests {
         queue.order = items.iter().map(|item| item.id).collect();
         queue.items = items;
         update(&mut state, Msg::Daemon(Event::QueueChanged { queue }));
+        ch(&mut state, '2');
         ch(&mut state, 'l');
         state
     }
@@ -3193,7 +3222,7 @@ mod tests {
 
         // In another section.
         let mut state = in_the_queue(3);
-        ch(&mut state, '2');
+        ch(&mut state, '3');
         for key in ['d', 'J', 'K'] {
             assert_eq!(ch(&mut state, key), Effects::default(), "search, {key}");
         }
@@ -3408,7 +3437,7 @@ mod tests {
     #[test]
     fn slash_opens_the_search_and_starts_typing_from_anywhere() {
         let mut state = connected_to_a_catalog();
-        assert_eq!(state.section(), Section::Queue);
+        assert_eq!(state.section(), Section::Home);
         assert_eq!(state.focus, Focus::Sidebar);
         assert!(ch(&mut state, '/').redraw);
         assert_eq!(state.section(), Section::Search);
@@ -3623,7 +3652,7 @@ mod tests {
     #[test]
     fn enter_in_the_search_list_opens_the_line_for_typing() {
         let mut state = connected_to_a_catalog();
-        ch(&mut state, '2');
+        ch(&mut state, '3');
         ch(&mut state, 'l');
         assert_eq!(state.section(), Section::Search);
         assert!(!state.search.editing);
@@ -3923,7 +3952,7 @@ mod tests {
         // No results at all.
         let mut idle = State::default();
         update(&mut idle, connected_msg(&["catalog"]));
-        ch(&mut idle, '2');
+        ch(&mut idle, '3');
         ch(&mut idle, 'l');
         assert_eq!(ch(&mut idle, 'a'), Effects::default());
     }
@@ -4823,7 +4852,7 @@ mod tests {
     fn opening_library() -> (State, Tag, Tag) {
         let mut state = State::default();
         update(&mut state, connected_msg(&["catalog"]));
-        let effects = ch(&mut state, '3');
+        let effects = ch(&mut state, '4');
         let [
             Cmd::Request {
                 tag: library_tag,
@@ -4910,7 +4939,7 @@ mod tests {
             browse::Phase::Loading
         );
         // Selecting it again (it is already the section shown) does not ask a second time.
-        assert!(ch(&mut state, '3').commands.is_empty());
+        assert!(ch(&mut state, '4').commands.is_empty());
 
         let state = with_library();
         let library = state.library.as_ref().unwrap();
@@ -4923,12 +4952,12 @@ mod tests {
     #[test]
     fn without_a_connection_or_the_catalog_the_library_is_not_asked_for() {
         let mut state = State::default();
-        assert!(ch(&mut state, '3').commands.is_empty());
+        assert!(ch(&mut state, '4').commands.is_empty());
         assert!(state.library.is_none(), "no connection yet");
 
         let mut state = State::default();
         update(&mut state, connected_msg(&[]));
-        assert!(ch(&mut state, '3').commands.is_empty());
+        assert!(ch(&mut state, '4').commands.is_empty());
         assert!(state.library.is_none(), "no catalog on this daemon");
 
         // The moment a connection with the catalog exists, it is asked for.
@@ -5574,7 +5603,7 @@ mod tests {
     #[test]
     fn opening_the_lyrics_panel_asks_once_for_the_current_tidal_track() {
         let mut state = connected_on_tidal_track("9");
-        let effects = ch(&mut state, '4');
+        let effects = ch(&mut state, '5');
         let (tag, request) = search_request(effects);
         assert_eq!(tag, Tag::Lyrics { generation: 1 });
         assert_eq!(request, Request::Lyrics { id: "9".into() });
@@ -5592,31 +5621,31 @@ mod tests {
 
         // Leaving and coming back to the same, already-loaded track does not ask again.
         ch(&mut state, '1');
-        assert!(ch(&mut state, '4').commands.is_empty());
+        assert!(ch(&mut state, '5').commands.is_empty());
     }
 
     #[test]
     fn without_a_connection_a_tidal_track_or_the_right_capabilities_nothing_is_asked_for() {
         // Not connected at all.
         let mut state = State::default();
-        assert!(ch(&mut state, '4').commands.is_empty());
+        assert!(ch(&mut state, '5').commands.is_empty());
         assert!(state.lyrics.is_none());
 
         // Connected, but the track is a local file.
         let mut state = connected_with_track("file:/a.flac", &["catalog", "lyrics"]);
-        assert!(ch(&mut state, '4').commands.is_empty());
+        assert!(ch(&mut state, '5').commands.is_empty());
         assert!(state.lyrics.is_none());
 
         // Connected to a TIDAL track, but this daemon has no lyrics support.
         let mut state = connected_with_track("tidal:9", &["catalog"]);
-        assert!(ch(&mut state, '4').commands.is_empty());
+        assert!(ch(&mut state, '5').commands.is_empty());
         assert!(state.lyrics.is_none());
     }
 
     #[test]
     fn a_track_change_while_the_panel_is_open_asks_again_and_drops_the_old_track_at_once() {
         let mut state = connected_on_tidal_track("9");
-        let effects = ch(&mut state, '4');
+        let effects = ch(&mut state, '5');
         let (tag, _) = search_request(effects);
         update(
             &mut state,
@@ -5642,7 +5671,7 @@ mod tests {
     #[test]
     fn a_track_change_while_the_panel_is_closed_asks_for_nothing() {
         let mut state = connected_on_tidal_track("9");
-        let effects = ch(&mut state, '4');
+        let effects = ch(&mut state, '5');
         let (tag, _) = search_request(effects);
         update(
             &mut state,
@@ -5651,7 +5680,7 @@ mod tests {
                 result: Ok(synced_lyrics_payload("9", vec![(0, "a")])),
             },
         );
-        ch(&mut state, '1'); // back to the queue: the panel is closed
+        ch(&mut state, '1'); // back to Home: the panel is closed
 
         let effects = update(&mut state, track_started("tidal:10"));
         assert!(
@@ -5668,7 +5697,7 @@ mod tests {
     #[test]
     fn a_stale_answer_for_a_track_no_longer_current_is_dropped() {
         let mut state = connected_on_tidal_track("9");
-        let effects = ch(&mut state, '4');
+        let effects = ch(&mut state, '5');
         let (old_tag, _) = search_request(effects);
         update(&mut state, track_started("tidal:10"));
 
@@ -5691,7 +5720,7 @@ mod tests {
     #[test]
     fn a_stale_error_for_a_superseded_request_is_also_dropped() {
         let mut state = connected_on_tidal_track("9");
-        let effects = ch(&mut state, '4');
+        let effects = ch(&mut state, '5');
         let (old_tag, _) = search_request(effects);
         update(&mut state, track_started("tidal:10"));
 
@@ -5712,7 +5741,7 @@ mod tests {
     #[test]
     fn leaving_and_returning_after_a_failure_retries() {
         let mut state = connected_on_tidal_track("9");
-        let effects = ch(&mut state, '4');
+        let effects = ch(&mut state, '5');
         let (tag, _) = search_request(effects);
         update(
             &mut state,
@@ -5727,7 +5756,7 @@ mod tests {
         ));
 
         ch(&mut state, '1');
-        let effects = ch(&mut state, '4');
+        let effects = ch(&mut state, '5');
         let (tag, request) = search_request(effects);
         assert_eq!(tag, Tag::Lyrics { generation: 2 });
         assert_eq!(request, Request::Lyrics { id: "9".into() });
@@ -5736,7 +5765,7 @@ mod tests {
     #[test]
     fn reconnecting_while_the_panel_is_still_open_retries_a_fetch_the_disconnect_failed() {
         let mut state = connected_on_tidal_track("9");
-        ch(&mut state, '4');
+        ch(&mut state, '5');
         disconnected(&mut state, Duration::from_secs(1));
         assert!(matches!(
             state.lyrics.as_ref().unwrap().phase,
@@ -5779,7 +5808,7 @@ mod tests {
     #[test]
     fn disconnecting_with_lyrics_already_loaded_keeps_them_shown() {
         let mut state = connected_on_tidal_track("9");
-        let effects = ch(&mut state, '4');
+        let effects = ch(&mut state, '5');
         let (tag, _) = search_request(effects);
         update(
             &mut state,
@@ -5816,7 +5845,7 @@ mod tests {
         ];
         let mut state = connected_on_tidal_track("9");
         update(&mut state, Msg::Resize(80, 14));
-        let effects = ch(&mut state, '4');
+        let effects = ch(&mut state, '5');
         let (tag, _) = search_request(effects);
         update(
             &mut state,
@@ -5857,7 +5886,7 @@ mod tests {
     fn scrolling_plain_lyrics_is_clamped_to_how_many_lines_there_are() {
         let mut state = connected_on_tidal_track("9");
         update(&mut state, Msg::Resize(80, 14));
-        let effects = ch(&mut state, '4');
+        let effects = ch(&mut state, '5');
         let (tag, _) = search_request(effects);
         // More lines than any reasonable terminal shows at once, so there is always room to
         // scroll regardless of how tall the test's own terminal is.
@@ -5892,7 +5921,7 @@ mod tests {
     #[test]
     fn the_lyrics_panel_has_no_cover_and_adds_nothing_to_the_queue() {
         let mut state = connected_on_tidal_track("9");
-        ch(&mut state, '4');
+        ch(&mut state, '5');
         assert_eq!(state.open_cover(), None);
         ch(&mut state, 'l');
         assert!(ch(&mut state, 'a').commands.is_empty());

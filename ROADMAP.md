@@ -720,6 +720,20 @@ open, or used the wrong list's data if one was. Fixed to read the
 active stack generically, with regression tests opening from both an
 album and a radio.
 
+Part 2 adds the `Section::Home` shell itself: a new first variant of
+`Section` (so it is both key `1` and, via `Cursor::default()`, the
+startup section -- everything else shifts up one key, Queue/Search/
+Library/Lyrics now `2`-`5`), showing only the "Continue" row for now.
+`home::continuation` reads `state.status` and `state.queue` directly
+rather than holding anything of its own: a track still in
+`status.track` (playing, paused, loading or seeking) resumes exactly
+where it is; a real Stop clears `status.track` but never the queue's
+own `current`, so a stopped-but-current entry replays from the start
+instead; a queue with items but no `current` yet starts it; an empty
+queue has nothing to continue. No new field was needed on `State` for
+this single row -- a per-row cursor is deferred to part 3, once there
+is more than one row to move between.
+
 ## Conventions this file assumes
 
 - Issues are closed by the project owner by hand after their pull requests
