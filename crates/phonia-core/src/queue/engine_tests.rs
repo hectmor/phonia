@@ -725,6 +725,39 @@ fn a_queue_plays_its_entries_joined_when_they_share_a_format() {
     assert_eq!(h.queue.snapshot().current.map(|id| id.0), Some(3));
 }
 
+/// Pins the premise #33's autoplay relies on: appending a track while the queue's last (and
+/// only) entry is already playing is picked up gapless, with no `QueueExhausted` and no stop in
+/// between -- the engine needs no change at all for autoplay, since `maybe_prefetch` already
+/// re-peeks the queue on every tick. `phoniad` is the one that decides WHEN to append (seeded by
+/// a real TIDAL radio fetch); this only confirms the engine side already does the right thing
+/// once it has.
+#[test]
+fn a_track_added_while_the_last_one_plays_is_picked_up_without_stopping() {
+    let media = [("a", Media::Pcm(30_000)), ("b", Media::Pcm(5_000))];
+    let mut h = Harness::eager(&media, FakeSinkFactory::blocking());
+    h.queue.add([entry("a")]);
+    let sink = play_until_blocked(&mut h);
+
+    // "a" is still playing, blocked mid-write; nothing has reached the end of the queue yet.
+    h.queue.add([entry("b")]);
+    sink.set_blocking(false);
+
+    // b is the only thing added, and nothing follows it either: the queue genuinely runs dry
+    // once b itself ends, same as any other queue's real end. What this test actually pins is
+    // that b joins a gapless (one drain, one continuous sample stream, no stop in between) even
+    // though it was added only after a was already mid-write -- not that the queue never ends.
+    let events = h.events_until(is_stopped);
+    assert_eq!(
+        gapless_flags(&events),
+        [false, true],
+        "b is joined to a, the same as if both had been queued from the start"
+    );
+    let mut expected = ramp(30_000);
+    expected.extend(ramp(5_000));
+    assert_eq!(sink.played(), expected);
+    assert_eq!(sink.drain_count(), 1, "drained only once, at the real end");
+}
+
 #[test]
 fn repeat_one_loops_a_track_without_a_gap() {
     let mut h = Harness::eager(&[("a", Media::Pcm(30_000))], FakeSinkFactory::blocking());

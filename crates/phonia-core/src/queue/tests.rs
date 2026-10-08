@@ -522,6 +522,90 @@ fn autoplay_is_off_by_default_shows_in_the_snapshot_and_only_bumps_the_version_w
 }
 
 #[test]
+fn autoplay_is_due_only_with_autoplay_on_repeat_off_and_nothing_following() {
+    let (mut inner, ids) = queue_of(&["a", "b"]);
+    inner.set_autoplay(true);
+    set_current(&mut inner, ids[0]);
+    assert_eq!(
+        inner.autoplay_due(),
+        None,
+        "b still follows a: nothing to do yet"
+    );
+
+    set_current(&mut inner, ids[1]);
+    assert_eq!(
+        inner.autoplay_due(),
+        Some(ids[1]),
+        "b is last, repeat is off, autoplay is on"
+    );
+
+    inner.set_autoplay(false);
+    assert_eq!(inner.autoplay_due(), None, "autoplay off: nothing to do");
+}
+
+#[test]
+fn autoplay_never_fires_under_repeat_one_or_all() {
+    let (mut inner, ids) = queue_of(&["a", "b"]);
+    inner.set_autoplay(true);
+    set_current(&mut inner, ids[1]);
+
+    inner.set_repeat(Repeat::One);
+    assert_eq!(inner.autoplay_due(), None, "one always has something next");
+
+    inner.set_repeat(Repeat::All);
+    assert_eq!(inner.autoplay_due(), None, "all wraps back to the start");
+
+    inner.set_repeat(Repeat::Off);
+    assert_eq!(inner.autoplay_due(), Some(ids[1]));
+}
+
+#[test]
+fn autoplay_is_not_due_with_nothing_current() {
+    let (inner, _) = queue_of(&["a"]);
+    // autoplay is off by default, and nothing has been set as current either.
+    assert_eq!(inner.autoplay_due(), None);
+}
+
+#[test]
+fn adding_more_tracks_clears_autoplay_due_until_the_new_last_one_plays() {
+    let (mut inner, ids) = queue_of(&["a"]);
+    inner.set_autoplay(true);
+    set_current(&mut inner, ids[0]);
+    assert_eq!(inner.autoplay_due(), Some(ids[0]));
+
+    let added = inner.add([track("b")]);
+    assert_eq!(
+        inner.autoplay_due(),
+        None,
+        "a is no longer last now that b was added"
+    );
+
+    set_current(&mut inner, added[0]);
+    assert_eq!(inner.autoplay_due(), Some(added[0]));
+}
+
+#[test]
+fn autoplay_due_is_due_only_at_the_end_of_a_shuffled_order() {
+    let mut inner = Inner::new(3);
+    inner.add((0..6).map(|i| track(&i.to_string())));
+    inner.set_autoplay(true);
+    inner.set_shuffle(true);
+    let order = inner.snapshot().order;
+
+    for id in &order[..order.len() - 1] {
+        set_current(&mut inner, *id);
+        assert_eq!(
+            inner.autoplay_due(),
+            None,
+            "not the last entry of the shuffled order"
+        );
+    }
+    let last = *order.last().unwrap();
+    set_current(&mut inner, last);
+    assert_eq!(inner.autoplay_due(), Some(last));
+}
+
+#[test]
 fn a_shuffled_queue_plays_every_entry_exactly_once_per_cycle() {
     for seed in 0..30 {
         let mut inner = Inner::new(seed);

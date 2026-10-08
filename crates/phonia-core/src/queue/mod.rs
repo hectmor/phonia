@@ -169,10 +169,17 @@ impl Queue {
 
     /// Whether the queue running dry should fetch more tracks from TIDAL on its own. Unlike
     /// `set_replay_gain`, this can be changed at runtime, not just at startup from the config
-    /// file. The actual behavior this enables is not implemented yet (a later change), only the
-    /// setting itself.
+    /// file. See `autoplay_due` for the behavior this enables, in `phoniad`.
     pub fn set_autoplay(&self, autoplay: bool) {
         self.mutate(|inner| inner.set_autoplay(autoplay));
+    }
+
+    /// The current entry, if autoplay should fetch more tracks seeded by it right now (autoplay
+    /// is on, repeat is off, and nothing follows it in the play order). Read on every
+    /// `TrackStarted`/`QueueChanged` by whoever owns a [`crate::catalog::Catalog`] to fetch from
+    /// (`phoniad`, not this crate, which does no network I/O).
+    pub fn autoplay_due(&self) -> Option<ItemId> {
+        self.inner.lock().unwrap().autoplay_due()
     }
 
     /// Sets how ReplayGain is chosen; see [`replaygain::Mode`]. There is no runtime way to change

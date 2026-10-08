@@ -34,8 +34,8 @@ pub const CAP_CATALOG: &str = "catalog";
 pub const CAP_LYRICS: &str = "lyrics";
 
 /// Capability: the daemon understands `set_autoplay` and reports `Queue.autoplay` (protocol
-/// 1.13). Only advertised alongside [`CAP_CATALOG`], since the behavior it enables (not
-/// implemented yet) needs the catalog to fetch more tracks from.
+/// 1.13), and actually fetches more tracks from TIDAL once the queue runs dry with it on. Only
+/// advertised alongside [`CAP_CATALOG`], since the behavior needs the catalog to fetch from.
 pub const CAP_AUTOPLAY: &str = "autoplay";
 
 /// The protocol version this crate speaks.
@@ -277,8 +277,7 @@ pub enum Request {
     },
     /// Sets whether the queue running dry (repeat off, nothing more to play) fetches more
     /// tracks from TIDAL on its own, seeded by the last one played, instead of just stopping
-    /// (since 1.13). The behavior itself is not implemented yet; this only sets the flag,
-    /// reported back on `Queue.autoplay`.
+    /// (since 1.13). Reported back on `Queue.autoplay`.
     SetAutoplay {
         autoplay: bool,
     },

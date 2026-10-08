@@ -3,6 +3,7 @@
 //! Transport-independent: [`Daemon::handle`] answers one request, [`Daemon::subscribe`] gives the
 //! ordered stream of events. The server in `server.rs` puts them on a socket.
 
+use crate::autoplay;
 use crate::convert;
 use crate::outputs::{Outputs, VolumeError};
 use anyhow::Result;
@@ -147,6 +148,10 @@ pub struct Daemon {
     /// Lyrics already fetched this run, so reopening the same track's lyrics panel does not hit
     /// TIDAL again.
     lyrics_cache: Mutex<LyricsCache>,
+    /// Autoplay's own bookkeeping; see `autoplay::Autoplay`. Only ever touched synchronously
+    /// (`consider_autoplay`, `run_autoplay`, and the cancel on `Stop`/`QueueClear`), so a plain
+    /// lock is enough.
+    autoplay: Mutex<autoplay::Autoplay>,
 }
 
 impl Daemon {
@@ -188,6 +193,7 @@ impl Daemon {
             },
             last_report: Mutex::new(None),
             lyrics_cache: Mutex::new(LyricsCache::new()),
+            autoplay: Mutex::new(autoplay::Autoplay::default()),
         });
 
         // The volume can be changed from the desktop's mixer too; the daemon follows and announces it.
@@ -227,6 +233,17 @@ impl Daemon {
                         let queue = self.controller.snapshot();
                         self.note_play_log(&event, &queue);
                         self.publish(|_| convert::event(&event, &queue));
+                        match &event {
+                            engine::Event::TrackStarted { meta, .. } => {
+                                let (tidal_id, _) = resolve_tidal_track(meta, &queue);
+                                self.autoplay.lock().unwrap().note_started(tidal_id);
+                                self.consider_autoplay();
+                            }
+                            engine::Event::QueueExhausted => {
+                                self.autoplay.lock().unwrap().queue_exhausted(queue.current);
+                            }
+                            _ => {}
+                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         self.publish(|seq| {
@@ -239,6 +256,10 @@ impl Daemon {
                 Ok(()) = queue_changes.changed() => {
                     let queue = queue_changes.borrow_and_update().clone();
                     self.publish(|_| ipc::Event::QueueChanged { queue: convert::queue_dto(&queue) });
+                    // Catches the condition becoming true without a fresh TrackStarted: autoplay
+                    // turned on mid-track, repeat switched to off, or the entries after the
+                    // current one removed.
+                    self.consider_autoplay();
                 }
                 Some(OutputReport { output, report }) = reports.recv() => {
                     let dto = convert::sink_report(&report, &output);
@@ -368,7 +389,7 @@ impl Daemon {
             ipc::CAP_QUALITY.to_string(),
         ];
         // Only a daemon with a login to browse with can search, fetch lyrics, or autoplay
-        // (which will need to fetch more tracks from TIDAL).
+        // (which fetches more tracks from TIDAL to append).
         if self.catalog.is_some() {
             capabilities.push(ipc::CAP_CATALOG.to_string());
             capabilities.push(ipc::CAP_LYRICS.to_string());
@@ -848,7 +869,12 @@ impl Daemon {
                 Ok(()) => Reply::Ok(Payload::Ack),
                 Err(error) => self::error(ErrorCode::NotFound, &format!("{error:#}")),
             },
-            Request::Stop => send(Command::Stop),
+            Request::Stop => {
+                // An explicit Stop: a fetch already in flight for the entry that was playing
+                // must not resume playback once it lands.
+                self.autoplay.lock().unwrap().cancel();
+                send(Command::Stop)
+            }
             Request::Pause => send(Command::Pause),
             Request::Resume => send(Command::Resume),
             Request::TogglePause => send(Command::TogglePause),
@@ -876,6 +902,7 @@ impl Daemon {
                 }
             }
             Request::QueueClear => {
+                self.autoplay.lock().unwrap().cancel();
                 self.controller.clear();
                 Reply::Ok(Payload::Ack)
             }
@@ -973,19 +1000,7 @@ impl Daemon {
     ) -> Reply {
         let mut unresolved_reasons = Vec::new();
         let _serial = self.control_lock.lock().await;
-        let tracks: Vec<QueueTrack> = accepted
-            .iter()
-            .map(
-                |(source, title, artist, duration, cover, album_id, _)| QueueTrack {
-                    source: phonia_core::engine::TrackRef(source.to_wire()),
-                    title: title.clone(),
-                    artist: artist.clone(),
-                    duration: *duration,
-                    cover: cover.clone(),
-                    album_id: album_id.clone(),
-                },
-            )
-            .collect();
+        let tracks: Vec<QueueTrack> = accepted.iter().map(queue_track).collect();
         let queue = self.controller.queue();
         let ids = match at {
             AddAt::End => queue.add(tracks),
@@ -1055,38 +1070,151 @@ impl Daemon {
 
         let (mut accepted, mut rejected) = (Vec::new(), Vec::new());
         for track in &tracks {
-            let source = Source::Tidal(track.id.clone());
-            if track.streamable {
-                let artist = (!track.artists.is_empty()).then(|| {
-                    track
-                        .artists
-                        .iter()
-                        .map(|artist| artist.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                });
-                let cover = track.album.as_ref().and_then(|album| album.cover.clone());
-                let album_id = track.album.as_ref().map(|album| album.id.clone());
-                accepted.push((
-                    source,
-                    Some(track.title.clone()),
-                    artist,
-                    track.duration,
-                    cover,
-                    album_id,
-                    None,
-                ));
-            } else {
-                rejected.push(ipc::Rejected {
-                    source: source.to_wire(),
-                    reason: format!(
-                        "{} is listed by TIDAL but cannot be streamed here",
-                        track.title
-                    ),
-                });
+            match accepted_from_catalog(track) {
+                Ok(entry) => accepted.push(entry),
+                Err(reason) => rejected.push(reason),
             }
         }
         self.add_to_queue(accepted, rejected, at).await
+    }
+
+    /// Whether autoplay should act right now, and if so, starts fetching that entry's radio in
+    /// the background (`run_autoplay`). Read-only and synchronous: called after every engine
+    /// event and queue change in `fan_in`, so it is cheap on the common case where there is
+    /// nothing to do.
+    fn consider_autoplay(self: &Arc<Self>) {
+        let Some(catalog) = self.catalog.clone() else {
+            return;
+        };
+        let Some(entry) = self.controller.queue().autoplay_due() else {
+            return;
+        };
+        // Due only means "the queue agrees nothing follows this entry": a genuinely stopped
+        // engine (the user pressed Stop, not a race with `QueueExhausted`) must not autoplay on
+        // its own just because it happens to be sitting on a last entry that qualifies.
+        if self.controller.status().state == engine::State::Stopped {
+            return;
+        }
+        let mut state = self.autoplay.lock().unwrap();
+        let Some(generation) = state.begin(entry) else {
+            return;
+        };
+        let seed = state.seed(&self.controller.snapshot(), entry);
+        let Some(seed) = seed else {
+            // Nothing TIDAL has played this session: there is nothing to seed a radio from.
+            state.finish(generation);
+            return;
+        };
+        drop(state);
+        tokio::spawn(self.clone().run_autoplay(catalog, entry, seed, generation));
+    }
+
+    /// Fetches `seed`'s radio and, if it is still wanted by the time it answers, appends up to
+    /// `autoplay::BATCH` tracks from it. The network call happens without holding `control_lock`,
+    /// so it never holds up another client's request; everything after it (the re-check and the
+    /// actual queue change) does, the same way adding an album or a playlist already does.
+    async fn run_autoplay(
+        self: Arc<Self>,
+        catalog: Arc<dyn Catalog>,
+        entry: ItemId,
+        seed: String,
+        generation: u64,
+    ) {
+        let fetched = tokio::time::timeout(
+            autoplay::FETCH_TIMEOUT,
+            catalog.track_radio(seed, 0, MAX_ITEMS_LIMIT),
+        )
+        .await;
+        let _serial = self.control_lock.lock().await;
+        let Some(resume) = self.autoplay.lock().unwrap().finish(generation) else {
+            // Superseded (a different entry became due) or cancelled (an explicit Stop or a
+            // cleared queue): this answer, whatever it is, is no longer wanted.
+            return;
+        };
+        let radio = match fetched {
+            Ok(Ok(page)) => page,
+            Ok(Err(failure)) => {
+                phonia_core::warn!("autoplay: could not fetch a radio: {failure}");
+                return;
+            }
+            Err(_) => {
+                phonia_core::warn!("autoplay: fetching a radio timed out");
+                return;
+            }
+        };
+        // Re-validate under control_lock: the user may have added their own tracks, skipped,
+        // turned repeat back on or autoplay off, or cleared the queue while this was in flight.
+        if self.controller.queue().autoplay_due() != Some(entry) {
+            return;
+        }
+        if self.controller.status().state == engine::State::Stopped && !resume {
+            return;
+        }
+        let snapshot = self.controller.snapshot();
+        let tracks: Vec<QueueTrack> = radio
+            .items
+            .iter()
+            .filter_map(|track| accepted_from_catalog(track).ok())
+            .map(|accepted| queue_track(&accepted))
+            .collect();
+        let tracks = autoplay::pick(tracks, &snapshot, autoplay::BATCH);
+        if tracks.is_empty() {
+            return;
+        }
+        let ids = self.controller.queue().add(tracks);
+        if resume && self.controller.status().state == engine::State::Stopped {
+            phonia_core::warn!(
+                "autoplay: the queue ran dry before its radio arrived; resuming on it now"
+            );
+            let _ = self.controller.play_item(ids[0]);
+        }
+    }
+}
+
+/// `track` as an `Accepted` entry ready for the queue, or the reason it is refused: TIDAL lists
+/// it but marks it as not streamable where this account is.
+fn accepted_from_catalog(track: &tidal_catalog::Track) -> Result<Accepted, ipc::Rejected> {
+    let source = Source::Tidal(track.id.clone());
+    if !track.streamable {
+        return Err(ipc::Rejected {
+            source: source.to_wire(),
+            reason: format!(
+                "{} is listed by TIDAL but cannot be streamed here",
+                track.title
+            ),
+        });
+    }
+    let artist = (!track.artists.is_empty()).then(|| {
+        track
+            .artists
+            .iter()
+            .map(|artist| artist.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    });
+    let cover = track.album.as_ref().and_then(|album| album.cover.clone());
+    let album_id = track.album.as_ref().map(|album| album.id.clone());
+    Ok((
+        source,
+        Some(track.title.clone()),
+        artist,
+        track.duration,
+        cover,
+        album_id,
+        None,
+    ))
+}
+
+/// `accepted` as a queue entry.
+fn queue_track(accepted: &Accepted) -> QueueTrack {
+    let (source, title, artist, duration, cover, album_id, _) = accepted;
+    QueueTrack {
+        source: phonia_core::engine::TrackRef(source.to_wire()),
+        title: title.clone(),
+        artist: artist.clone(),
+        duration: *duration,
+        cover: cover.clone(),
+        album_id: album_id.clone(),
     }
 }
 

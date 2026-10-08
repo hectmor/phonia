@@ -81,7 +81,7 @@ done — it is its own product decision, not a leftover.
 | #120 | Play reporting: finished plays reach TIDAL's own Recently Played | Closed (verified live against a real account) |
 | #32 | Letras sincronizadas: lyrics synced to playback in the TUI | Code complete, all 3 parts merged |
 | #39 | Carpetas de playlists: browse TIDAL's own playlist folders in the TUI | Code complete, all 3 parts merged |
-| #33 | Mixes, radio y autoplay de pistas similares | In progress (parts 1-4/6) |
+| #33 | Mixes, radio y autoplay de pistas similares | In progress (parts 1-5/6) |
 
 The rest of Phase 4 and all of Phase 5 are not started, except CI (#42) and
 rustfmt-in-CI (#50), both closed. Nothing else is planned in detail yet;
@@ -659,10 +659,26 @@ runtime-changeable `Queue.autoplay` flag — modeled like
 not like `replaygain` (config-only, no runtime setter), since the
 approved design wants it toggleable while the daemon runs. `phonia ctl
 autoplay [on|off]` (no argument flips it) verified live against the
-real account. Part 5 (next) is the actual behavior in `phoniad` —
-hooked into the engine's existing prefetch mechanism, not
-`QueueExhausted`, so the DAC is never released and re-acquired for it.
-Part 6 is the TUI's autoplay toggle, closing #33.
+real account.
+
+Part 5 added the actual behavior, in `phoniad` only — the engine
+itself needed no change at all. Reading the real code corrected part
+1's own plan: the engine's existing gapless prefetch already re-checks
+the queue on every tick and does nothing special when it finds nothing
+next, so appending tracks while the last entry is still playing is
+picked up on its own (confirmed by a new engine test). The daemon
+notices on `TrackStarted`/`QueueChanged` that nothing follows the
+current entry (`Queue::autoplay_due`, repeat off only), fetches that
+entry's TIDAL radio (or the last TIDAL track's, if the newly-last entry
+is a local file) without holding up other clients, then re-validates
+and appends up to 10 tracks, skipping duplicates — all before
+`Event::QueueExhausted` would otherwise release the DAC. If a very
+short track or a slow fetch loses that race anyway, playback resumes
+on the first added track rather than staying stopped. Verified live
+against the real account: ~10 real tracks appeared within ~2 seconds
+of a seed track starting; `repeat all`, `autoplay off`, and an
+immediate Stop each correctly added nothing. Part 6 (last) is the
+TUI's autoplay toggle, closing #33.
 
 ## Conventions this file assumes
 

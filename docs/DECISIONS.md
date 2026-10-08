@@ -2157,3 +2157,88 @@ Next: the real behavior in `phoniad` (part 5) — hooked into the engine's exist
 mechanism, not `Event::QueueExhausted`, so the DAC is never released and re-acquired for it, per
 the architecture already settled in part 1's plan. Then the TUI's autoplay toggle (part 6,
 closing #33).
+
+## 2026-10-08 — #33 part 5: autoplay's real behavior, no engine change
+
+Planned with Opus a second time for this part specifically, with full code access this time
+(part 1's own plan was written without it). **Correction to part 1's own note**: that entry said
+autoplay would be "hooked into `maybe_prefetch`". Reading the real code found this unnecessary —
+`maybe_prefetch` already re-peeks the queue on every position tick, and does nothing (no cached
+"nothing more" state) when it finds `Peeked::End`. So appending tracks while the queue's last
+entry is already playing is picked up by the engine entirely on its own, gapless, the next time
+it ticks — confirmed directly by a new `phonia-core` engine test
+(`a_track_added_while_the_last_one_plays_is_picked_up_without_stopping`) that adds a second track
+only after the first is already mid-write, blocked, and asserts one drain, two `TrackStarted` with
+`gapless: [false, true]`, and the exact continuous sample stream. **The engine needed zero
+changes for #33.** All the real work is in `phoniad`.
+
+**The actual trap, confirmed by reading `audio_thread.rs`**: `Event::QueueExhausted` only fires at
+the very end of `advance()` returning `None`, by which point `stop()` has already run and released
+the DAC. Reacting there would be too late — autoplay has to notice *before* that, while the
+engine is still playing the last entry, so the fetch has time to land before `QueueExhausted` ever
+happens.
+
+**Design**: `Inner::autoplay_due(&self) -> Option<ItemId>` (new, pure): the current entry, if
+autoplay is on, repeat is off, and `peek(Advance::Auto)` already says `End` (which only Repeat::Off
+can ever do — One always has something, All wraps — so checking repeat explicitly here is belt
+and suspenders, not load-bearing). Exposed as `Queue::autoplay_due()`, read by `phoniad` from two
+places: every `Event::TrackStarted` (the normal case) and every `Event::QueueChanged` (catches the
+condition becoming true *without* a fresh start — autoplay turned on mid-track, repeat switched to
+off, or the tracks that followed removed; confirmed with the user as wanted, not just a
+side-effect).
+
+A new, pure `phoniad::autoplay::Autoplay` state machine (unit-tested on its own, no network, no
+locks) owns: which entry a fetch is running for, a generation number that makes a stale fetch
+(superseded by a newer entry's fetch, or an explicit Stop/`QueueClear`) tell itself apart from the
+one that matters, whether the queue ran dry *while* that fetch was in flight (so it should resume
+playback once it lands), and the last TIDAL track that actually started (the seed when the newly
+last entry is a local file, which has no radio of its own). `Daemon::consider_autoplay` (sync,
+cheap) decides whether to start a fetch at all; `Daemon::run_autoplay` (spawned, async) does the
+real `catalog.track_radio` call *without* holding `control_lock` (so it never holds up another
+client's request), then takes `control_lock` only to re-check and act, the same ordering
+`queue_add_from` already uses for every other async-resolved addition. The re-check after the
+fetch resolves is real, not a formality: it re-reads `autoplay_due()` and the engine's state, so a
+user who skipped, queued their own tracks, flipped repeat or autoplay off, or cleared the queue
+while the fetch was in flight is respected — the fetch's answer is simply dropped. `autoplay::pick`
+skips anything already in the queue, and anything TIDAL's own radio repeats within the same page,
+capped at 10 (`BATCH`) per refill.
+
+**The one deliberately accepted gap, per the user's own confirmed choice**: if the last queued
+entry is short enough (or the network slow enough) that `QueueExhausted` fires — DAC released —
+before the fetch lands, the daemon resumes playback on the first added track once it does
+(`Controller::play_item`), costing one real gap and one hardware re-acquire, rather than silently
+failing to autoplay in that case. A narrower, accepted-but-not-built-around window remains: if the
+fetch lands in the handful of milliseconds between the engine's `advance()` returning `None` and
+`fan_in` actually handling `QueueExhausted`, the tracks are still added, just without the resume —
+playback waits for the user to press Play. Not chased further; it is a race measured in
+milliseconds against a real network call.
+
+**Refactored, no behavior change**: `accepted_from_catalog`/`queue_track` extracted from
+`queue_add_from`/`add_to_queue`'s own inline logic (same exact rules — unstreamable tracks
+refused with the same message — just now shared with `run_autoplay`, which needs the identical
+"a TIDAL `catalog::Track` becomes a queue entry" conversion).
+
+**Test coverage, and one gap acknowledged rather than hidden**: the state machine
+(`phoniad::autoplay`) and the engine premise are both unit-tested directly. The actual `fan_in`
+wiring (`consider_autoplay`/`run_autoplay` reacting to a real `TrackStarted` for a TIDAL-sourced
+entry) is **not** covered by an automated daemon-level test: `tests/protocol.rs`'s own fixture
+builds every daemon with `DispatchOpener::new(None)`, which makes a `tidal:` source fail to open
+by construction (confirmed by reading `DispatchOpener::open`), so no external test in that file
+can ever make a real `TrackStarted` fire for one — and `Daemon::autoplay`'s private field means an
+in-crate harness would be needed instead, which was judged, after the fact, not worth building
+for this PR (it would re-implement a large slice of `tests/protocol.rs`'s own fixture machinery to
+exercise wiring that is otherwise thin glue over already-tested pure functions). **Verified live
+instead, against the real account**, which exercises the real wiring end to end more convincingly
+than a mock would: a scratch `phoniad` on a throwaway PipeWire null sink —
+- `autoplay on`, `repeat off`, one real track queued and played: within ~2 seconds, 10 real tracks
+  from its actual TIDAL radio appeared in the queue, none of them the seed.
+- `repeat all`: no fetch.
+- `autoplay off`: no fetch.
+- `Play` immediately followed by `Stop`: the in-flight fetch was cancelled, nothing was added, and
+  the engine stayed stopped (no spurious resume).
+
+Full workspace green (phonia-core gained 6 new tests: 5 for `autoplay_due`, 1 pinning the engine
+premise; `phoniad` gained 9 for the `autoplay` module), fmt+clippy clean. No protocol bump — the
+wire was already finished in part 4.
+
+Next, and last: the TUI's own autoplay toggle (part 6), closing #33.
