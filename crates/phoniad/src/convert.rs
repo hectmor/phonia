@@ -86,6 +86,7 @@ pub fn queue_dto(queue: &QueueSnapshot) -> ipc::Queue {
         current: queue.current.map(|id| ipc::ItemId(id.0)),
         shuffle: queue.shuffle,
         repeat: repeat(queue.repeat),
+        autoplay: queue.autoplay,
     }
 }
 
@@ -452,6 +453,7 @@ mod tests {
             current: Some(ItemId(7)),
             shuffle: true,
             repeat: Repeat::All,
+            autoplay: true,
         }
     }
 
@@ -467,8 +469,8 @@ mod tests {
         assert_eq!(dto.items[1].cover.as_deref(), Some("cover-uuid"));
         assert_eq!(dto.order, [ipc::ItemId(8), ipc::ItemId(7)]);
         assert_eq!(
-            (dto.current, dto.shuffle, dto.repeat),
-            (Some(ipc::ItemId(7)), true, ipc::Repeat::All)
+            (dto.current, dto.shuffle, dto.repeat, dto.autoplay),
+            (Some(ipc::ItemId(7)), true, ipc::Repeat::All, true)
         );
     }
 

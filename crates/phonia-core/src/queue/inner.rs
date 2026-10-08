@@ -54,6 +54,11 @@ pub(super) struct Inner {
     rng: StdRng,
     version: u64,
     replaygain: replaygain::Mode,
+    /// Whether the queue running dry (repeat off, nothing more to play) should be followed by
+    /// more tracks fetched from TIDAL on its own, rather than just stopping. Unlike `replaygain`,
+    /// this can change at runtime (see `Queue::set_autoplay`); the real behavior this enables is
+    /// not implemented yet, only the setting itself.
+    autoplay: bool,
 }
 
 impl Inner {
@@ -72,6 +77,7 @@ impl Inner {
             rng: StdRng::seed_from_u64(seed),
             version: 0,
             replaygain: replaygain::Mode::default(),
+            autoplay: false,
         }
     }
 
@@ -83,6 +89,7 @@ impl Inner {
             current: self.current,
             shuffle: self.shuffle,
             repeat: self.repeat,
+            autoplay: self.autoplay,
         }
     }
 
@@ -260,6 +267,13 @@ impl Inner {
     pub(super) fn set_repeat(&mut self, repeat: Repeat) {
         if self.repeat != repeat {
             self.repeat = repeat;
+            self.version += 1;
+        }
+    }
+
+    pub(super) fn set_autoplay(&mut self, autoplay: bool) {
+        if self.autoplay != autoplay {
+            self.autoplay = autoplay;
             self.version += 1;
         }
     }

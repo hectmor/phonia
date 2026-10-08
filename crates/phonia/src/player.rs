@@ -454,6 +454,7 @@ mod tests {
             items,
             shuffle,
             repeat,
+            autoplay: false,
         }
     }
 

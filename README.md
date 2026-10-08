@@ -162,6 +162,7 @@ verbose = false
 [playback]
 gapless = true          # join a track to the next one of the same format with no gap
 replaygain = "off"      # off | track | album | auto: apply TIDAL's ReplayGain? (default off, #30)
+autoplay = false        # fetch more tracks from TIDAL when the queue runs dry? (default off, #33)
 ```
 
 - **Name the card, not its number.** ALSA numbers cards in the order the kernel finds them, so a USB
@@ -264,6 +265,12 @@ replaygain = "off"      # off | track | album | auto: apply TIDAL's ReplayGain? 
   `o` on a track (a search result, a favorite track, or one inside an already-open album,
   playlist, artist page or radio) opens its radio the same way Enter opens an album; opening a
   queue entry's or the now-playing track's radio is a deliberate follow-up, not covered yet.
+- **Autoplay** (`[playback] autoplay`, default off; `Request::SetAutoplay`/`Queue.autoplay` since
+  protocol 1.13, capability `autoplay` advertised alongside `catalog`): `phonia ctl autoplay
+  [on|off]` (no argument flips it) sets whether the queue running dry should fetch more tracks
+  from TIDAL on its own instead of just stopping. So far this is only the setting itself (it
+  shows up in `phonia ctl queue list`'s JSON and can be flipped at runtime); the actual behavior
+  is not implemented yet.
 - `phonia config path` prints which file is used, and `phonia config show` prints every setting
   with where its value comes from (the file or the default). `--config <file>` (or the
   `PHONIA_CONFIG` environment variable) selects another file, also for `phoniad`.

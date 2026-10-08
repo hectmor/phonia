@@ -284,6 +284,10 @@ pub struct Queue {
     pub current: Option<ItemId>,
     pub shuffle: bool,
     pub repeat: Repeat,
+    /// Whether the queue running dry fetches more tracks from TIDAL on its own (since 1.13;
+    /// `#[serde(default)]` so an older daemon's snapshot still parses as `false`).
+    #[serde(default)]
+    pub autoplay: bool,
 }
 
 /// Whether playback is bit-perfect, and the evidence, reported when a track starts on a device.

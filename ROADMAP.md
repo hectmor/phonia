@@ -81,7 +81,7 @@ done — it is its own product decision, not a leftover.
 | #120 | Play reporting: finished plays reach TIDAL's own Recently Played | Closed (verified live against a real account) |
 | #32 | Letras sincronizadas: lyrics synced to playback in the TUI | Code complete, all 3 parts merged |
 | #39 | Carpetas de playlists: browse TIDAL's own playlist folders in the TUI | Code complete, all 3 parts merged |
-| #33 | Mixes, radio y autoplay de pistas similares | In progress (parts 1-3/6) |
+| #33 | Mixes, radio y autoplay de pistas similares | In progress (parts 1-4/6) |
 
 The rest of Phase 4 and all of Phase 5 are not started, except CI (#42) and
 rustfmt-in-CI (#50), both closed. Nothing else is planned in detail yet;
@@ -650,11 +650,19 @@ radio) opens its radio, reusing the existing `TrackListView`/`Stack`
 machinery an album or a playlist already opens into — nesting a radio
 from inside another falls out for free. Opening a queue entry's or the
 now-playing track's own radio is a deliberate follow-up, not covered
-yet: neither has anywhere to show an opened radio today. Parts 4-5 are
-the autoplay setting and its actual behavior in `phoniad` (hooked into
-the existing prefetch mechanism, not `QueueExhausted`, so the DAC is
-never released and re-acquired). Part 6 is the TUI's autoplay toggle,
-closing #33.
+yet: neither has anywhere to show an opened radio today.
+
+Part 4 added the autoplay setting itself, no behavior yet: `[playback]
+autoplay` (default off) supplies the startup value of a new,
+runtime-changeable `Queue.autoplay` flag — modeled like
+`shuffle`/`repeat` (a `Request::SetAutoplay`, protocol 1.12 → 1.13),
+not like `replaygain` (config-only, no runtime setter), since the
+approved design wants it toggleable while the daemon runs. `phonia ctl
+autoplay [on|off]` (no argument flips it) verified live against the
+real account. Part 5 (next) is the actual behavior in `phoniad` —
+hooked into the engine's existing prefetch mechanism, not
+`QueueExhausted`, so the DAC is never released and re-acquired for it.
+Part 6 is the TUI's autoplay toggle, closing #33.
 
 ## Conventions this file assumes
 

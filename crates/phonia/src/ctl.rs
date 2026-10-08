@@ -150,6 +150,11 @@ pub enum CtlCommand {
     Repeat {
         mode: RepeatMode,
     },
+    /// Whether the queue running dry fetches more tracks from TIDAL on its own; without a mode,
+    /// flips whatever it is now.
+    Autoplay {
+        mode: Option<MuteMode>,
+    },
     /// Prints events as they happen, until interrupted.
     Watch,
     /// Stops the daemon.
@@ -333,6 +338,9 @@ pub async fn run(args: CtlArgs, config_flag: Option<&Path>) -> Result<()> {
                 RepeatMode::All => Repeat::All,
             };
             ack(&client, json, Request::SetRepeat { repeat }).await
+        }
+        CtlCommand::Autoplay { mode } => {
+            autoplay(&client, json, mode.unwrap_or(MuteMode::Toggle)).await
         }
         CtlCommand::Watch => watch(&client, json).await,
         CtlCommand::Shutdown => ack(&client, json, Request::Shutdown).await,
@@ -985,6 +993,18 @@ async fn mute(client: &Client, json: bool, mode: MuteMode) -> Result<()> {
     ack(client, json, Request::SetMute { mute }).await
 }
 
+async fn autoplay(client: &Client, json: bool, mode: MuteMode) -> Result<()> {
+    let autoplay = match mode {
+        MuteMode::On => true,
+        MuteMode::Off => false,
+        MuteMode::Toggle => {
+            let current = client.queue().await?;
+            !current.autoplay
+        }
+    };
+    ack(client, json, Request::SetAutoplay { autoplay }).await
+}
+
 async fn output(client: &Client, json: bool, action: Option<OutputAction>) -> Result<()> {
     if !client
         .server()
@@ -1525,6 +1545,7 @@ mod tests {
             current: Some(ItemId(11)),
             shuffle: true,
             repeat: Repeat::All,
+            autoplay: false,
         }
     }
 

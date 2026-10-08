@@ -812,6 +812,7 @@ mod tests {
                     current: Some(ItemId(2)),
                     shuffle: false,
                     repeat: Repeat::Off,
+                    autoplay: false,
                 },
             }),
         );
@@ -1357,6 +1358,7 @@ mod tests {
                     current: None,
                     shuffle: false,
                     repeat: Repeat::Off,
+                    autoplay: false,
                 },
             }),
         );

@@ -151,6 +151,7 @@ async fn run(args: Args) -> Result<()> {
             ..engine::Options::default()
         },
         replaygain: settings.replaygain.value,
+        autoplay: settings.autoplay.value,
     })?;
 
     daemon.refresh_route().await;

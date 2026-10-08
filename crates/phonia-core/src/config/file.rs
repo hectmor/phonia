@@ -223,6 +223,11 @@ pub struct Playback {
     /// How ReplayGain is chosen; see `crate::replaygain::Mode`. No command-line flag: altering a
     /// sample's value is a deliberate, written-down choice.
     pub replaygain: Option<crate::replaygain::Mode>,
+    /// When the queue runs dry with repeat off, fetch more tracks from TIDAL on their own
+    /// (seeded by the last one played) instead of just stopping. Default off: this is a
+    /// deliberate opt-in, the same reasoning as `replaygain`'s own default. Can also be changed
+    /// at runtime (unlike `replaygain`); this is only the startup value. No command-line flag.
+    pub autoplay: Option<bool>,
 }
 
 /// The whole file.
@@ -265,6 +270,7 @@ verbose = true
 [playback]
 gapless = false
 replaygain = "album"
+autoplay = true
 "#;
 
     #[test]
@@ -292,6 +298,7 @@ replaygain = "album"
                 playback: Playback {
                     gapless: Some(false),
                     replaygain: Some(crate::replaygain::Mode::Album),
+                    autoplay: Some(true),
                 },
             }
         );

@@ -140,6 +140,11 @@ fn format_settings(
             settings.replaygain.value.to_string(),
             settings.replaygain.origin,
         ),
+        (
+            "playback.autoplay",
+            settings.autoplay.value.to_string(),
+            settings.autoplay.origin,
+        ),
     ];
     let key_width = rows.iter().map(|row| row.0.len()).max().unwrap_or(0);
     let value_width = rows.iter().map(|row| row.1.len()).max().unwrap_or(0);
@@ -187,7 +192,8 @@ mod tests {
              \x20 daemon.socket               /run/user/1000/phonia/phoniad.sock  (default)\n\
              \x20 daemon.verbose              false                               (default)\n\
              \x20 playback.gapless            true                                (default)\n\
-             \x20 playback.replaygain         off                                 (default)"
+             \x20 playback.replaygain         off                                 (default)\n\
+             \x20 playback.autoplay           false                               (default)"
         );
     }
 
@@ -218,9 +224,9 @@ mod tests {
         assert!(text.contains("lossless"), "{text}");
         assert_eq!(
             text.matches("(default)").count(),
-            11,
+            12,
             "mode, sink, reserve, release_after_pause, min_quality, session_store, \
-             report_plays, socket, verbose, gapless and replaygain were not written"
+             report_plays, socket, verbose, gapless, replaygain and autoplay were not written"
         );
     }
 

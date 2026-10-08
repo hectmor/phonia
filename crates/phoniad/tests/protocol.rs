@@ -113,6 +113,7 @@ async fn fixture_full(
         reports: report_rx,
         engine: options,
         replaygain: phonia_core::replaygain::Mode::default(),
+        autoplay: false,
     })
     .unwrap();
     let dir = std::env::temp_dir().join(format!(
@@ -593,9 +594,19 @@ async fn editing_the_queue_and_asking_for_what_does_not_exist() {
             .unwrap(),
         Payload::Ack
     );
+    assert_eq!(
+        client
+            .request(Request::SetAutoplay { autoplay: true })
+            .await
+            .unwrap(),
+        Payload::Ack
+    );
     let queue = client.queue().await.unwrap();
     assert_eq!(queue.items[0].id, ids[2]);
-    assert_eq!((queue.shuffle, queue.repeat), (true, Repeat::All));
+    assert_eq!(
+        (queue.shuffle, queue.repeat, queue.autoplay),
+        (true, Repeat::All, true)
+    );
 
     assert_eq!(
         client
@@ -2796,6 +2807,31 @@ async fn a_daemon_with_a_catalog_announces_the_lyrics_capability() {
     let f = fixture_with_catalog("lyrics-hello", Some(Arc::new(FakeCatalog::new()))).await;
     let client = f.client().await;
     assert!(client.server().capabilities.iter().any(|c| c == CAP_LYRICS));
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_daemon_with_a_catalog_announces_the_autoplay_capability_but_not_without_one() {
+    let f = fixture_with_catalog("autoplay-hello", Some(Arc::new(FakeCatalog::new()))).await;
+    let client = f.client().await;
+    assert!(
+        client
+            .server()
+            .capabilities
+            .iter()
+            .any(|c| c == CAP_AUTOPLAY)
+    );
+    f.finish().await;
+
+    let f = fixture_with_catalog("autoplay-hello-nocatalog", None).await;
+    let client = f.client().await;
+    assert!(
+        !client
+            .server()
+            .capabilities
+            .iter()
+            .any(|c| c == CAP_AUTOPLAY)
+    );
     f.finish().await;
 }
 

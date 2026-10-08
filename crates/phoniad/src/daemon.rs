@@ -108,6 +108,9 @@ pub struct DaemonParts {
     /// How ReplayGain is chosen; see `phonia_core::replaygain::Mode`. Set once at startup: there
     /// is no runtime way to change it.
     pub replaygain: phonia_core::replaygain::Mode,
+    /// The startup value of autoplay; unlike `replaygain`, can be changed at runtime afterward
+    /// (`Request::SetAutoplay`).
+    pub autoplay: bool,
     /// Which output the daemon is on and how to move it.
     pub outputs: Outputs,
     /// The tiers TIDAL is asked for, if the daemon plays from TIDAL.
@@ -152,6 +155,7 @@ impl Daemon {
     pub fn start(parts: DaemonParts) -> Result<Arc<Daemon>> {
         let queue = Queue::new(parts.opener.clone() as Arc<dyn TrackOpener>);
         queue.set_replay_gain(parts.replaygain);
+        queue.set_autoplay(parts.autoplay);
         let first_sinks = parts.sinks.clone();
         let engine = Engine::spawn_with_options(
             tokio::runtime::Handle::current(),
@@ -363,10 +367,12 @@ impl Daemon {
             ipc::CAP_GAPLESS.to_string(),
             ipc::CAP_QUALITY.to_string(),
         ];
-        // Only a daemon with a login to browse with can search, or fetch lyrics.
+        // Only a daemon with a login to browse with can search, fetch lyrics, or autoplay
+        // (which will need to fetch more tracks from TIDAL).
         if self.catalog.is_some() {
             capabilities.push(ipc::CAP_CATALOG.to_string());
             capabilities.push(ipc::CAP_LYRICS.to_string());
+            capabilities.push(ipc::CAP_AUTOPLAY.to_string());
         }
         ipc::ServerHello {
             protocol: ipc::PROTOCOL,
@@ -883,6 +889,10 @@ impl Daemon {
                     .set_repeat(convert::repeat_from_wire(repeat));
                 Reply::Ok(Payload::Ack)
             }
+            Request::SetAutoplay { autoplay } => {
+                self.controller.queue().set_autoplay(autoplay);
+                Reply::Ok(Payload::Ack)
+            }
             Request::Shutdown => {
                 self.request_shutdown();
                 Reply::Ok(Payload::Ack)
@@ -1208,6 +1218,7 @@ mod play_log_tests {
             current: Some(ItemId(8)),
             shuffle: false,
             repeat: Repeat::Off,
+            autoplay: false,
         }
     }
 

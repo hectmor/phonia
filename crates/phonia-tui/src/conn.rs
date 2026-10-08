@@ -235,6 +235,7 @@ mod tests {
             current: None,
             shuffle: false,
             repeat: Repeat::Off,
+            autoplay: false,
         }
     }
 
