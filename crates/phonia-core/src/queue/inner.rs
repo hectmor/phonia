@@ -56,8 +56,8 @@ pub(super) struct Inner {
     replaygain: replaygain::Mode,
     /// Whether the queue running dry (repeat off, nothing more to play) should be followed by
     /// more tracks fetched from TIDAL on its own, rather than just stopping. Unlike `replaygain`,
-    /// this can change at runtime (see `Queue::set_autoplay`); the real behavior this enables is
-    /// not implemented yet, only the setting itself.
+    /// this can change at runtime (see `Queue::set_autoplay`). See `autoplay_due` for the actual
+    /// behavior this enables, in `phoniad`.
     autoplay: bool,
 }
 
@@ -275,6 +275,18 @@ impl Inner {
         if self.autoplay != autoplay {
             self.autoplay = autoplay;
             self.version += 1;
+        }
+    }
+
+    /// The current entry, if autoplay is on and nothing would follow it: repeat off, and the
+    /// play order genuinely ends with it (not `Repeat::One`, which always has something, nor
+    /// `Repeat::All`, which wraps). `None` either way is "autoplay has nothing to do right now",
+    /// read by `phoniad` on every `TrackStarted`/`QueueChanged` to decide whether to fetch more.
+    pub(super) fn autoplay_due(&self) -> Option<ItemId> {
+        if self.autoplay && self.repeat == Repeat::Off && self.peek(Advance::Auto) == Peeked::End {
+            self.current
+        } else {
+            None
         }
     }
 

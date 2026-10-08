@@ -267,10 +267,12 @@ autoplay = false        # fetch more tracks from TIDAL when the queue runs dry? 
   queue entry's or the now-playing track's radio is a deliberate follow-up, not covered yet.
 - **Autoplay** (`[playback] autoplay`, default off; `Request::SetAutoplay`/`Queue.autoplay` since
   protocol 1.13, capability `autoplay` advertised alongside `catalog`): `phonia ctl autoplay
-  [on|off]` (no argument flips it) sets whether the queue running dry should fetch more tracks
-  from TIDAL on its own instead of just stopping. So far this is only the setting itself (it
-  shows up in `phonia ctl queue list`'s JSON and can be flipped at runtime); the actual behavior
-  is not implemented yet.
+  [on|off]` (no argument flips it). With repeat off, once the last entry in the queue starts,
+  phonia fetches its TIDAL radio and appends about 10 tracks on its own, so playback never just
+  stops -- the engine's existing gapless prefetch picks them up the same as any other queued
+  track. Each refill re-seeds from the newest track added, so the "station" drifts naturally as
+  it plays on; a local file has no radio of its own, so it falls back to the last TIDAL track
+  that played. `Repeat::One`/`Repeat::All` never trigger it.
 - `phonia config path` prints which file is used, and `phonia config show` prints every setting
   with where its value comes from (the file or the default). `--config <file>` (or the
   `PHONIA_CONFIG` environment variable) selects another file, also for `phoniad`.
