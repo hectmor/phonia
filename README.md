@@ -272,7 +272,8 @@ autoplay = false        # fetch more tracks from TIDAL when the queue runs dry? 
   stops -- the engine's existing gapless prefetch picks them up the same as any other queued
   track. Each refill re-seeds from the newest track added, so the "station" drifts naturally as
   it plays on; a local file has no radio of its own, so it falls back to the last TIDAL track
-  that played. `Repeat::One`/`Repeat::All` never trigger it.
+  that played. `Repeat::One`/`Repeat::All` never trigger it. `O` in the TUI flips it on or off,
+  shown next to shuffle/repeat in the bar whenever it is on.
 - `phonia config path` prints which file is used, and `phonia config show` prints every setting
   with where its value comes from (the file or the default). `--config <file>` (or the
   `PHONIA_CONFIG` environment variable) selects another file, also for `phoniad`.

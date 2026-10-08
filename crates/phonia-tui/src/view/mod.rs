@@ -526,6 +526,9 @@ fn flags(state: &State) -> String {
             phonia_ipc::Repeat::All => flags.push("repeat all".to_string()),
             phonia_ipc::Repeat::One => flags.push("repeat one".to_string()),
         }
+        if queue.autoplay {
+            flags.push("autoplay".to_string());
+        }
     }
     flags.join("   ")
 }
@@ -915,6 +918,15 @@ mod tests {
         assert!(
             text.contains("| vol 72% (muted)   shuffle   repeat all"),
             "{text}"
+        );
+
+        state.queue = Some(Queue {
+            autoplay: true,
+            ..state.queue.clone().unwrap()
+        });
+        assert_eq!(
+            flags(&state),
+            "vol 72% (muted)   shuffle   repeat all   autoplay"
         );
     }
 

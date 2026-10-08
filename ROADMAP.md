@@ -81,7 +81,7 @@ done — it is its own product decision, not a leftover.
 | #120 | Play reporting: finished plays reach TIDAL's own Recently Played | Closed (verified live against a real account) |
 | #32 | Letras sincronizadas: lyrics synced to playback in the TUI | Code complete, all 3 parts merged |
 | #39 | Carpetas de playlists: browse TIDAL's own playlist folders in the TUI | Code complete, all 3 parts merged |
-| #33 | Mixes, radio y autoplay de pistas similares | In progress (parts 1-5/6) |
+| #33 | Mixes, radio y autoplay de pistas similares | Code complete, all 6 parts merged |
 
 The rest of Phase 4 and all of Phase 5 are not started, except CI (#42) and
 rustfmt-in-CI (#50), both closed. Nothing else is planned in detail yet;
@@ -677,8 +677,16 @@ short track or a slow fetch loses that race anyway, playback resumes
 on the first added track rather than staying stopped. Verified live
 against the real account: ~10 real tracks appeared within ~2 seconds
 of a seed track starting; `repeat all`, `autoplay off`, and an
-immediate Stop each correctly added nothing. Part 6 (last) is the
-TUI's autoplay toggle, closing #33.
+immediate Stop each correctly added nothing.
+
+Part 6 (last) added the TUI's own `O` key, flipping autoplay on or
+off (paired with part 3's lowercase `o`, which opens a track's radio
+on demand) -- a thin addition reusing the exact same request/dispatch
+shape shuffle (`s`) and repeat (`r`) already have, shown next to them
+in the bar whenever it is on. **This closes #33**, all 6 parts merged:
+on-demand track radio (browse, queue, and the TUI) plus autoplay (the
+setting, its real behavior, and the TUI toggle). Personal "My Mixes"
+remain a deliberately separate future issue.
 
 ## Conventions this file assumes
 
