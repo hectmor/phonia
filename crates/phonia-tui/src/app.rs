@@ -2059,8 +2059,11 @@ fn act_on_track_row(
         Action::Activate => {
             // How many tracks before this one in the same list could stream: the daemon leaves
             // the others out when it adds the list, so this is this track's place among the ids
-            // that come back.
-            let play_at = match state.search_views.top() {
+            // that come back. Reads the stack of whichever section actually opened this view
+            // (Search or Library each have their own), not a fixed one -- a track inside a view
+            // opened from Library must not be measured against Search's own stack, which may be
+            // empty, or hold something unrelated.
+            let play_at = match active_stack_mut(state).and_then(|stack| stack.top()) {
                 Some(browse::View::TrackList(view)) => {
                     count_streamable_before(&view.tracks.items, index)
                 }
@@ -5095,6 +5098,90 @@ mod tests {
             state.search_views.is_empty(),
             "opened onto the library, not the search"
         );
+    }
+
+    /// Regression: Enter on a track inside an album, a playlist, a folder or a radio opened from
+    /// the *library* used to read `search_views` unconditionally (a leftover from before the
+    /// library got its own stack), so it silently did nothing whenever no search view happened
+    /// to be open. The fix reads whichever stack actually holds the opened view.
+    #[test]
+    fn enter_on_a_track_inside_an_album_opened_from_the_library_plays_from_it() {
+        let mut state = with_library();
+        ch(&mut state, ']'); // favorite albums
+        let (tag, _) = tagged(press(&mut state, KeyCode::Enter));
+        let Tag::View { serial } = tag else {
+            panic!("not a view tag")
+        };
+        assert!(
+            state.search_views.is_empty(),
+            "nothing opened on the search's own stack"
+        );
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::View { serial },
+                result: Ok(Payload::Tracks {
+                    from: phonia_ipc::CatalogRef::Album { id: "9".into() },
+                    page: page_of(
+                        vec![library_track("1", "First"), library_track("2", "Second")],
+                        2,
+                        0,
+                    )
+                    .unwrap(),
+                }),
+            },
+        );
+        ch(&mut state, 'j'); // the 2nd track
+        let (tag, request) = tagged(press(&mut state, KeyCode::Enter));
+        assert_eq!(
+            request,
+            Request::QueueAddFrom {
+                from: phonia_ipc::CatalogRef::Album { id: "9".into() },
+                at: phonia_ipc::AddAt::Next,
+            }
+        );
+        assert_eq!(
+            tag,
+            Tag::AddFrom { play_at: Some(1) },
+            "both tracks stream: the 2nd is at position 1"
+        );
+    }
+
+    /// Same regression, through a radio opened from the library (a different entry point:
+    /// `open_track_radio`, not `act_on_library_result`'s album branch) onto the same stack.
+    #[test]
+    fn enter_on_a_track_inside_a_radio_opened_from_the_library_plays_from_it() {
+        let mut state = with_library();
+        // Still on Favorite tracks (the default tab): "o" opens track 1's own radio.
+        let (tag, _) = tagged(ch(&mut state, 'o'));
+        let Tag::View { serial } = tag else {
+            panic!("not a view tag")
+        };
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::View { serial },
+                result: Ok(Payload::Tracks {
+                    from: phonia_ipc::CatalogRef::TrackRadio { id: "1".into() },
+                    page: page_of(
+                        vec![library_track("2", "First"), library_track("3", "Second")],
+                        2,
+                        0,
+                    )
+                    .unwrap(),
+                }),
+            },
+        );
+        ch(&mut state, 'j'); // the 2nd track
+        let (tag, request) = tagged(press(&mut state, KeyCode::Enter));
+        assert_eq!(
+            request,
+            Request::QueueAddFrom {
+                from: phonia_ipc::CatalogRef::TrackRadio { id: "1".into() },
+                at: phonia_ipc::AddAt::Next,
+            }
+        );
+        assert_eq!(tag, Tag::AddFrom { play_at: Some(1) });
     }
 
     #[test]

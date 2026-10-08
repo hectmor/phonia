@@ -2267,3 +2267,59 @@ verification of the behavior this toggle controls.
 **This closes #33**, all 6 parts merged: on-demand track radio (browse, queue, and the TUI's `o`)
 plus autoplay (the setting, its real behavior, and the TUI's `O`). Personal "My Mixes" remain a
 deliberately separate future issue, as scoped back in part 1.
+
+## 2026-10-08 — #139 part 1: a real pre-existing bug found while planning the Home screen
+
+New issue, new milestone (Fase 7 — Home screen and discovery, #8), scoped explicitly to option (a)
+of a choice the user made outside any existing issue: a lightweight home screen using only data
+phonia already fetches locally (resuming, favorites, playlist folders), with a real
+TIDAL-style editorial/personalized home (mixes, new releases) left as a deliberately separate,
+not-yet-investigated future issue — the same "My Mixes" territory #33 already left alone.
+
+Planned with Opus (read-only investigation of the TUI's own section architecture, not code it had
+touched before this issue). **Headline finding, not about Home at all**: `act_on_track_row`'s
+`Activate` branch (the function that computes, for a track inside an *already open* album,
+playlist, folder or radio, how many tracks before it could stream, to land `play_at` on the right
+one) read `state.search_views.top()` unconditionally — a leftover from before the library grew its
+own stack (`library_views`, #21). The effect: pressing Enter on a track inside a view opened from
+the *library* did nothing at all whenever no search view happened to be open (the common case), or
+silently used whichever unrelated view *was* open in search instead. No existing test caught this
+because the library's own tests only ever open a view, never press Enter on a track inside one.
+
+Fixed to read `active_stack_mut(state)` — the stack belonging to whichever section actually
+opened the view — the same helper every other view-aware action already uses. Two regression
+tests: Enter on a track inside an album opened from Library's Favorite Albums tab, and inside a
+radio opened from Library's Favorite Tracks tab (two different entry points —
+`act_on_library_result`'s album branch and `open_track_radio` — both pushing onto the same
+`library_views` stack, both now correctly read back by the one shared fix).
+
+This matters for Home specifically because Home's own planned navigation (opening an album,
+playlist or folder nested *inside Home's own stack*, decision 3 of the plan) would otherwise have
+inherited the exact same silent failure on day one — fixing it first, as its own PR, means Home's
+later parts build on a stack-reading path already proven correct, rather than re-discovering the
+same bug a third time.
+
+Full workspace green (phonia-tui +2 tests), fmt+clippy clean. No README/user-facing-feature note
+(a bug fix restoring intended behavior, not new surface) beyond this entry and the ROADMAP note.
+
+**Approved design for the rest of #139** (recorded now, implemented across the next 3 parts): a
+new `Section::Home`, first in the sidebar at key `1` (everything else shifts to `2`-`5`, matching
+tidal.com's own "the key is the position" convention already in use). `HomeState` holds no data of
+its own — a pure `home::rows(&State)` builds rows from `state.status`/`state.queue`
+(already-connected data, no new request) and `state.library` (the same `Request::Library`/
+`Request::PlaylistFolder` the Library section already makes — `maybe_load_library`'s guard widens
+to fire on Home too, so visiting Home first just means those two requests go out at startup
+instead of on first visiting Library). Rows: one "Continue" row (resumes a paused track at its
+exact position via `Request::Resume`; replays a stopped one from 0:00 via `Request::Play{Some}`,
+since the position is gone after a real stop; starts the queue via `Request::Play{None}` if
+nothing has played yet this session), then three 6-row blocks (favorite albums, playlist folders,
+favorite tracks) each ending in a "See all (N) →" row that jumps into Library on the matching tab.
+Opening an album, playlist or folder from Home pushes onto Home's own new stack (`home_views`),
+the same way Library's own works — "Home › Album", Back returns to Home. Resuming/continuing is
+scoped to "while this `phoniad` stays up" only: nothing in the daemon persists the queue or
+position across a restart today, and adding that is explicitly a separate future issue, not part
+of #139.
+
+Parts 2-4 (next): the `Section::Home` shell with only the Continue row (part 2); the three
+favorites/folders blocks plus "See all" (part 3); opening albums/playlists/folders nested inside
+Home, closing #139 (part 4).
