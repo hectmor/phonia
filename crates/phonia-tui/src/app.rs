@@ -97,6 +97,8 @@ pub struct State {
     pub sidebar: Cursor,
     /// The selected entry of the queue, in queue order.
     pub queue_cursor: Cursor,
+    /// The selected row of Home, among its own selectable rows (headers and spacers are skipped).
+    pub home_cursor: Cursor,
     pub help: bool,
     /// How many lines the help is scrolled down, when it is longer than the screen.
     pub help_scroll: usize,
@@ -391,8 +393,11 @@ fn update_now(state: &mut State, msg: Msg) -> Effects {
 /// The request that loads the library, the moment its section is first shown: refused, silently,
 /// until there is a connection with the catalog to ask (so it is tried again the moment there is
 /// one). Once asked, a failure is left as is, the same as a search that is not retried by itself.
+/// Home shows the same library's own favorites and folders (see `home::rows`), so visiting it
+/// first asks for the library exactly as visiting Library first would, rather than only once
+/// Library itself is opened.
 fn maybe_load_library(state: &mut State) -> Option<Request> {
-    if state.section() != Section::Library
+    if !matches!(state.section(), Section::Library | Section::Home)
         || state.library.is_some()
         || state.connection != Connection::Connected
         || !state.has(phonia_ipc::CAP_CATALOG)
@@ -1851,8 +1856,10 @@ fn move_cursor(state: &mut State, action: Action) {
             // `apply` returns through `scroll_lyrics` before this is ever reached for Lyrics;
             // only here for exhaustiveness.
             (Focus::Main, Section::Lyrics) => return,
-            // One row, nothing to move a cursor between yet (see #139's later parts).
-            (Focus::Main, Section::Home) => return,
+            (Focus::Main, Section::Home) => {
+                let len = home::selectable_count(&home::rows(state));
+                (len, &mut state.home_cursor)
+            }
         }
     };
     match action {
@@ -2140,14 +2147,52 @@ fn act_on_home(state: &mut State, action: Action) -> Effects {
     if action != Action::Activate || state.connection != Connection::Connected {
         return Effects::default();
     }
-    let Some(request) = home::continuation(state).request() else {
-        return Effects::default();
-    };
-    state.last_error = None;
-    Effects {
-        redraw: false,
-        commands: vec![Cmd::Send(request)],
+    match home::intent(state, state.home_cursor.selected()) {
+        home::Intent::Nothing => Effects::default(),
+        home::Intent::Request(request) => {
+            state.last_error = None;
+            Effects {
+                redraw: false,
+                commands: vec![Cmd::Send(request)],
+            }
+        }
+        home::Intent::PlayTrack(track) => {
+            if !track.streamable {
+                state.last_error = Some(format!("{} is not available where you are", track.title));
+                return Effects::redraw();
+            }
+            match phonia_ipc::source::tidal(&track.id) {
+                Ok(source) => send_add(
+                    state,
+                    Request::QueueAdd {
+                        tracks: vec![phonia_ipc::NewTrack { source }],
+                        at: phonia_ipc::AddAt::Next,
+                    },
+                    true,
+                ),
+                Err(reason) => {
+                    state.last_error = Some(reason);
+                    Effects::redraw()
+                }
+            }
+        }
+        home::Intent::JumpTo(tab) => jump_to_library(state, tab),
     }
+}
+
+/// Enter on one of Home's "See all" rows: switches to the Library section, on the tab that
+/// block's own list matches, exactly as pressing `4` then `[`/`]` to it would.
+fn jump_to_library(state: &mut State, tab: LibraryTab) -> Effects {
+    if let Some(library) = &mut state.library {
+        library.tab = tab;
+    }
+    let index = Section::ALL
+        .iter()
+        .position(|section| *section == Section::Library)
+        .unwrap_or(0);
+    state.sidebar.select(index, Section::ALL.len());
+    state.focus = Focus::Main;
+    Effects::redraw()
 }
 
 /// The queue's edits and Enter, on the selected entry: sent while connected and looking at the
@@ -4849,10 +4894,12 @@ mod tests {
     /// Both requests the library fires the moment its section is first shown: the favorite
     /// tracks/albums request, and the root folder's own (the Playlists tab is now folder-shaped
     /// data, fetched separately -- see `Tag::LibraryPlaylists`'s own doc).
+    /// Connects with Home already showing (the default section), which asks for the library at
+    /// once -- Home reads the same favorites and folders Library does (see `home::rows`) -- then
+    /// moves the sidebar onto Library itself, same screen either way.
     fn opening_library() -> (State, Tag, Tag) {
         let mut state = State::default();
-        update(&mut state, connected_msg(&["catalog"]));
-        let effects = ch(&mut state, '4');
+        let effects = update(&mut state, connected_msg(&["catalog"]));
         let [
             Cmd::Request {
                 tag: library_tag,
@@ -4873,6 +4920,7 @@ mod tests {
             }
         );
         assert_eq!(*playlists_request, LibraryState::playlist_request());
+        ch(&mut state, '4');
         (state, *library_tag, *playlists_tag)
     }
 
