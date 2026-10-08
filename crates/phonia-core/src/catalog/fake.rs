@@ -1,7 +1,7 @@
 //! A catalog that answers from what it was given, for tests of everything that uses one.
 
 use super::{
-    Album, AlbumFilter, Artist, Catalog, CatalogError, Kind, Lyrics, MAX_ITEMS_LIMIT,
+    Album, AlbumFilter, Artist, Catalog, CatalogError, FolderEntry, Kind, Lyrics, MAX_ITEMS_LIMIT,
     MAX_SEARCH_LIMIT, Page, Playlist, SearchResults, Track,
 };
 use futures_util::future::BoxFuture;
@@ -60,6 +60,11 @@ pub enum Call {
         offset: u32,
         limit: u32,
     },
+    PlaylistFolder {
+        folder: Option<String>,
+        offset: u32,
+        limit: u32,
+    },
     Lyrics {
         id: String,
     },
@@ -85,6 +90,8 @@ struct State {
     favorite_tracks: Vec<Track>,
     favorite_albums: Vec<Album>,
     my_playlists: Vec<Playlist>,
+    /// Keyed by folder id; `None` is the root of "My Collection".
+    folders: HashMap<Option<String>, Vec<FolderEntry>>,
     lyrics: HashMap<String, Lyrics>,
     error: Option<CatalogError>,
     delay: Duration,
@@ -172,6 +179,17 @@ impl FakeCatalog {
     /// The user's own playlists, for `my_playlists`.
     pub fn with_my_playlists(self, playlists: Vec<Playlist>) -> Self {
         self.state.lock().unwrap().my_playlists = playlists;
+        self
+    }
+
+    /// One folder's contents, for `playlist_folder`. `folder` is `None` for the root of "My
+    /// Collection", or `Some(id)` for a sub-folder.
+    pub fn with_folder(self, folder: Option<&str>, entries: Vec<FolderEntry>) -> Self {
+        self.state
+            .lock()
+            .unwrap()
+            .folders
+            .insert(folder.map(str::to_string), entries);
         self
     }
 
@@ -411,6 +429,23 @@ impl Catalog for FakeCatalog {
         let call = Call::MyPlaylists { offset, limit };
         self.answer(call, move |state| {
             Ok(page_of(&state.my_playlists, offset, limit))
+        })
+    }
+
+    fn playlist_folder(
+        &self,
+        folder: Option<String>,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<FolderEntry>, CatalogError>> {
+        let call = Call::PlaylistFolder {
+            folder: folder.clone(),
+            offset,
+            limit,
+        };
+        self.answer(call, move |state| {
+            let entries = state.folders.get(&folder).cloned().unwrap_or_default();
+            Ok(page_of(&entries, offset, limit))
         })
     }
 

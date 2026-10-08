@@ -141,6 +141,22 @@ pub struct Playlist {
     pub cover: Option<String>,
 }
 
+/// One entry of a playlist folder: either a sub-folder or a playlist sitting in it, in whatever
+/// order TIDAL's own "My Collection" organizes them. Unlike [`Catalog::my_playlists`], a
+/// playlist here may be one the user only follows, not one they created — TIDAL's own folders
+/// mix both, and hiding the followed ones would make the folder look wrong next to the real app.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FolderEntry {
+    Folder {
+        /// A UUID; pass this back as `playlist_folder`'s own `folder` argument to open it.
+        id: String,
+        name: String,
+        /// How many entries (playlists and sub-folders alike) are directly inside it.
+        item_count: u32,
+    },
+    Playlist(Playlist),
+}
+
 /// One page of a list that may be longer: `total` is how many there are in all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page<T> {
@@ -289,6 +305,17 @@ pub trait Catalog: Send + Sync {
         offset: u32,
         limit: u32,
     ) -> BoxFuture<'static, Result<Page<Playlist>, CatalogError>>;
+
+    /// One page of a playlist folder's own contents, sub-folders and playlists alike, in name
+    /// order. `folder` is `None` for the root of "My Collection"; `Some(id)` for a sub-folder,
+    /// using the id a [`FolderEntry::Folder`] from an earlier page already handed back. At most
+    /// [`MAX_ITEMS_LIMIT`] per page.
+    fn playlist_folder(
+        &self,
+        folder: Option<String>,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<FolderEntry>, CatalogError>>;
 
     /// A track's lyrics; `None` when TIDAL has none for it at all.
     fn track_lyrics(&self, id: String) -> BoxFuture<'static, Result<Option<Lyrics>, CatalogError>>;

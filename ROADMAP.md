@@ -80,6 +80,7 @@ done — it is its own product decision, not a leftover.
 |---|---|---|
 | #120 | Play reporting: finished plays reach TIDAL's own Recently Played | Closed (verified live against a real account) |
 | #32 | Letras sincronizadas: lyrics synced to playback in the TUI | Code complete, all 3 parts merged |
+| #39 | Carpetas de playlists: browse TIDAL's own playlist folders in the TUI | In progress (part 1/3 merged) |
 
 The rest of Phase 4 and all of Phase 5 are not started, except CI (#42) and
 rustfmt-in-CI (#50), both closed. Nothing else is planned in detail yet;
@@ -586,6 +587,31 @@ silently turned off auto-follow the moment the terminal was resized
 smaller later), fixed before merging.
 
 This closes #32: all three parts are merged.
+
+Phase 4 continues with **#39 (playlist folders)**, planned with Opus as a
+3-part plan. Nothing in the codebase or in `tidlers` (the TIDAL client
+library) wraps TIDAL's real "My Collection" folder API, so the plan's own
+investigation found it directly: `GET /my-collection/playlists/folders`
+on TIDAL's v2 host (`folderId=root` or a folder's id, `order`,
+`orderDirection`, paged by `offset`/`limit`, but — unlike every v1 listing
+phonia already uses — the answer never echoes an offset back, so the
+caller's own requested offset is kept instead).
+
+Three decisions, all taken as recommended: this stays read-only for now
+(creating/renaming/moving a folder is a separate future issue, the same
+scoping #21 used for favorite-editing); a folder's contents show a
+playlist the user only *follows*, exactly like TIDAL's own app, not
+filtered down to owned-only the way the flat "Your playlists" list is;
+the existing "Your playlists" library tab becomes the root of the folder
+tree rather than a new tab; folders sort before playlists, both by name.
+
+Part 1 (merged) added `catalog::FolderEntry` and
+`Catalog::playlist_folder` to `phonia-core`, verified live against a real
+test folder on this account (one playlist followed, not owned, confirming
+why this view does not apply `my_playlists`' owned-only filter). Part 2
+is the wire protocol (1.11) and daemon handler; part 3 is the TUI — the
+library's playlist tab becomes browsable as a tree through the same
+`browse::Stack` an album or artist already nests through, closing #39.
 
 ## Conventions this file assumes
 
