@@ -552,6 +552,26 @@ pub enum PlaylistListRef {
     Unknown,
 }
 
+/// One entry of a playlist folder (since 1.11): a sub-folder, or a playlist. Unlike
+/// [`PlaylistListRef::Mine`], a playlist here may be one the user only follows, not one they
+/// created — TIDAL's own folders mix both, and hiding the followed ones would make a folder look
+/// wrong next to what TIDAL's own app shows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FolderEntry {
+    Folder {
+        /// A UUID; pass this back as `Request::PlaylistFolder`'s own `folder` to open it.
+        id: String,
+        name: String,
+        /// How many entries (playlists and sub-folders alike) are directly inside it.
+        item_count: u32,
+    },
+    Playlist(PlaylistSummary),
+    /// A kind of entry a newer daemon has and this version does not know.
+    #[serde(other)]
+    Unknown,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

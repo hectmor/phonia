@@ -2458,6 +2458,11 @@ async fn without_a_catalog_none_of_them_can_be_answered() {
         },
         Request::Library { limit: None },
         Request::Lyrics { id: "9".into() },
+        Request::PlaylistFolder {
+            folder: None,
+            offset: 0,
+            limit: None,
+        },
     ] {
         let error = client.request(request).await.unwrap_err();
         assert_eq!(protocol_code(error), ErrorCode::Unsupported);
@@ -2760,5 +2765,103 @@ async fn asking_for_lyrics_does_not_hold_up_the_requests_behind_it() {
     };
     assert_eq!(id, RequestId(2));
     assert!(matches!(reply, Reply::Ok(Payload::Lyrics { .. })));
+    f.finish().await;
+}
+
+// --- Playlist folders (protocol 1.11, #39) ----------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_folders_contents_are_told_apart_from_a_sub_folder_and_the_offset_is_kept() {
+    let catalog = browsable().with_folder(
+        None,
+        vec![
+            catalog::FolderEntry::Folder {
+                id: "f1".into(),
+                name: "Moods".into(),
+                item_count: 1,
+            },
+            catalog::FolderEntry::Playlist(playlist_named("p-root", "Road trip")),
+        ],
+    );
+    let f = fixture_with_catalog("folders", Some(Arc::new(catalog))).await;
+    let client = f.client().await;
+    let Payload::PlaylistFolder { folder, page } = client
+        .request(Request::PlaylistFolder {
+            folder: None,
+            offset: 1,
+            limit: None,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("not a playlist folder answer");
+    };
+    assert_eq!(folder, None);
+    assert_eq!(page.offset, 1, "the caller's own offset is kept");
+    assert_eq!(
+        page.items,
+        vec![FolderEntry::Playlist(PlaylistSummary {
+            id: "p-root".into(),
+            title: "Road trip".into(),
+            creator: Some("hectmor".into()),
+            description: None,
+            track_count: Some(10),
+            duration_ms: Some(2_400_000),
+            cover: None,
+        })]
+    );
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sub_folder_is_opened_by_the_id_an_earlier_page_handed_back() {
+    let catalog = browsable()
+        .with_folder(
+            None,
+            vec![catalog::FolderEntry::Folder {
+                id: "f1".into(),
+                name: "Moods".into(),
+                item_count: 1,
+            }],
+        )
+        .with_folder(
+            Some("f1"),
+            vec![catalog::FolderEntry::Playlist(playlist_named(
+                "p-inside",
+                "Dark Jazz",
+            ))],
+        );
+    let f = fixture_with_catalog("sub-folder", Some(Arc::new(catalog))).await;
+    let client = f.client().await;
+    let Payload::PlaylistFolder { folder, page } = client
+        .request(Request::PlaylistFolder {
+            folder: Some("f1".into()),
+            offset: 0,
+            limit: None,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("not a playlist folder answer");
+    };
+    assert_eq!(folder, Some("f1".into()));
+    assert_eq!(page.items.len(), 1);
+    assert!(matches!(&page.items[0], FolderEntry::Playlist(p) if p.title == "Dark Jazz"));
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn without_a_catalog_a_playlist_folder_cannot_be_answered() {
+    let f = fixture_with_catalog("folders-nocatalog", None).await;
+    let client = f.client().await;
+    let error = client
+        .request(Request::PlaylistFolder {
+            folder: None,
+            offset: 0,
+            limit: None,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(protocol_code(error), ErrorCode::Unsupported);
     f.finish().await;
 }

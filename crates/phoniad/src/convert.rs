@@ -226,6 +226,23 @@ pub fn playlist_summary(playlist: &tidal_catalog::Playlist) -> ipc::PlaylistSumm
     }
 }
 
+pub fn folder_entry(entry: &tidal_catalog::FolderEntry) -> ipc::FolderEntry {
+    match entry {
+        tidal_catalog::FolderEntry::Folder {
+            id,
+            name,
+            item_count,
+        } => ipc::FolderEntry::Folder {
+            id: id.clone(),
+            name: name.clone(),
+            item_count: *item_count,
+        },
+        tidal_catalog::FolderEntry::Playlist(playlist) => {
+            ipc::FolderEntry::Playlist(playlist_summary(playlist))
+        }
+    }
+}
+
 /// A page of the catalog as clients see it, each item mapped by `each`.
 pub fn page<T, U>(page: &tidal_catalog::Page<T>, each: impl Fn(&T) -> U) -> ipc::Page<U> {
     ipc::Page {

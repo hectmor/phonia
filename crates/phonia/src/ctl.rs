@@ -4,9 +4,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use phonia_ipc::{
     AddAt, CAP_CATALOG, CAP_LYRICS, CAP_OUTPUT_RELEASE, CAP_OUTPUT_SELECT, CAP_QUALITY, CAP_VOLUME,
-    CatalogKind, CatalogRef, Client, ClientError, ClientInfo, Event, ItemId, NewTrack, Output,
-    OutputInfo, OutputMode, Payload, Quality, QualityRange, Queue, ReleaseReason, Repeat, Request,
-    SeekTarget, State, Status, Volume,
+    CatalogKind, CatalogRef, Client, ClientError, ClientInfo, Event, FolderEntry, ItemId, NewTrack,
+    Output, OutputInfo, OutputMode, Payload, Quality, QualityRange, Queue, ReleaseReason, Repeat,
+    Request, SeekTarget, State, Status, Volume,
 };
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -100,6 +100,12 @@ pub enum CtlCommand {
     /// Without an id, the track playing now (it must be a TIDAL one).
     Lyrics {
         /// The track's id, as `search` prints it.
+        id: Option<String>,
+    },
+    /// Shows a playlist folder: sub-folders first, then playlists (including ones you only
+    /// follow, same as TIDAL's own app). Without an id, the root of "My Collection".
+    Folder {
+        /// A sub-folder's id, as an earlier `folder` listing prints it.
         id: Option<String>,
     },
     /// Mutes (`on`), unmutes (`off`) or flips (`toggle`, the default) an output that has a volume
@@ -297,6 +303,7 @@ pub async fn run(args: CtlArgs, config_flag: Option<&Path>) -> Result<()> {
         CtlCommand::Artist { id, limit } => artist(&client, json, id, limit).await,
         CtlCommand::Library { limit } => library(&client, json, limit).await,
         CtlCommand::Lyrics { id } => lyrics(&client, json, id).await,
+        CtlCommand::Folder { id } => folder(&client, json, id).await,
         CtlCommand::Mute { mode } => mute(&client, json, mode.unwrap_or(MuteMode::Toggle)).await,
         CtlCommand::Output { action } => output(&client, json, action).await,
         CtlCommand::Queue { action } => queue(&client, json, action).await,
@@ -630,6 +637,18 @@ async fn lyrics(client: &Client, json: bool, id: Option<String>) -> Result<()> {
     print_payload(json, &payload, || format_lyrics(&payload))
 }
 
+async fn folder(client: &Client, json: bool, id: Option<String>) -> Result<()> {
+    require_catalog(client, "playlist folders")?;
+    let payload = client
+        .request(Request::PlaylistFolder {
+            folder: id,
+            offset: 0,
+            limit: None,
+        })
+        .await?;
+    print_payload(json, &payload, || format_folder(&payload))
+}
+
 /// The URL of a cover or a picture, at a size fit for opening in a browser rather than for a
 /// terminal cell; `None` when there is no id to build one from.
 fn cover_url(kind: phonia_ipc::image::Kind, id: Option<&str>) -> Option<String> {
@@ -789,6 +808,40 @@ fn format_library(payload: &Payload) -> String {
             playlist.id
         )
     });
+    text
+}
+
+/// A folder's own contents: sub-folders first, then playlists, numbered from the start.
+fn format_folder(payload: &Payload) -> String {
+    let Payload::PlaylistFolder { folder, page } = payload else {
+        return "unexpected answer".to_string();
+    };
+    let mut text = match folder {
+        Some(id) => format!("Folder {id} ({} of {}):", page.items.len(), page.total),
+        None => format!("My Collection ({} of {}):", page.items.len(), page.total),
+    };
+    if page.items.is_empty() {
+        text.push_str("\n  none");
+    }
+    for (index, item) in page.items.iter().enumerate() {
+        let row = match item {
+            FolderEntry::Folder {
+                id,
+                name,
+                item_count,
+            } => {
+                let noun = if *item_count == 1 { "item" } else { "items" };
+                format!("{name}/   folder {id} ({item_count} {noun})")
+            }
+            FolderEntry::Playlist(playlist) => format!(
+                "{}   playlist {}",
+                phonia_ipc::fmt::playlist(playlist),
+                playlist.id
+            ),
+            FolderEntry::Unknown => "(an entry this version does not know)".to_string(),
+        };
+        text.push_str(&format!("\n {:>3}. {row}", index + 1));
+    }
     text
 }
 
@@ -2358,5 +2411,55 @@ mod tests {
             ),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_folder_lists_sub_folders_then_playlists_each_numbered_from_the_start() {
+        use phonia_ipc::{Page, PlaylistSummary};
+        let text = format_folder(&Payload::PlaylistFolder {
+            folder: None,
+            page: Page {
+                items: vec![
+                    FolderEntry::Folder {
+                        id: "f1".into(),
+                        name: "Moods".into(),
+                        item_count: 1,
+                    },
+                    FolderEntry::Playlist(PlaylistSummary {
+                        id: "p-1".into(),
+                        title: "Road trip".into(),
+                        creator: Some("hectmor".into()),
+                        description: None,
+                        track_count: Some(10),
+                        duration_ms: None,
+                        cover: None,
+                    }),
+                ],
+                total: 2,
+                offset: 0,
+            },
+        });
+        assert!(
+            text.starts_with("My Collection (2 of 2):\n   1. Moods/   folder f1 (1 item)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\n   2. Road trip - hectmor - 10 tracks   playlist p-1"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_empty_folder_says_so_and_names_which_one() {
+        use phonia_ipc::Page;
+        let text = format_folder(&Payload::PlaylistFolder {
+            folder: Some("f1".into()),
+            page: Page {
+                items: vec![],
+                total: 0,
+                offset: 0,
+            },
+        });
+        assert!(text.starts_with("Folder f1 (0 of 0):\n  none"), "{text}");
     }
 }

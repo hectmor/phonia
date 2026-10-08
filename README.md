@@ -245,6 +245,14 @@ replaygain = "off"      # off | track | album | auto: apply TIDAL's ReplayGain? 
   the moment it is opened (or the track changes while it is) and follows the line being sung as it
   plays; `j`/`k` (and the other movement keys) scroll it manually, overriding that until the track
   changes. A local file has no TIDAL id to ask with, so its lyrics are never looked up.
+- **Playlist folders** (the request `playlist_folder` of protocol 1.11, under the existing
+  `catalog` capability): one page of a folder's own contents, sub-folders and playlists alike,
+  from TIDAL's real "My Collection" folder tree (`folder` is the id to open, or the root when
+  left out). Unlike the library's own "your playlists" list, a folder's playlists may be ones you
+  only follow, not ones you created -- it mirrors TIDAL's own app exactly. Read-only for now:
+  creating, renaming or moving a folder is not supported. `phonia ctl folder [<id>]` prints a
+  folder's contents, sub-folders first, each row ending with the id to open it (`folder <id>`) or
+  to add it to the queue (`playlist <id>`, via `queue add playlist:<id>`).
 - `phonia config path` prints which file is used, and `phonia config show` prints every setting
   with where its value comes from (the file or the default). `--config <file>` (or the
   `PHONIA_CONFIG` environment variable) selects another file, also for `phoniad`.
