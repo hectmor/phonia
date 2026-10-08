@@ -195,6 +195,8 @@ pub fn cover_url(header: &Header, cells: Size, font_size: FontSize) -> Option<St
     let kind = match header {
         Header::Album(_) => phonia_ipc::image::Kind::AlbumCover,
         Header::Playlist(_) => phonia_ipc::image::Kind::PlaylistCover,
+        // Never reached: a radio's own `cover()` is always `None`, already returned above.
+        Header::Radio { .. } => phonia_ipc::image::Kind::AlbumCover,
     };
     url_at(kind, id, cells, font_size)
 }

@@ -19,6 +19,12 @@ pub enum Phase {
 pub enum Header {
     Album(AlbumSummary),
     Playlist(PlaylistSummary),
+    /// A track's radio, opened on demand; `title` is already "Radio: <seed track>", computed
+    /// once at construction, so `Header::title` can keep returning a plain `&str` like the other
+    /// two.
+    Radio {
+        title: String,
+    },
 }
 
 impl Header {
@@ -26,15 +32,18 @@ impl Header {
         match self {
             Header::Album(album) => &album.title,
             Header::Playlist(playlist) => &playlist.title,
+            Header::Radio { title } => title,
         }
     }
 
     /// TIDAL's cover id (a UUID), to turn into an image URL with `phonia_ipc::image::url`; not
-    /// every album or playlist has one.
+    /// every album or playlist has one. A radio has none of its own: it is not itself a TIDAL
+    /// object, just a list seeded by a track.
     pub fn cover(&self) -> Option<&str> {
         match self {
             Header::Album(album) => album.cover.as_deref(),
             Header::Playlist(playlist) => playlist.cover.as_deref(),
+            Header::Radio { .. } => None,
         }
     }
 }

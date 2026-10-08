@@ -174,6 +174,9 @@ impl State {
                 let kind = match header {
                     browse::Header::Album(_) => phonia_ipc::image::Kind::AlbumCover,
                     browse::Header::Playlist(_) => phonia_ipc::image::Kind::PlaylistCover,
+                    // Never reached: a radio's own `cover()` is always `None`, so the `?` below
+                    // already returns before this would matter.
+                    browse::Header::Radio { .. } => phonia_ipc::image::Kind::AlbumCover,
                 };
                 Some((kind, header.cover()?))
             }
@@ -1225,6 +1228,20 @@ fn apply(state: &mut State, action: Action) -> Effects {
                 Section::Queue | Section::Lyrics => Effects::default(),
             };
         }
+        Action::OpenRadio => {
+            return match state.section() {
+                Section::Search if state.search_views.is_empty() => act_on_result(state, action),
+                Section::Search => act_in_view(state, action),
+                Section::Library if state.library_views.is_empty() => {
+                    act_on_library_result(state, action)
+                }
+                Section::Library => act_in_view(state, action),
+                // A queue entry (and "now playing" generally) is a deliberate follow-up: it
+                // needs its own place to show an opened radio in, which neither section has
+                // today (see docs/DECISIONS.md).
+                Section::Queue | Section::Lyrics => Effects::default(),
+            };
+        }
         Action::StartSearch => {
             // From anywhere: any album or playlist open is left, and typing starts.
             state.search_views = Stack::default();
@@ -1495,6 +1512,14 @@ fn act_on_result(state: &mut State, action: Action) -> Effects {
     let Some(selected) = state.search.selected() else {
         return Effects::default();
     };
+    if action == Action::OpenRadio {
+        return match selected {
+            Selected::Track(track) => {
+                open_track_radio(state, track.id.clone(), track.title.clone())
+            }
+            _ => Effects::default(),
+        };
+    }
     // Enter opens an album or a playlist, to see its tracks, instead of playing it whole.
     if action == Action::Activate {
         match selected {
@@ -1602,6 +1627,14 @@ fn act_on_library_result(state: &mut State, action: Action) -> Effects {
     let Some(selected) = library.selected() else {
         return Effects::default();
     };
+    if action == Action::OpenRadio {
+        return match selected {
+            library::Selected::Track(track) => {
+                open_track_radio(state, track.id.clone(), track.title.clone())
+            }
+            _ => Effects::default(),
+        };
+    }
     // A row of the Playlists tab (now the root of TIDAL's own folder tree) is handled on its
     // own: a sub-folder opens into the stack, a playlist opens or adds exactly like elsewhere.
     if let library::Selected::Entry(entry) = selected {
@@ -1684,7 +1717,7 @@ fn act_on_folder_entry(
                     },
                     Header::Playlist(playlist),
                 )
-            } else {
+            } else if action == Action::AddToQueue || action == Action::AddNext {
                 let at = if action == Action::AddToQueue {
                     phonia_ipc::AddAt::End
                 } else {
@@ -1698,6 +1731,10 @@ fn act_on_folder_entry(
                     },
                     false,
                 )
+            } else {
+                // Nothing sensible for OpenRadio: a playlist has no single track to seed one
+                // with.
+                Effects::default()
             }
         }
         phonia_ipc::FolderEntry::Unknown => Effects::default(),
@@ -1862,7 +1899,7 @@ fn open_artist_view(
 }
 
 fn open_track_list(state: &mut State, of: phonia_ipc::CatalogRef, header: Header) -> Effects {
-    if !require_browsable(state, "albums or playlists") {
+    if !require_browsable(state, "albums, playlists or a track's radio") {
         return Effects::redraw();
     }
     let serial = next_serial(state);
@@ -1885,6 +1922,18 @@ fn open_track_list(state: &mut State, of: phonia_ipc::CatalogRef, header: Header
             },
         }],
     }
+}
+
+/// Opens `id`'s own radio (`seed_title` only names it in the header): pushed onto the same stack
+/// an album or a playlist already opens onto.
+fn open_track_radio(state: &mut State, id: String, seed_title: String) -> Effects {
+    open_track_list(
+        state,
+        phonia_ipc::CatalogRef::TrackRadio { id },
+        Header::Radio {
+            title: format!("Radio: {seed_title}"),
+        },
+    )
 }
 
 /// Enter, `a` and `A` on the track under the cursor of an open album or playlist: Enter queues the
@@ -2028,6 +2077,7 @@ fn act_on_track_row(
             };
             send_add(state, request, false)
         }
+        Action::OpenRadio => open_track_radio(state, track.id.clone(), track.title.clone()),
         _ => Effects::default(),
     }
 }
@@ -3021,6 +3071,14 @@ mod tests {
     }
 
     #[test]
+    fn o_does_nothing_on_a_queue_entry_a_deliberate_follow_up_not_this_part() {
+        let mut state = in_the_queue(2);
+        let effects = ch(&mut state, 'o');
+        assert!(effects.commands.is_empty());
+        assert!(!effects.redraw);
+    }
+
+    #[test]
     fn d_removes_the_selected_entry_and_the_cursor_stays_on_the_list() {
         let mut state = in_the_queue(3);
         ch(&mut state, 'G');
@@ -3662,6 +3720,30 @@ mod tests {
     }
 
     #[test]
+    fn o_opens_a_search_tracks_radio_and_does_nothing_on_an_album_or_a_playlist() {
+        let mut state = with_results(vec![track_row(11)], 1);
+        let (tag, request) = tagged(ch(&mut state, 'o'));
+        assert!(matches!(tag, Tag::View { .. }));
+        assert_eq!(
+            request,
+            Request::Tracks {
+                from: phonia_ipc::CatalogRef::TrackRadio { id: "11".into() },
+                offset: 0,
+                limit: Some(crate::search::PAGE_SIZE),
+            }
+        );
+        let Some(browse::View::TrackList(view)) = state.search_views.top() else {
+            panic!("no view")
+        };
+        assert_eq!(view.header().title(), "Radio: Song 11");
+
+        let mut state = with_results(vec![track_row(11)], 1);
+        ch(&mut state, ']'); // albums
+        assert!(ch(&mut state, 'o').commands.is_empty());
+        assert!(state.search_views.is_empty(), "nothing was opened either");
+    }
+
+    #[test]
     fn a_adds_an_album_or_a_playlist_whole_and_enter_opens_it_instead() {
         let mut state = with_results(vec![track_row(11)], 1);
         ch(&mut state, ']');
@@ -4144,6 +4226,28 @@ mod tests {
         let effects = press(&mut state, KeyCode::Enter);
         assert!(effects.commands.is_empty());
         assert!(state.last_error.as_deref().unwrap().contains("Trash"));
+    }
+
+    #[test]
+    fn o_opens_the_radio_of_a_track_inside_an_open_album() {
+        let (mut state, _) = in_an_open_album(true);
+        ch(&mut state, 'j');
+        ch(&mut state, 'j'); // "4U", the 3rd track
+        let (tag, request) = tagged(ch(&mut state, 'o'));
+        assert!(matches!(tag, Tag::View { .. }));
+        assert_eq!(
+            request,
+            Request::Tracks {
+                from: phonia_ipc::CatalogRef::TrackRadio { id: "3".into() },
+                offset: 0,
+                limit: Some(crate::search::PAGE_SIZE),
+            }
+        );
+        // Pushed onto the SAME stack, on top of the album that is still open underneath.
+        let Some(browse::View::TrackList(view)) = state.search_views.top() else {
+            panic!("no view")
+        };
+        assert_eq!(view.header().title(), "Radio: 4U");
     }
 
     #[test]
@@ -4891,6 +4995,27 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn o_opens_a_favorite_tracks_radio_and_does_nothing_on_a_favorite_album() {
+        let mut state = with_library();
+        let (tag, request) = tagged(ch(&mut state, 'o'));
+        assert!(matches!(tag, Tag::View { .. }));
+        assert_eq!(
+            request,
+            Request::Tracks {
+                from: phonia_ipc::CatalogRef::TrackRadio { id: "1".into() },
+                offset: 0,
+                limit: Some(crate::search::PAGE_SIZE),
+            }
+        );
+        assert!(!state.library_views.is_empty());
+
+        let mut state = with_library();
+        ch(&mut state, ']'); // favorite albums
+        assert!(ch(&mut state, 'o').commands.is_empty());
+        assert!(state.library_views.is_empty(), "nothing was opened either");
     }
 
     #[test]

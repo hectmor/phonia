@@ -52,6 +52,9 @@ pub enum Action {
     AddToQueue,
     /// Adds the result under the cursor right after the track that is playing.
     AddNext,
+    /// Opens the radio of the track under the cursor (a search result, a favorite track, or one
+    /// inside an already-open album, playlist, artist page or radio).
+    OpenRadio,
     /// Leaves the album or the playlist open, back to what it was opened from.
     Back,
 }
@@ -354,6 +357,13 @@ pub const BINDINGS: &[Binding] = &[
         "A",
         Action::AddNext,
         "add the result after the track playing",
+        Group::Search,
+    ),
+    bind(
+        &[c('o')],
+        "o",
+        Action::OpenRadio,
+        "open the track's radio",
         Group::Search,
     ),
     bind(

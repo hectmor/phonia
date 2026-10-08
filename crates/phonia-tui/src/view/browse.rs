@@ -99,6 +99,7 @@ fn header_lines(header: &Header, theme: &Theme) -> Vec<Line<'static>> {
             lines
         }
         Header::Playlist(playlist) => vec![Line::styled(fmt::playlist(playlist), theme.accent)],
+        Header::Radio { title } => vec![Line::styled(title.clone(), theme.accent)],
     };
     lines.push(Line::raw(""));
     lines
