@@ -8,8 +8,8 @@
 //! read is left out of its page rather than failing the page.
 
 use super::{
-    Album, AlbumFilter, AlbumKind, AlbumRef, Artist, ArtistRef, Catalog, CatalogError, Kind,
-    Lyrics, MAX_ITEMS_LIMIT, MAX_SEARCH_LIMIT, Page, Playlist, SearchResults, Track, lrc,
+    Album, AlbumFilter, AlbumKind, AlbumRef, Artist, ArtistRef, Catalog, CatalogError, FolderEntry,
+    Kind, Lyrics, MAX_ITEMS_LIMIT, MAX_SEARCH_LIMIT, Page, Playlist, SearchResults, Track, lrc,
 };
 use crate::config::Quality;
 use crate::session::TidalSession;
@@ -28,6 +28,7 @@ pub struct TidalCatalog {
     http: reqwest::Client,
     session: Arc<TidalSession>,
     base: String,
+    base_v2: String,
 }
 
 impl TidalCatalog {
@@ -36,12 +37,32 @@ impl TidalCatalog {
             http,
             session,
             base: tidlers::urls::API_V1_LOCATION.to_string(),
+            base_v2: tidlers::urls::API_V2_LOCATION.to_string(),
         }
     }
 
-    /// One GET, with the login's token and country.
+    /// One GET, with the login's token and country, against TIDAL's v1 API.
     async fn get(
         &self,
+        path: &str,
+        query: Vec<(&'static str, String)>,
+    ) -> Result<String, CatalogError> {
+        self.get_from(&self.base, path, query).await
+    }
+
+    /// The same, against TIDAL's v2 API (so far only `/my-collection/playlists/folders`, which
+    /// has no v1 equivalent).
+    async fn get_v2(
+        &self,
+        path: &str,
+        query: Vec<(&'static str, String)>,
+    ) -> Result<String, CatalogError> {
+        self.get_from(&self.base_v2, path, query).await
+    }
+
+    async fn get_from(
+        &self,
+        base: &str,
         path: &str,
         query: Vec<(&'static str, String)>,
     ) -> Result<String, CatalogError> {
@@ -50,7 +71,7 @@ impl TidalCatalog {
             tidal::credentials(&client).map_err(session_error)?
         };
         let account = Account {
-            base: &self.base,
+            base,
             token: &token,
             country: &country,
         };
@@ -185,6 +206,16 @@ fn favorites_query(offset: u32, limit: u32) -> Vec<(&'static str, String)> {
     let mut query = items_query(offset, limit);
     query.push(("order", "DATE".to_string()));
     query.push(("orderDirection", "DESC".to_string()));
+    query
+}
+
+/// The query of a playlist folder listing: `folder` is the id to look inside, or the root of
+/// "My Collection" when `None`; sorted by name so a folder reads like a tree, not a feed.
+fn folder_query(folder: Option<&str>, offset: u32, limit: u32) -> Vec<(&'static str, String)> {
+    let mut query = items_query(offset, limit);
+    query.push(("folderId", folder.unwrap_or("root").to_string()));
+    query.push(("order", "NAME".to_string()));
+    query.push(("orderDirection", "ASC".to_string()));
     query
 }
 
@@ -364,6 +395,24 @@ impl Catalog for TidalCatalog {
                 )
                 .await?;
             parse_my_playlists(&body, &user_id)
+        })
+    }
+
+    fn playlist_folder(
+        &self,
+        folder: Option<String>,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<FolderEntry>, CatalogError>> {
+        let catalog = self.clone();
+        Box::pin(async move {
+            let body = catalog
+                .get_v2(
+                    "/my-collection/playlists/folders",
+                    folder_query(folder.as_deref(), offset, limit),
+                )
+                .await?;
+            parse_folder_page(&body, offset)
         })
     }
 
@@ -918,6 +967,84 @@ fn parse_my_playlists(body: &str, user_id: &str) -> Result<Page<Playlist>, Catal
     })
 }
 
+/// One raw entry of a playlist folder: told apart by `itemType`, with the real data (a folder's
+/// own id/name/count, or a playlist exactly as [`RawPlaylist`] already reads it elsewhere)
+/// inside `data`.
+#[derive(Deserialize)]
+struct RawFolderItem {
+    #[serde(rename = "itemType")]
+    item_type: String,
+    data: Value,
+}
+
+/// A folder's own identity, as TIDAL's v2 "My Collection" API writes it inside a `FOLDER`
+/// entry's `data`.
+#[derive(Deserialize)]
+struct RawFolderData {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, rename = "totalNumberOfItems")]
+    total_number_of_items: Option<u32>,
+}
+
+/// A page of a playlist folder's own contents (sub-folders and playlists, from TIDAL's v2 "My
+/// Collection" API — unlike every v1 listing here, it never echoes back the requested offset,
+/// so the caller's own `offset` is kept instead of trusting an absent field). Deliberately does
+/// NOT filter out playlists the user only follows: TIDAL's own folders mix both, and this
+/// mirrors that exactly (unlike [`parse_my_playlists`], which is the flat "created by me" list).
+fn parse_folder_page(body: &str, offset: u32) -> Result<Page<FolderEntry>, CatalogError> {
+    let page: RawPage = serde_json::from_str(body).map_err(unreadable)?;
+    let total = page.total.unwrap_or(0);
+    let mut skipped = 0;
+    let items: Vec<FolderEntry> = page
+        .items
+        .into_iter()
+        .filter_map(
+            |value| match serde_json::from_value::<RawFolderItem>(value) {
+                Ok(raw) => folder_entry(raw).or_else(|| {
+                    skipped += 1;
+                    None
+                }),
+                Err(_) => {
+                    skipped += 1;
+                    None
+                }
+            },
+        )
+        .collect();
+    if skipped > 0 {
+        crate::warn!(
+            "Warning: {skipped} item(s) of a TIDAL answer could not be read and were left out."
+        );
+    }
+    Ok(Page {
+        total,
+        offset: offset as u64,
+        items,
+    })
+}
+
+/// A raw folder entry read into [`FolderEntry`]; `None` for an item type phonia doesn't know
+/// about (TIDAL's collection may grow kinds beyond folders and playlists later).
+fn folder_entry(raw: RawFolderItem) -> Option<FolderEntry> {
+    match raw.item_type.as_str() {
+        "FOLDER" => {
+            let data: RawFolderData = serde_json::from_value(raw.data).ok()?;
+            Some(FolderEntry::Folder {
+                id: data.id,
+                name: data.name.unwrap_or_default(),
+                item_count: data.total_number_of_items.unwrap_or(0),
+            })
+        }
+        "PLAYLIST" => {
+            let data: RawPlaylist = serde_json::from_value(raw.data).ok()?;
+            Some(FolderEntry::Playlist(Playlist::from(data)))
+        }
+        _ => None,
+    }
+}
+
 /// Whether a playlist's creator is `user_id` — a playlist with no creator, or one that is TIDAL's
 /// own or someone else's, is one the user only follows, not one of theirs.
 fn owned_by(playlist: &RawPlaylist, user_id: &str) -> bool {
@@ -1403,6 +1530,70 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_is_asked_for_by_id_or_root_sorted_by_name() {
+        let root = folder_query(None, 0, 50);
+        assert!(root.contains(&("folderId", "root".to_string())));
+        assert!(root.contains(&("order", "NAME".to_string())));
+        assert!(root.contains(&("orderDirection", "ASC".to_string())));
+
+        let sub = folder_query(Some("abc-123"), 0, 50);
+        assert!(sub.contains(&("folderId", "abc-123".to_string())));
+    }
+
+    /// The exact shape confirmed live against the real account in `a_real_playlist_folder`: no
+    /// `offset`/`cursor` field at all, a mix of a sub-folder and a playlist, the playlist's own
+    /// `data` reading exactly like `RawPlaylist` does everywhere else.
+    #[test]
+    fn a_folder_page_tells_sub_folders_from_playlists_and_keeps_the_caller_offset() {
+        let page = parse_folder_page(
+            r#"{"items":[
+                {"trn":"trn:folder:f1","itemType":"FOLDER","name":"Moods","parent":null,
+                 "data":{"id":"f1","name":"Moods","totalNumberOfItems":3,"itemType":"FOLDER"}},
+                {"trn":"trn:playlist:p1","itemType":"PLAYLIST","name":"Dark Jazz",
+                 "parent":{"id":"f1","name":"Moods"},
+                 "data":{"uuid":"p1","title":"Dark Jazz","creator":{"id":0,"name":null},
+                 "numberOfTracks":75,"duration":26712,"squareImage":"cover-id"}}
+            ],"totalNumberOfItems":2,"lastModifiedAt":"2026-10-08T12:25:51.454+0000"}"#,
+            50,
+        )
+        .unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.offset, 50, "the v2 answer has no offset of its own");
+        assert_eq!(
+            page.items,
+            vec![
+                FolderEntry::Folder {
+                    id: "f1".into(),
+                    name: "Moods".into(),
+                    item_count: 3,
+                },
+                FolderEntry::Playlist(Playlist {
+                    id: "p1".into(),
+                    title: "Dark Jazz".into(),
+                    creator: None,
+                    description: None,
+                    track_count: Some(75),
+                    duration: Some(Duration::from_secs(26712)),
+                    cover: Some("cover-id".into()),
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unknown_item_type_is_skipped_not_a_failure() {
+        let page = parse_folder_page(
+            r#"{"items":[
+                {"itemType":"VIDEO","data":{}},
+                {"itemType":"FOLDER","data":{"id":"f1","name":"Moods","totalNumberOfItems":0}}
+            ],"totalNumberOfItems":2}"#,
+            0,
+        )
+        .unwrap();
+        assert_eq!(page.items.len(), 1, "the unknown VIDEO entry is left out");
+    }
+
+    #[test]
     fn ids_that_could_change_a_path_are_refused() {
         for good in ["33723912", "a1b2c3d4-0000-1111-2222-333344445555"] {
             assert!(check_id(good).is_ok(), "{good}");
@@ -1775,5 +1966,62 @@ mod tests {
         // that was never actually confirmed, only assumed from a 404-for-no-bio precedent.
         let instrumental = catalog.track_lyrics("518338".into()).await.unwrap();
         println!("instrumental track lyrics: {instrumental:?}");
+    }
+
+    /// Against the real TIDAL and this account's real "My Collection": confirms the v2 folder
+    /// API's actual shape, found by direct investigation (2026-10-08) since nothing documents
+    /// it. The root answer has no `offset`/`cursor` field at all (unlike every v1 listing here),
+    /// just `{"items":[...],"totalNumberOfItems":N}` -- `parse_folder_page` keeps the caller's
+    /// own requested offset instead of trusting one back. This account's root has exactly one
+    /// folder, "test" (made for this investigation), with one item inside it: a playlist the
+    /// account only FOLLOWS, not one it created (`creator: {"id":0,"name":null,"type":"TIDAL"}`)
+    /// -- confirming folders mix owned and followed playlists, the reason `playlist_folder`
+    /// does not apply `my_playlists`' creator-id filter. Run with `--ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "needs a TIDAL login and network"]
+    async fn a_real_playlist_folder() {
+        use crate::auth::{Interaction, open_store};
+        use crate::config::SessionStoreKind;
+        use crate::openers::TidalOpener;
+
+        let store = open_store(SessionStoreKind::default(), Interaction::Allow).unwrap();
+        let opener =
+            TidalOpener::from_store(tidal::build_http_client().unwrap(), store, Quality::Hires);
+        let catalog = opener.catalog();
+
+        let root = catalog.playlist_folder(None, 0, 50).await.unwrap();
+        println!(
+            "root: {} of {}: {:?}",
+            root.items.len(),
+            root.total,
+            root.items
+        );
+        assert!(
+            !root.items.is_empty(),
+            "expected at least the 'test' folder made for this investigation"
+        );
+        let Some(FolderEntry::Folder {
+            id,
+            name,
+            item_count,
+        }) = root.items.first().cloned()
+        else {
+            panic!("expected the first root entry to be a folder");
+        };
+        assert_eq!(name, "test");
+        assert_eq!(item_count, 1);
+
+        let inside = catalog.playlist_folder(Some(id), 0, 50).await.unwrap();
+        println!(
+            "inside '{name}': {} of {}: {:?}",
+            inside.items.len(),
+            inside.total,
+            inside.items
+        );
+        assert_eq!(inside.items.len(), 1);
+        assert!(
+            matches!(&inside.items[0], FolderEntry::Playlist(p) if !p.title.is_empty()),
+            "expected the one playlist inside"
+        );
     }
 }

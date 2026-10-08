@@ -1859,3 +1859,57 @@ Profundis"), `phonia tui` connected as a second, read-only client (no playback-a
 pressed, so as to not disturb the session already in progress) showed its real synced lyrics,
 correctly auto-centered on the line being sung, "Lyrics via MUSIXMATCH" credited at the bottom --
 and, as above, is what caught the auto-follow-lockout bug before it shipped.
+
+## 2026-10-08 — #39 part 1: TIDAL's real playlist-folder API, read into `phonia-core`
+
+Planned with Opus (Phase 4, next after #32). Nothing in the codebase or in `tidlers` wraps this
+endpoint usefully, so the plan itself had to investigate TIDAL's real v2 "My Collection" API
+first. `tidlers-0.5.0` (already vendored) has unused calls against
+`https://api.tidal.com/v2/my-collection/playlists/folders/*` (create-folder, remove,
+flattened-folders-only) but no call to list a folder's actual contents, and its own models
+require every field — the same fragility that already justified bypassing `tidlers` for every
+other catalog call (see this file's 2026-09-27 entry). The real listing call, confirmed live
+against this account below, is `GET /my-collection/playlists/folders` with
+`folderId=root|<uuid>`, `order`, `orderDirection`, `offset`, `limit`.
+
+**User's 4 decisions, all = recommended:** (1) read-only for now — show the folder tree already
+built in TIDAL's own app; creating/renaming/moving a folder from the TUI is a separate future
+issue, same reasoning as #21 leaving favorite-editing out of scope; (2) a folder's contents show
+a playlist the user only *follows* exactly like TIDAL's own app does, not filtered down to only
+the ones they created — a deliberate, scoped exception to `my_playlists`'/#21's "owned only"
+rule, which stays as-is for the flat list; (3) the "Your playlists" library tab becomes the root
+of the folder tree (sub-folders first, then loose playlists) rather than a separate tab; (4)
+sorted by name, folders before playlists, for a tree that reads top-to-bottom rather than a feed.
+
+**Real investigation against this account** (a test folder named "test" with one followed
+playlist inside, made for this check): the v2 answer's envelope is
+`{"items":[...],"totalNumberOfItems":N,"lastModifiedAt":"..."}` — unlike every v1 listing already
+used here, it never echoes back an `offset` (and has no cursor either, despite `tidlers`' own
+`FolderListResponse.cursor` field suggesting one), so `parse_folder_page` keeps the caller's own
+requested offset rather than trusting a field that isn't there. Each item is
+`{"trn","itemType":"FOLDER"|"PLAYLIST","name","parent","data":{...}}`; a `FOLDER`'s `data` has
+its own `id`/`name`/`totalNumberOfItems`; a `PLAYLIST`'s `data` is shaped exactly like the
+existing `RawPlaylist` (`uuid`, `title`, `creator`, `numberOfTracks`, `duration`, `squareImage`),
+reused as-is rather than duplicated. Confirmed live: the one playlist inside "test" has
+`creator: {"id":0,"name":null,"type":"TIDAL"}` — a followed, not owned, playlist — which is what
+decision (2) above is about, and is why `playlist_folder` does not apply `my_playlists`'
+creator-id filter.
+
+**`catalog::FolderEntry`** (`Folder { id, name, item_count }` or `Playlist(Playlist)`) and
+`Catalog::playlist_folder(folder: Option<String>, offset, limit)` (root when `folder` is `None`)
+added to the trait, `TidalCatalog` (new `get_v2`, parallel to the existing v1 `get`, since this is
+the first v2 call the project makes) and `FakeCatalog` (`with_folder(folder, entries)`, keyed by
+`Option<String>`). Unknown item types (TIDAL may add kinds beyond folder/playlist later) are
+skipped, not a hard failure, matching every other listing's own "one bad item doesn't fail the
+page" rule.
+
+**3-part plan, this is part 1**: part 2 is the wire protocol (1.11, additive:
+`Request`/`Payload::PlaylistFolder`) and the daemon handler; part 3 is the TUI — the "Your
+playlists" tab becomes the folder root, opened and nested through the existing `browse::Stack`
+exactly like an album or artist already is (a sub-folder is just another pushable view), closing
+#39. A follow-up issue, not scoped here, would cover creating/renaming/moving folders through the
+v2 API's own `create-folder`/`remove` calls `tidlers` already wraps.
+
+Verified live end-to-end in `a_real_playlist_folder` against the real account (root, then the
+real "test" folder's one followed playlist) — see that test's own doc comment for the exact
+confirmed shape. Full workspace green, fmt+clippy clean.
