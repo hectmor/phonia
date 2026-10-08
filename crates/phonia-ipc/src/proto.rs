@@ -36,7 +36,7 @@ pub const CAP_LYRICS: &str = "lyrics";
 /// The protocol version this crate speaks.
 pub const PROTOCOL: Version = Version {
     major: 1,
-    minor: 11,
+    minor: 12,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

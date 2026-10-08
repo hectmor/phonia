@@ -1123,6 +1123,7 @@ fn track_page(
             catalog.artist_top_tracks(id.clone(), offset, limit)
         }
         ipc::CatalogRef::FavoriteTracks => catalog.favorite_tracks(offset, limit),
+        ipc::CatalogRef::TrackRadio { id } => catalog.track_radio(id.clone(), offset, limit),
         ipc::CatalogRef::Unknown => {
             return Err(error(
                 ErrorCode::BadRequest,

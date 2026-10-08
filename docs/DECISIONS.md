@@ -2057,3 +2057,23 @@ empty). Part 6 is the TUI's autoplay toggle, closing #33.
 
 Verified live end to end against the real account (`a_real_track_radio`, `--ignored`). Full
 workspace green, fmt+clippy clean.
+
+## 2026-10-08 — #33 part 2: a track's radio needed no new wire request, only a new `CatalogRef`
+
+A new `CatalogRef::TrackRadio { id }` (protocol 1.11 → 1.12), dispatched in the one place
+(`track_page` in `daemon.rs`) both `Request::Tracks` (paging) and `Request::QueueAddFrom`
+(queuing a whole list) already go through for every other kind of list — unlike #39's own
+`PlaylistFolder`, which needed a genuinely new request/payload shape because `FolderEntry` isn't a
+`Track`, this one slots into the existing `Track`-shaped machinery with a single match arm, no new
+`Request`/`Payload` variant at all. `phonia ctl radio <id>` (new, lists it) and `queue add
+radio:<id>` (new prefix in `catalog_source`, alongside the existing `album:`/`playlist:`) are the
+only other additions.
+
+Verified live end to end against the real account: a scratch `phoniad` on a throwaway PipeWire
+null sink, `phonia ctl radio 33723914` printed a real nu-metal radio list (Slipknot, Limp Bizkit,
+Pantera, System of a Down...) with the seed itself correctly absent; `--json` confirmed the wire
+shape; `queue add radio:33723914` added all 100 real tracks to a real queue. Full workspace green
+(2 new daemon protocol tests, 1 new golden test, 2 new `ctl` unit tests), fmt+clippy clean.
+
+Next: the TUI's on-demand "open this track's radio" action (part 3), then the autoplay setting
+and its real behavior (parts 4-5), then the TUI's autoplay toggle (part 6, closing #33).

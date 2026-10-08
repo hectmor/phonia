@@ -289,7 +289,7 @@ fn the_server_banner() {
                 CAP_LYRICS.into(),
             ],
         }),
-        r#"{"type":"hello","protocol":{"major":1,"minor":11},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","catalog","lyrics"]}"#,
+        r#"{"type":"hello","protocol":{"major":1,"minor":12},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","catalog","lyrics"]}"#,
     );
 }
 
@@ -1125,7 +1125,7 @@ fn versions_are_compatible_across_minors_but_not_majors() {
     assert!(v(1, 0).compatible_with(v(1, 7)));
     assert!(v(1, 7).compatible_with(v(1, 0)));
     assert!(!v(1, 0).compatible_with(v(2, 0)));
-    assert_eq!(PROTOCOL, v(1, 11));
+    assert_eq!(PROTOCOL, v(1, 12));
 }
 
 #[test]
@@ -1198,6 +1198,21 @@ fn the_album_artist_tracks_and_albums_requests_and_their_defaults() {
             id: "1".into(),
             limit: None
         }
+    );
+}
+
+#[test]
+fn the_track_radio_request_since_1_12() {
+    request(
+        1,
+        Request::Tracks {
+            from: CatalogRef::TrackRadio {
+                id: "33723914".into(),
+            },
+            offset: 0,
+            limit: Some(50),
+        },
+        r#"{"id":1,"request":{"type":"tracks","from":{"type":"track_radio","id":"33723914"},"offset":0,"limit":50}}"#,
     );
 }
 

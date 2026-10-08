@@ -521,6 +521,11 @@ pub enum CatalogRef {
     },
     /// The logged-in user's favorite tracks (since 1.6, with the library).
     FavoriteTracks,
+    /// TIDAL's own "radio" for a track: tracks picked to follow it, seeded by it, never
+    /// including the seed itself (since 1.12).
+    TrackRadio {
+        id: String,
+    },
     /// Something a newer daemon can add and this version does not know.
     #[serde(other)]
     Unknown,

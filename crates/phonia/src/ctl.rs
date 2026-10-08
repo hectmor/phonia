@@ -108,6 +108,14 @@ pub enum CtlCommand {
         /// A sub-folder's id, as an earlier `folder` listing prints it.
         id: Option<String>,
     },
+    /// Shows a track's radio: tracks TIDAL picks to follow it (the first 50, or `--limit`, at
+    /// most 100), never including the seed track itself. `queue add radio:<id>` adds it whole.
+    Radio {
+        /// The seed track's id, as `search` prints it.
+        id: String,
+        #[arg(long)]
+        limit: Option<u32>,
+    },
     /// Mutes (`on`), unmutes (`off`) or flips (`toggle`, the default) an output that has a volume
     /// of its own (shared, or exclusive with a hardware mixer control); the level is kept.
     Mute {
@@ -304,6 +312,7 @@ pub async fn run(args: CtlArgs, config_flag: Option<&Path>) -> Result<()> {
         CtlCommand::Library { limit } => library(&client, json, limit).await,
         CtlCommand::Lyrics { id } => lyrics(&client, json, id).await,
         CtlCommand::Folder { id } => folder(&client, json, id).await,
+        CtlCommand::Radio { id, limit } => radio(&client, json, id, limit).await,
         CtlCommand::Mute { mode } => mute(&client, json, mode.unwrap_or(MuteMode::Toggle)).await,
         CtlCommand::Output { action } => output(&client, json, action).await,
         CtlCommand::Queue { action } => queue(&client, json, action).await,
@@ -649,6 +658,18 @@ async fn folder(client: &Client, json: bool, id: Option<String>) -> Result<()> {
     print_payload(json, &payload, || format_folder(&payload))
 }
 
+async fn radio(client: &Client, json: bool, id: String, limit: Option<u32>) -> Result<()> {
+    require_catalog(client, "a track's radio")?;
+    let payload = client
+        .request(Request::Tracks {
+            from: CatalogRef::TrackRadio { id },
+            offset: 0,
+            limit,
+        })
+        .await?;
+    print_payload(json, &payload, || format_radio(&payload))
+}
+
 /// The URL of a cover or a picture, at a size fit for opening in a browser rather than for a
 /// terminal cell; `None` when there is no id to build one from.
 fn cover_url(kind: phonia_ipc::image::Kind, id: Option<&str>) -> Option<String> {
@@ -841,6 +862,34 @@ fn format_folder(payload: &Payload) -> String {
             FolderEntry::Unknown => "(an entry this version does not know)".to_string(),
         };
         text.push_str(&format!("\n {:>3}. {row}", index + 1));
+    }
+    text
+}
+
+/// A track's radio: its tracks, numbered, each ending with the id `queue add` takes. The seed
+/// track itself is never among them (the daemon already filters it out).
+fn format_radio(payload: &Payload) -> String {
+    let Payload::Tracks { from, page } = payload else {
+        return "unexpected answer".to_string();
+    };
+    let CatalogRef::TrackRadio { id } = from else {
+        return "unexpected answer".to_string();
+    };
+    let mut text = format!(
+        "Radio of tidal:{id} ({} of {}):",
+        page.items.len(),
+        page.total
+    );
+    if page.items.is_empty() {
+        text.push_str("\n  none");
+    }
+    for (index, track) in page.items.iter().enumerate() {
+        text.push_str(&format!(
+            "\n {:>3}. {}   tidal:{}",
+            index + 1,
+            phonia_ipc::fmt::track(track),
+            track.id
+        ));
     }
     text
 }
@@ -1040,16 +1089,18 @@ fn resolve_source(text: &str) -> Result<String> {
     phonia_ipc::source::file(&path).map_err(|reason| anyhow!(reason))
 }
 
-/// An album or a playlist named as `album:<id>` or `playlist:<uuid>`, if that is what `sources`
-/// is. It must be alone: each such addition is one request of its own, and mixing it with tracks
-/// would leave open where each goes.
+/// An album, a playlist or a track's radio named as `album:<id>`, `playlist:<uuid>` or
+/// `radio:<id>`, if that is what `sources` is. It must be alone: each such addition is one
+/// request of its own, and mixing it with tracks would leave open where each goes.
 fn catalog_source(sources: &[String]) -> Result<Option<CatalogRef>> {
     let named = |text: &str| -> Option<CatalogRef> {
         if let Some(id) = text.strip_prefix("album:") {
             Some(CatalogRef::Album { id: id.to_string() })
+        } else if let Some(id) = text.strip_prefix("playlist:") {
+            Some(CatalogRef::Playlist { id: id.to_string() })
         } else {
-            text.strip_prefix("playlist:")
-                .map(|id| CatalogRef::Playlist { id: id.to_string() })
+            text.strip_prefix("radio:")
+                .map(|id| CatalogRef::TrackRadio { id: id.to_string() })
         }
     };
     let found: Vec<Option<CatalogRef>> = sources.iter().map(|text| named(text)).collect();
@@ -1058,7 +1109,9 @@ fn catalog_source(sources: &[String]) -> Result<Option<CatalogRef>> {
     }
     match found.as_slice() {
         [Some(from)] => Ok(Some(from.clone())),
-        _ => bail!("an album or a playlist has to be added on its own, without other sources"),
+        _ => bail!(
+            "an album, a playlist or a track's radio has to be added on its own, without other sources"
+        ),
     }
 }
 
@@ -2101,6 +2154,12 @@ mod tests {
             })
         );
         assert_eq!(
+            catalog_source(&sources(&["radio:33723914"])).unwrap(),
+            Some(CatalogRef::TrackRadio {
+                id: "33723914".into()
+            })
+        );
+        assert_eq!(
             catalog_source(&sources(&["tidal:1", "12345", "/music/a.flac"])).unwrap(),
             None,
             "plain tracks are not a catalog addition"
@@ -2109,6 +2168,7 @@ mod tests {
             sources(&["album:1", "tidal:2"]),
             sources(&["tidal:2", "album:1"]),
             sources(&["album:1", "album:2"]),
+            sources(&["radio:1", "tidal:2"]),
         ] {
             assert!(catalog_source(&mixed).is_err(), "{mixed:?}");
         }
@@ -2461,5 +2521,28 @@ mod tests {
             },
         });
         assert!(text.starts_with("Folder f1 (0 of 0):\n  none"), "{text}");
+    }
+
+    #[test]
+    fn a_radios_tracks_are_numbered_and_each_ends_with_its_own_tidal_id() {
+        use phonia_ipc::Page;
+        let text = format_radio(&Payload::Tracks {
+            from: CatalogRef::TrackRadio {
+                id: "33723914".into(),
+            },
+            page: Page {
+                items: vec![album_track("3113167", "Wait and Bleed", 4, 1)],
+                total: 100,
+                offset: 0,
+            },
+        });
+        assert!(
+            text.starts_with("Radio of tidal:33723914 (1 of 100):"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\n   1. Wait and Bleed - 1:15 - hires   tidal:3113167"),
+            "{text}"
+        );
     }
 }
