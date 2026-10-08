@@ -1,9 +1,14 @@
 //! The Home section: a pure view over data the TUI already holds elsewhere (`state.status`,
-//! `state.queue`, and later `state.library`), so it keeps no data of its own -- there is nothing
-//! here to fetch that Queue or Library do not already ask for on their own. See #139.
+//! `state.queue`, and `state.library`), so it keeps no data of its own -- there is nothing here to
+//! fetch that Queue or Library do not already ask for on their own. See #139.
 
 use crate::app::State;
-use phonia_ipc::{ItemId, Request};
+use crate::browse::Phase;
+use crate::library::LibraryTab;
+use phonia_ipc::{AlbumSummary, FolderEntry, ItemId, Request, TrackSummary};
+
+/// How many of a block's items show before its own "See all" row.
+const BLOCK_SIZE: usize = 6;
 
 /// What the "Continue" row offers right now, and what Enter on it does.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,11 +110,139 @@ pub fn continuation(state: &State) -> Continue {
     }
 }
 
+/// One row of Home, in display order. `Header` and `Spacer` are never under the cursor -- see
+/// [`Row::selectable`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Row<'a> {
+    Continue(Continue),
+    /// A blank line set before a block, so it does not run straight into whatever came before.
+    Spacer,
+    /// A block's own title: the matching Library tab's, so the two agree on what to call it.
+    Header(LibraryTab),
+    Album(&'a AlbumSummary),
+    Entry(&'a FolderEntry),
+    Track(&'a TrackSummary),
+    /// Closes a block: jumps into Library on `tab`, showing all `total` of it, not just the
+    /// [`BLOCK_SIZE`] shown here.
+    SeeAll {
+        tab: LibraryTab,
+        total: u64,
+    },
+}
+
+impl Row<'_> {
+    /// Whether this row is ever under the cursor: a header or a spacer is not a thing to act on.
+    pub fn selectable(&self) -> bool {
+        !matches!(self, Row::Header(_) | Row::Spacer)
+    }
+}
+
+/// Every row Home shows right now: the Continue row, always, then one block per non-empty list
+/// the library already holds (favorite albums, playlist folders, favorite tracks, in that order),
+/// each capped at [`BLOCK_SIZE`] with a "See all" row into the rest. A list not loaded yet, or
+/// loaded and empty, contributes no block at all -- there is nothing to show two ways (not ready,
+/// or ready and empty), so neither needs its own row.
+pub fn rows(state: &State) -> Vec<Row<'_>> {
+    let mut rows = vec![Row::Continue(continuation(state))];
+    let Some(library) = &state.library else {
+        return rows;
+    };
+    if library.phase == Phase::Done {
+        push_block(
+            &mut rows,
+            LibraryTab::FavoriteAlbums,
+            &library.favorite_albums.items,
+            library.favorite_albums.total,
+            Row::Album,
+        );
+    }
+    if library.playlists_phase == Phase::Done {
+        push_block(
+            &mut rows,
+            LibraryTab::Playlists,
+            &library.playlists.items,
+            library.playlists.total,
+            Row::Entry,
+        );
+    }
+    if library.phase == Phase::Done {
+        push_block(
+            &mut rows,
+            LibraryTab::FavoriteTracks,
+            &library.favorite_tracks.items,
+            library.favorite_tracks.total,
+            Row::Track,
+        );
+    }
+    rows
+}
+
+fn push_block<'a, T>(
+    rows: &mut Vec<Row<'a>>,
+    tab: LibraryTab,
+    items: &'a [T],
+    total: u64,
+    row: impl Fn(&'a T) -> Row<'a>,
+) {
+    if items.is_empty() {
+        return;
+    }
+    rows.push(Row::Spacer);
+    rows.push(Row::Header(tab));
+    rows.extend(items.iter().take(BLOCK_SIZE).map(row));
+    rows.push(Row::SeeAll { tab, total });
+}
+
+/// The display index (into [`rows`]'s own list, headers and spacers included) of the `selected`-th
+/// selectable row, if there is one that many.
+pub fn display_index_of(rows: &[Row], selected: usize) -> Option<usize> {
+    rows.iter()
+        .enumerate()
+        .filter(|(_, row)| row.selectable())
+        .nth(selected)
+        .map(|(index, _)| index)
+}
+
+/// How many rows the cursor can move between.
+pub fn selectable_count(rows: &[Row]) -> usize {
+    rows.iter().filter(|row| row.selectable()).count()
+}
+
+/// What Enter on the `selected`-th selectable row does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Intent {
+    /// Nothing to do: a header, a spacer, past the end, or a row not wired up yet (opening an
+    /// album, a playlist or a folder from Home nested in its own stack is #139's last part).
+    Nothing,
+    /// Sent as is.
+    Request(Request),
+    /// Plays just this one track, the same as Enter on a favorite track in the Library section.
+    PlayTrack(TrackSummary),
+    /// Jumps into the Library section, on this tab, to see the rest of a block.
+    JumpTo(LibraryTab),
+}
+
+pub fn intent(state: &State, selected: usize) -> Intent {
+    let rows = rows(state);
+    match rows.iter().filter(|row| row.selectable()).nth(selected) {
+        Some(Row::Continue(continue_)) => continue_
+            .request()
+            .map(Intent::Request)
+            .unwrap_or(Intent::Nothing),
+        Some(Row::Track(track)) => Intent::PlayTrack((*track).clone()),
+        Some(Row::SeeAll { tab, .. }) => Intent::JumpTo(*tab),
+        Some(Row::Album(_)) | Some(Row::Entry(_)) | Some(Row::Header(_)) | Some(Row::Spacer)
+        | None => Intent::Nothing,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::tests_support::{queue, status};
-    use phonia_ipc::{ItemId, QueueItem, Repeat, Track};
+    use crate::browse::Phase;
+    use crate::library::LibraryState;
+    use phonia_ipc::{FolderEntry, ItemId, Page, Payload, QueueItem, Repeat, Track};
 
     fn state_with(status_: Option<phonia_ipc::Status>, queue_: Option<phonia_ipc::Queue>) -> State {
         State {
@@ -213,5 +346,233 @@ mod tests {
         q.shuffle = true;
         let state = state_with(None, Some(q));
         assert!(matches!(continuation(&state), Continue::Replay { .. }));
+    }
+
+    fn page<T>(items: Vec<T>, total: u64) -> Page<T> {
+        Page {
+            items,
+            total,
+            offset: 0,
+        }
+    }
+
+    fn album(id: &str) -> AlbumSummary {
+        AlbumSummary {
+            id: id.into(),
+            title: format!("Album {id}"),
+            version: None,
+            artists: vec![],
+            release_date: None,
+            track_count: None,
+            duration_ms: None,
+            explicit: false,
+            quality: None,
+            kind: None,
+            copyright: None,
+            cover: None,
+        }
+    }
+
+    fn track(id: &str) -> TrackSummary {
+        TrackSummary {
+            id: id.into(),
+            title: format!("Song {id}"),
+            version: None,
+            artists: vec![],
+            album: None,
+            duration_ms: None,
+            explicit: false,
+            track_number: None,
+            volume_number: None,
+            quality: None,
+            streamable: true,
+        }
+    }
+
+    fn with_library(mut build: impl FnMut(&mut LibraryState)) -> State {
+        let (mut library, _) = LibraryState::new();
+        library.phase = Phase::Done;
+        library.playlists_phase = Phase::Done;
+        build(&mut library);
+        State {
+            library: Some(library),
+            ..State::default()
+        }
+    }
+
+    #[test]
+    fn with_no_library_loaded_yet_there_is_only_the_continue_row() {
+        let state = State::default();
+        let rows = rows(&state);
+        assert_eq!(rows, vec![Row::Continue(Continue::Empty)]);
+        assert_eq!(selectable_count(&rows), 1);
+    }
+
+    #[test]
+    fn an_empty_library_adds_no_blocks() {
+        let state = with_library(|_| {});
+        assert_eq!(rows(&state), vec![Row::Continue(Continue::Empty)]);
+    }
+
+    #[test]
+    fn a_favorite_albums_block_ends_in_a_see_all_row_with_the_real_total() {
+        let state = with_library(|library| {
+            library.favorite_albums =
+                crate::list::Found::from_page(page(vec![album("1"), album("2")], 9));
+        });
+        let rows = rows(&state);
+        assert_eq!(
+            rows,
+            vec![
+                Row::Continue(Continue::Empty),
+                Row::Spacer,
+                Row::Header(LibraryTab::FavoriteAlbums),
+                Row::Album(&album("1")),
+                Row::Album(&album("2")),
+                Row::SeeAll {
+                    tab: LibraryTab::FavoriteAlbums,
+                    total: 9
+                },
+            ]
+        );
+        assert_eq!(selectable_count(&rows), 4, "continue, 2 albums, see all");
+    }
+
+    #[test]
+    fn a_block_only_shows_the_first_six_even_with_more_loaded() {
+        let state = with_library(|library| {
+            library.favorite_tracks = crate::list::Found::from_page(page(
+                (0..10).map(|n| track(&n.to_string())).collect(),
+                10,
+            ));
+        });
+        let rows = rows(&state);
+        let tracks = rows
+            .iter()
+            .filter(|row| matches!(row, Row::Track(_)))
+            .count();
+        assert_eq!(tracks, BLOCK_SIZE);
+        assert!(rows.contains(&Row::SeeAll {
+            tab: LibraryTab::FavoriteTracks,
+            total: 10
+        }));
+    }
+
+    #[test]
+    fn all_three_blocks_show_in_order_when_every_list_has_something() {
+        let state = with_library(|library| {
+            library.favorite_albums = crate::list::Found::from_page(page(vec![album("a")], 1));
+            library.playlists = crate::list::Found::from_page(page(
+                vec![FolderEntry::Folder {
+                    id: "f".into(),
+                    name: "Moods".into(),
+                    item_count: 1,
+                }],
+                1,
+            ));
+            library.favorite_tracks = crate::list::Found::from_page(page(vec![track("t")], 1));
+        });
+        let rows = rows(&state);
+        let headers: Vec<LibraryTab> = rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Header(tab) => Some(*tab),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            headers,
+            vec![
+                LibraryTab::FavoriteAlbums,
+                LibraryTab::Playlists,
+                LibraryTab::FavoriteTracks,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_block_not_loaded_yet_contributes_nothing() {
+        let (mut library, _) = LibraryState::new();
+        // Only the plain library (tracks/albums) finished; the playlists request is still out.
+        library.finish(Payload::Library {
+            favorite_tracks: page(vec![track("1")], 1),
+            favorite_albums: page(vec![], 0),
+            my_playlists: page(vec![], 0),
+        });
+        let state = State {
+            library: Some(library),
+            ..State::default()
+        };
+        let rows = rows(&state);
+        assert!(
+            !rows
+                .iter()
+                .any(|row| matches!(row, Row::Header(LibraryTab::Playlists)))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| matches!(row, Row::Header(LibraryTab::FavoriteTracks)))
+        );
+    }
+
+    #[test]
+    fn display_index_of_skips_headers_and_spacers() {
+        let state = with_library(|library| {
+            library.favorite_albums = crate::list::Found::from_page(page(vec![album("1")], 1));
+        });
+        let rows = rows(&state);
+        // 0: Continue, 1: Spacer, 2: Header, 3: Album (selectable index 1), 4: SeeAll (index 2).
+        assert_eq!(display_index_of(&rows, 0), Some(0));
+        assert_eq!(display_index_of(&rows, 1), Some(3));
+        assert_eq!(display_index_of(&rows, 2), Some(4));
+        assert_eq!(display_index_of(&rows, 3), None);
+        assert_eq!(selectable_count(&rows), 3);
+    }
+
+    #[test]
+    fn intent_on_the_continue_row_is_its_own_request() {
+        let mut q = queue();
+        q.items = vec![item(1, "tidal:1", Some("Song"))];
+        q.current = Some(ItemId(1));
+        let state = state_with(None, Some(q));
+        assert_eq!(
+            intent(&state, 0),
+            Intent::Request(Request::Play {
+                item: Some(ItemId(1))
+            })
+        );
+    }
+
+    #[test]
+    fn intent_on_a_favorite_track_plays_just_that_track() {
+        let state = with_library(|library| {
+            library.favorite_tracks = crate::list::Found::from_page(page(vec![track("1")], 1));
+        });
+        assert_eq!(intent(&state, 1), Intent::PlayTrack(track("1")));
+    }
+
+    #[test]
+    fn intent_on_see_all_jumps_to_the_matching_tab() {
+        let state = with_library(|library| {
+            library.favorite_albums = crate::list::Found::from_page(page(vec![album("1")], 1));
+        });
+        assert_eq!(
+            intent(&state, 2),
+            Intent::JumpTo(LibraryTab::FavoriteAlbums)
+        );
+    }
+
+    #[test]
+    fn intent_on_an_album_or_a_folder_row_does_nothing_yet() {
+        let state = with_library(|library| {
+            library.favorite_albums = crate::list::Found::from_page(page(vec![album("1")], 1));
+        });
+        assert_eq!(intent(&state, 1), Intent::Nothing);
+    }
+
+    #[test]
+    fn intent_past_the_end_does_nothing() {
+        let state = State::default();
+        assert_eq!(intent(&state, 5), Intent::Nothing);
     }
 }

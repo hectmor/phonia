@@ -2349,3 +2349,60 @@ Renumbering the keys broke no production logic, only ~80 tests that either press
 number or relied on `State::default()` starting on Queue — each fixed by using the new key or
 adding the one navigation step now needed to reach the section the test actually exercises; no
 assertion about a section's own behavior changed. Full workspace green, fmt+clippy clean.
+
+## 2026-10-08 (later): #139 part 3: the three content blocks, favorites and folders
+
+Added the rest of decision 4's content: `home::rows(&State)` now builds, after the Continue row,
+one block per non-empty list the library already holds — favorite albums, playlist folders,
+favorite tracks, in that order — each capped at 6 items (`BLOCK_SIZE`) and closed with a
+`Row::SeeAll { tab, total }` row. `maybe_load_library`'s guard widened from `Section::Library` to
+`Section::Library | Section::Home`: Home reads the exact same `LibraryState` Library does (no
+second request type, no duplicated data), so visiting Home first — which is now unavoidable, since
+it is also the startup section — asks for the library immediately instead of waiting for Library
+to be opened once. This is a real, deliberate behavior change (not just the part 2 renumbering):
+the two library requests now go out the moment a connection with the catalog exists, whichever
+section happens to be showing.
+
+**A block that has not loaded yet and a block that loaded empty are treated identically: both
+contribute nothing** (no header, no "Loading…" row, no "No favorites" row). Chosen over a more
+expressive per-block status for two reasons: the library typically answers within the same tick
+on a decent connection, so a visible "Loading" blip would mostly flash once; and reusing one
+"empty signal" (skip the block) for both would-be-empty states avoids a second variant of `Row`
+that exists only to say the same thing ("there is nothing to show you right now") a different way.
+If this turns out to feel too bare on a slow connection, it is a one-line change to `rows()`, not a
+redesign.
+
+**`Row<'a>` borrows from `state.library`/`state.queue` rather than cloning** (`Row::Album(&'a
+AlbumSummary)`, `Row::Entry(&'a FolderEntry)`, `Row::Track(&'a TrackSummary)`), matching
+`library::Selected<'a>`'s own precedent — `home::rows(state)` is cheap and rebuilt fresh on every
+draw/move/Enter (at most ~25 rows), so there is nothing here worth caching. Acting on a row
+(`act_on_home`), though, needs to mutate `state` (set `last_error`, switch section) while a `Row`
+borrowed from it is still alive — resolved with a small `Intent` enum (`Nothing` / `Request` /
+`PlayTrack(TrackSummary)` / `JumpTo(LibraryTab)`) computed once, owned, with no live borrow of
+`state` by the time anything mutates it. `home::intent(state, selected)` is the one place that
+turns "which selectable row is this" into "what should happen", kept separate from `rows()` itself
+so the pure "what is on screen" question and the "what does Enter do" question do not tangle.
+
+**Scope line for part 3 vs. part 4, decided while implementing (not re-asked, since it follows
+directly from the plan's own wording)**: part 4's own name is "opening albums, playlists and
+folders nested inside Home" — a *track* is never "opened" anywhere in this codebase, only played
+or queued, so giving a favorite-track row's Enter the exact one-track behavior Library's own
+Favorite Tracks tab already has (`send_add`, `AddAt::Next`, played at once) is squarely part 3's
+own "show the content and let the obvious interaction work" scope, not a part 4 concession. An
+album or a folder row's Enter is a deliberate no-op until part 4 wires nested opening — showing
+the row now, inert, is judged better than hiding it until it is fully interactive, since the "See
+all" row already gives a working path to open any of them today via Library.
+
+**`Row::selectable()`** (false only for `Header`/`Spacer`) and **`display_index_of(rows,
+selected)`** (maps the cursor's own index, which only counts selectable rows, back to its real
+position in the full display list) are what let `move_cursor`'s `Section::Home` arm and
+`view::home::draw`'s scrolling (`first_visible`, the same helper every other list already uses)
+work without a second, denser representation: one `Vec<Row>` serves both the cursor's count and
+the screen's rendering.
+
+12 new unit tests in `home.rs` (block construction, capping, ordering, display-index mapping,
+`intent` for each row kind) plus 3 in `view/mod.rs` (blocks render with their "See all" rows and
+real totals, nothing shows before the library loads, moving down highlights the first album row
+specifically — reusing the existing `REVERSED`-modifier-count pattern already used for search/
+library row highlighting). Full workspace green (335 phonia-tui tests, up from 320), fmt+clippy
+clean.

@@ -2805,4 +2805,151 @@ mod tests {
             "expected the text pushed toward the right: {line:?} (marker at {marker} of {total})"
         );
     }
+
+    fn connected_with_catalog() -> State {
+        let mut state = State::default();
+        update(
+            &mut state,
+            Msg::Connected {
+                server: phonia_ipc::ServerInfo {
+                    name: "phoniad".into(),
+                    version: "0.1.0".into(),
+                    pid: 1,
+                },
+                protocol: phonia_ipc::Version { major: 1, minor: 6 },
+                capabilities: vec!["catalog".into()],
+                status: crate::app::tests_support::status(),
+                queue: crate::app::tests_support::queue(),
+            },
+        );
+        state
+    }
+
+    /// Connecting asks for the library at once since Home (the default section) reads it too --
+    /// left on Home, not moved to Library, so these answers land on its own blocks.
+    fn with_library_from_home() -> State {
+        use crate::app::Tag;
+        let mut state = connected_with_catalog();
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::Library { generation: 0 },
+                result: Ok(phonia_ipc::Payload::Library {
+                    favorite_tracks: phonia_ipc::Page {
+                        items: vec![phonia_ipc::TrackSummary {
+                            id: "1".into(),
+                            title: "Freak On a Leash".into(),
+                            version: None,
+                            artists: vec![phonia_ipc::ArtistRef {
+                                id: "780".into(),
+                                name: "Korn".into(),
+                            }],
+                            album: None,
+                            duration_ms: Some(212_000),
+                            explicit: false,
+                            track_number: None,
+                            volume_number: None,
+                            quality: None,
+                            streamable: true,
+                        }],
+                        total: 42,
+                        offset: 0,
+                    },
+                    favorite_albums: phonia_ipc::Page {
+                        items: vec![phonia_ipc::AlbumSummary {
+                            id: "9".into(),
+                            title: "Issues".into(),
+                            version: None,
+                            artists: vec![],
+                            release_date: None,
+                            track_count: None,
+                            duration_ms: None,
+                            explicit: false,
+                            quality: None,
+                            kind: None,
+                            copyright: None,
+                            cover: None,
+                        }],
+                        total: 7,
+                        offset: 0,
+                    },
+                    my_playlists: phonia_ipc::Page {
+                        items: vec![],
+                        total: 0,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::LibraryPlaylists { generation: 0 },
+                result: Ok(phonia_ipc::Payload::PlaylistFolder {
+                    folder: None,
+                    page: phonia_ipc::Page {
+                        items: vec![phonia_ipc::FolderEntry::Folder {
+                            id: "f".into(),
+                            name: "Moods".into(),
+                            item_count: 3,
+                        }],
+                        total: 1,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn home_shows_only_the_continue_row_before_the_library_has_loaded() {
+        let text = screen(&connected_with_catalog(), 100, 14);
+        assert!(text.contains("Nothing to continue yet"), "{text}");
+        assert!(!text.contains("Favorite albums"), "{text}");
+        assert!(!text.contains("See all"), "{text}");
+    }
+
+    #[test]
+    fn home_shows_the_continue_row_and_each_blocks_see_all_row_once_the_library_is_in() {
+        let text = screen(&with_library_from_home(), 100, 30);
+        assert!(text.contains("Nothing to continue yet"), "{text}");
+        assert!(text.contains("Favorite albums"), "{text}");
+        assert!(text.contains("Issues"), "{text}");
+        assert!(text.contains("See all (7)"), "{text}");
+        assert!(text.contains("Your playlists"), "{text}");
+        assert!(text.contains("Moods"), "{text}");
+        assert!(text.contains("See all (1)"), "{text}");
+        assert!(text.contains("Favorite tracks"), "{text}");
+        assert!(text.contains("Freak On a Leash"), "{text}");
+        assert!(text.contains("See all (42)"), "{text}");
+    }
+
+    #[test]
+    fn moving_down_on_home_reaches_the_first_album_row_and_highlights_only_it() {
+        let theme = Theme::new(false);
+        let reversed_row = |state: &State| {
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            terminal
+                .draw(|frame| draw(state, &theme, &Covers::disabled(), frame))
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..30).find(|y| {
+                (16..90).any(|x| {
+                    buffer[(x, *y)]
+                        .modifier
+                        .contains(ratatui::style::Modifier::REVERSED)
+                })
+            })
+        };
+        let mut state = with_library_from_home();
+        press(&mut state, 'l');
+        assert_eq!(state.home_cursor.selected(), 0, "the Continue row first");
+        press(&mut state, 'j');
+        assert_eq!(state.home_cursor.selected(), 1, "the first album next");
+        let row = reversed_row(&state).expect("one row highlighted");
+        let text = screen(&state, 100, 30);
+        let line = text.lines().nth(row as usize).unwrap_or("");
+        assert!(line.contains("Issues"), "{line}");
+    }
 }

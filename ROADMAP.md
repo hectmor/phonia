@@ -734,6 +734,18 @@ queue has nothing to continue. No new field was needed on `State` for
 this single row -- a per-row cursor is deferred to part 3, once there
 is more than one row to move between.
 
+Part 3 adds the three content blocks: favorite albums, playlist folders, favorite tracks, each
+capped at 6 and closed with a "See all (N)" row into the matching Library tab. Visiting Home now
+asks for the library at once (the same request Library itself makes), rather than waiting for
+Library to be opened first, since Home reads the exact same data. `home::rows` builds the full
+row list fresh each time (nothing cached), skipping a block entirely while it has not loaded yet
+or once loaded it turns out to be empty -- two states that would otherwise need two different
+"nothing here" messages for no real benefit. `home_cursor` (new on `State`) moves only between the
+*selectable* rows (everything but a header or the spacer before one); Enter plays a favorite
+track directly (the same one-track behavior Library's own Favorite Tracks tab already has) or
+jumps into Library on a "See all" row -- opening an album, a playlist or a folder is still part
+4's job, nested inside Home's own stack.
+
 ## Conventions this file assumes
 
 - Issues are closed by the project owner by hand after their pull requests
