@@ -2242,3 +2242,28 @@ premise; `phoniad` gained 9 for the `autoplay` module), fmt+clippy clean. No pro
 wire was already finished in part 4.
 
 Next, and last: the TUI's own autoplay toggle (part 6), closing #33.
+
+## 2026-10-08 — #33 part 6 (last): the TUI's autoplay toggle, closing #33
+
+A new `Action::ToggleAutoplay` (key `O`, `Group::Playback`, alongside `s`/shuffle and
+`r`/repeat), reusing the exact same `request_for`/`send_playback` plumbing shuffle and repeat
+already go through -- a thin, mechanical addition, same shape as `ToggleShuffle`/`CycleRepeat`.
+Refused (same wording as the TUI's other `CAP_*`-gated actions) without the `autoplay`
+capability, which only a daemon with a catalog ever advertises. Shown in the bar next to
+`shuffle`/`repeat N` whenever it is on, reading `Queue.autoplay` the same way those two already
+do -- no new state to track in the TUI, it already had everything it needed once part 4 put the
+flag on the wire.
+
+Deliberately paired with part 3's own `o` (lowercase, opens a track's radio): `o` for one radio,
+`O` for continuous autoplay, the same letter at two cases for two related but distinct actions.
+
+New tests: `app.rs` (the capability gate, and the flag flipping true then false), `view/mod.rs`
+(the bar shows `autoplay` alongside the other flags). Full workspace green, fmt+clippy clean. No
+live pty-driven TUI check -- the same startup-handshake limitation already hit and documented in
+#39's and #33's own earlier TUI parts; nothing new to learn from repeating it against a toggle
+this thin, verified instead by the unit tests above plus part 5's own live, real-account
+verification of the behavior this toggle controls.
+
+**This closes #33**, all 6 parts merged: on-demand track radio (browse, queue, and the TUI's `o`)
+plus autoplay (the setting, its real behavior, and the TUI's `O`). Personal "My Mixes" remain a
+deliberately separate future issue, as scoped back in part 1.

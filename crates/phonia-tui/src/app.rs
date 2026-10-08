@@ -1186,7 +1186,8 @@ fn apply(state: &mut State, action: Action) -> Effects {
         | Action::VolumeDown
         | Action::ToggleMute
         | Action::ToggleShuffle
-        | Action::CycleRepeat => return send_playback(state, action),
+        | Action::CycleRepeat
+        | Action::ToggleAutoplay => return send_playback(state, action),
         Action::Activate => {
             // In the sidebar, Enter opens the section; in the queue, it plays the entry.
             if state.focus == Focus::Sidebar {
@@ -1381,6 +1382,17 @@ fn request_for(state: &State, action: Action) -> Result<Request, String> {
                 Some(Repeat::One) => Repeat::Off,
             },
         },
+        Action::ToggleAutoplay => {
+            if !state.has(phonia_ipc::CAP_AUTOPLAY) {
+                return Err(
+                    "this phoniad cannot autoplay: it needs protocol 1.13 and a TIDAL login"
+                        .to_string(),
+                );
+            }
+            Request::SetAutoplay {
+                autoplay: !state.queue.as_ref().is_some_and(|queue| queue.autoplay),
+            }
+        }
         _ => unreachable!("not a request: {action:?}"),
     })
 }
@@ -2687,6 +2699,33 @@ mod tests {
             seen.push(repeat);
         }
         assert_eq!(seen, [Repeat::All, Repeat::One, Repeat::Off]);
+    }
+
+    #[test]
+    fn capital_o_flips_autoplay_but_only_with_the_capability() {
+        let mut state = playing_with_volume(None, &[]);
+        let effects = ch(&mut state, 'O');
+        assert!(effects.commands.is_empty());
+        assert!(
+            state
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("cannot autoplay"),
+            "{:?}",
+            state.last_error
+        );
+
+        let mut state = playing_with_volume(None, &["catalog", "autoplay"]);
+        assert_eq!(
+            sent(ch(&mut state, 'O')),
+            Request::SetAutoplay { autoplay: true }
+        );
+        state.queue.as_mut().unwrap().autoplay = true;
+        assert_eq!(
+            sent(ch(&mut state, 'O')),
+            Request::SetAutoplay { autoplay: false }
+        );
     }
 
     #[test]

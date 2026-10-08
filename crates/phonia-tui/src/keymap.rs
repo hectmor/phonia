@@ -37,6 +37,8 @@ pub enum Action {
     ToggleShuffle,
     /// Off, then all, then one, then off again.
     CycleRepeat,
+    /// On or off: whether a dry queue (repeat off) fetches more tracks from TIDAL on its own.
+    ToggleAutoplay,
     /// Enter: open the section from the sidebar; in the queue, play the selected entry.
     Activate,
     RemoveEntry,
@@ -406,6 +408,13 @@ pub const BINDINGS: &[Binding] = &[
         "r",
         Action::CycleRepeat,
         "repeat: off, all, one",
+        Group::Playback,
+    ),
+    bind(
+        &[c('O')],
+        "O",
+        Action::ToggleAutoplay,
+        "autoplay on or off: fetch more from TIDAL when the queue runs dry",
         Group::Playback,
     ),
 ];
