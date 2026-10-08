@@ -3,7 +3,7 @@
 //! way the stack grows past one).
 
 use crate::list::Found;
-use phonia_ipc::{AlbumSummary, CatalogRef, PlaylistSummary, TrackSummary};
+use phonia_ipc::{AlbumSummary, CatalogRef, FolderEntry, PlaylistSummary, TrackSummary};
 
 /// Where a view stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,11 +163,41 @@ pub enum ListRef<'a> {
     Albums(&'a mut Found<AlbumSummary>),
 }
 
+/// A playlist folder opened to see its own contents: sub-folders first, then playlists (which
+/// may include ones only followed, not just owned -- TIDAL's own folders mix both; see
+/// `phonia_core::catalog::FolderEntry`'s own doc for why). `folder` is `None` for the root of
+/// "My Collection"; opening a sub-folder from within one (or from the library's own root level)
+/// pushes another one of these, so nesting falls out of `Stack` for free, the same way opening an
+/// album from an artist's page already does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderView {
+    pub folder: Option<String>,
+    pub name: String,
+    pub phase: Phase,
+    pub entries: Found<FolderEntry>,
+}
+
+impl FolderView {
+    pub fn new(folder: Option<String>, name: String) -> Self {
+        Self {
+            folder,
+            name,
+            phase: Phase::Loading,
+            entries: Found::default(),
+        }
+    }
+
+    pub fn title(&self) -> &str {
+        &self.name
+    }
+}
+
 /// A view that can be pushed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum View {
     TrackList(TrackListView),
     Artist(ArtistView),
+    Folder(FolderView),
 }
 
 impl View {
@@ -175,6 +205,7 @@ impl View {
         match self {
             View::TrackList(view) => view.title(),
             View::Artist(view) => view.title(),
+            View::Folder(view) => view.title(),
         }
     }
 
@@ -182,6 +213,7 @@ impl View {
         match self {
             View::TrackList(view) => &view.phase,
             View::Artist(view) => &view.phase,
+            View::Folder(view) => &view.phase,
         }
     }
 }
@@ -240,6 +272,7 @@ impl Stack {
             let phase = match view {
                 View::TrackList(view) => &mut view.phase,
                 View::Artist(view) => &mut view.phase,
+                View::Folder(view) => &mut view.phase,
             };
             if *phase == Phase::Loading {
                 *phase = Phase::Failed("the connection to the daemon was lost".to_string());
@@ -278,6 +311,10 @@ mod tests {
 
     fn artist_view(id: &str, name: &str) -> View {
         View::Artist(ArtistView::new(id.into(), name.into(), None))
+    }
+
+    fn folder_view(id: &str, name: &str) -> View {
+        View::Folder(FolderView::new(Some(id.into()), name.into()))
     }
 
     #[test]
@@ -322,6 +359,38 @@ mod tests {
         assert_eq!(*stack.find_mut(1).unwrap().phase(), Phase::Done);
         assert!(matches!(
             stack.find_mut(2).unwrap().phase(),
+            Phase::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn a_folder_views_own_title_is_its_name_and_the_root_has_no_id() {
+        let root = FolderView::new(None, "My Collection".into());
+        assert_eq!(root.title(), "My Collection");
+        assert_eq!(root.folder, None);
+        let sub = FolderView::new(Some("f1".into()), "Moods".into());
+        assert_eq!(sub.title(), "Moods");
+        assert_eq!(sub.folder, Some("f1".into()));
+    }
+
+    #[test]
+    fn a_folder_view_can_be_nested_like_an_album_or_an_artist() {
+        let mut stack = Stack::default();
+        stack.push(1, folder_view("f1", "Moods"));
+        assert_eq!(stack.top_serial(), Some(1));
+        stack.push(2, view("9"));
+        assert_eq!(stack.titles(), ["Moods", "Album 9"]);
+        assert!(stack.pop());
+        assert_eq!(stack.top_serial(), Some(1));
+    }
+
+    #[test]
+    fn losing_the_connection_fails_a_folder_view_still_loading() {
+        let mut stack = Stack::default();
+        stack.push(1, folder_view("f1", "Moods"));
+        stack.connection_lost();
+        assert!(matches!(
+            stack.find_mut(1).unwrap().phase(),
             Phase::Failed(_)
         ));
     }

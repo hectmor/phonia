@@ -1951,3 +1951,59 @@ no-catalog refusal, added to the existing "none of these work without a catalog"
 Part 3 (next, last): the TUI — the existing "Your playlists" library tab becomes the root of the
 folder tree, nested through the same `browse::Stack` an album or artist already nests through.
 Closes #39 once merged.
+
+## 2026-10-08 — #39 part 3 (last): the Playlists tab becomes the folder tree, closing #39
+
+A new `browse::FolderView` (`folder: Option<String>`, `name`, `phase`, `entries: Found<FolderEntry>`)
+and `View::Folder`, pushed onto the exact same `library_views: Stack` an opened album or artist
+already nests through — a sub-folder opens, and nests further, for free from `Stack` alone, no
+new nesting mechanism. A playlist inside a folder opens exactly like one anywhere else
+(`open_track_list`); a sub-folder opens into another `FolderView` (`open_folder_view`); both are
+reached through one shared `act_on_folder_entry`, called from the library's own root level and
+from an already-opened `FolderView` alike, so the two levels (root vs. nested) share identical
+Enter/`a`/`A` behavior rather than two parallel implementations. Read-only, as decided in part 1:
+`a`/`A` on a sub-folder do nothing (there is no sensible "add a whole folder" without recursing).
+
+**The library's root level needed its own request, not a reuse of `Payload::Library`.** The
+"Your playlists" list used to come free with `Request::Library`'s own `my_playlists` field; that
+field is flat and owned-only, the wrong shape for a folder root, and changing its *type* on the
+wire would silently break an older client's parsing instead of being additive — so it stays on
+the wire untouched (an older client, or `phonia ctl library`, still sees the old flat list) and
+is simply no longer read here. The root folder is fetched by its own, already-existing
+`Request::PlaylistFolder { folder: None, .. }` (from part 2), fired at the exact same moment as
+`Request::Library` (`Tag::LibraryPlaylists`, a new tag paired with `Tag::Library`, both sharing
+`LibraryState.generation` so a reconnect invalidates both together). This is also why
+`LibraryState` grew a second, independent `playlists_phase: Phase`: the Playlists tab's own
+"loading / failed / done" no longer has to agree with the other two tabs' `phase`, since it is
+genuinely a separate request that can succeed or fail on its own schedule. Pagination needed no
+new mechanism at all: `next_page`/`add_page`/`page_failed` were already generic over which tab,
+so the Playlists tab's "more" page just asks `Request::PlaylistFolder` instead of
+`Request::Playlists` through the exact same `Tag::LibraryMore` path everything else already used.
+
+**`library::Selected` collapsed `Playlist(&PlaylistSummary)` into `Entry(&FolderEntry)`.** The old
+variant only ever came from the flat list, which no longer exists as something to select from;
+every folder-tree row (a sub-folder or a playlist, owned or followed) is now one `FolderEntry`,
+read the same way regardless of position (library root or a nested `FolderView`).
+
+**Real investigation done, one real limitation hit and accepted, not solved.** The code itself
+was verified thoroughly: 308 `phonia-tui` unit/`TestBackend` tests (up from 280), including the
+exact nested flow (open a sub-folder, see its real contents, page past 50, open a playlist found
+inside it, close back down to the root) and a screen-rendering test asserting a folder row
+("`Moods/ (1 item)`") reads differently from a playlist row on the same list. A live, real-account
+end-to-end attempt was also made for this part (beyond part 1/2's own real-API/real-protocol
+checks): a scratch `phoniad` on a throwaway PipeWire null sink, `phonia tui` driven through a
+forked pty sending the real key sequence (library → Playlists tab → the real "test" folder →
+the real "Dark Jazz" playlist inside it → back out → quit). The daemon side answered correctly
+throughout (confirmed separately via `ctl folder` in part 2) and the TUI process never panicked
+or died across the whole sequence — but the pty harness could not be made to show the *rendered*
+screen text at all this time: the TUI's own startup handshake (terminal capability queries for
+truecolor/graphics support, e.g. a Kitty graphics protocol probe and a cursor-position report)
+blocks waiting for responses a bare `pty.fork()` harness never sends, so nothing past that
+handshake was ever captured. This is the same class of pre-existing, already-documented pty
+limitation noted in earlier sessions (a `q` keypress not reliably observed exiting the process
+through this same kind of harness) — not a regression from this change, and not chased further
+here either, for the same reason: the process-survives-every-keypress check it CAN do still
+passed, and the actual logic is already the most heavily unit-tested part of this whole issue.
+
+Full workspace green, fmt+clippy clean. README/ROADMAP/DECISIONS.md all updated — **this closes
+#39**, all 3 parts (PRs to follow this entry).
