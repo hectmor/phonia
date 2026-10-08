@@ -87,10 +87,11 @@ fn queue() -> Queue {
         current: Some(ItemId(7)),
         shuffle: true,
         repeat: Repeat::All,
+        autoplay: true,
     }
 }
 
-const QUEUE_JSON: &str = r#"{"version":5,"items":[{"id":7,"source":"file:/music/a.flac","title":"a.flac","artist":null,"duration_ms":215000,"cover":null},{"id":8,"source":"tidal:233059491","title":null,"artist":"Dire Straits","duration_ms":null,"cover":"abc123-def4"}],"order":[8,7],"current":7,"shuffle":true,"repeat":"all"}"#;
+const QUEUE_JSON: &str = r#"{"version":5,"items":[{"id":7,"source":"file:/music/a.flac","title":"a.flac","artist":null,"duration_ms":215000,"cover":null},{"id":8,"source":"tidal:233059491","title":null,"artist":"Dire Straits","duration_ms":null,"cover":"abc123-def4"}],"order":[8,7],"current":7,"shuffle":true,"repeat":"all","autoplay":true}"#;
 
 // ---- requests ------------------------------------------------------------------------------
 
@@ -242,6 +243,11 @@ fn queue_editing_requests() {
         },
         r#"{"id":7,"request":{"type":"set_repeat","repeat":"one"}}"#,
     );
+    request(
+        8,
+        Request::SetAutoplay { autoplay: true },
+        r#"{"id":8,"request":{"type":"set_autoplay","autoplay":true}}"#,
+    );
 }
 
 // ---- responses -----------------------------------------------------------------------------
@@ -287,9 +293,10 @@ fn the_server_banner() {
                 CAP_QUALITY.into(),
                 CAP_CATALOG.into(),
                 CAP_LYRICS.into(),
+                CAP_AUTOPLAY.into(),
             ],
         }),
-        r#"{"type":"hello","protocol":{"major":1,"minor":12},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","catalog","lyrics"]}"#,
+        r#"{"type":"hello","protocol":{"major":1,"minor":13},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","catalog","lyrics","autoplay"]}"#,
     );
 }
 
@@ -1097,6 +1104,14 @@ fn a_1_7_track_and_track_started_say_nothing_of_replay_gain() {
 }
 
 #[test]
+fn a_1_12_queue_says_nothing_of_autoplay() {
+    let old =
+        r#"{"version":1,"items":[],"order":[],"current":null,"shuffle":false,"repeat":"off"}"#;
+    let parsed: Queue = serde_json::from_str(old).unwrap();
+    assert!(!parsed.autoplay);
+}
+
+#[test]
 fn a_mode_from_the_future_does_not_break_a_client() {
     let parsed: Route =
         serde_json::from_str(r#"{"id":"x","mode":"cloud","description":"d"}"#).unwrap();
@@ -1125,7 +1140,7 @@ fn versions_are_compatible_across_minors_but_not_majors() {
     assert!(v(1, 0).compatible_with(v(1, 7)));
     assert!(v(1, 7).compatible_with(v(1, 0)));
     assert!(!v(1, 0).compatible_with(v(2, 0)));
-    assert_eq!(PROTOCOL, v(1, 12));
+    assert_eq!(PROTOCOL, v(1, 13));
 }
 
 #[test]

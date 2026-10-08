@@ -81,6 +81,9 @@ pub struct QueueSnapshot {
     pub current: Option<ItemId>,
     pub shuffle: bool,
     pub repeat: Repeat,
+    /// Whether the queue running dry should fetch more tracks from TIDAL on its own, rather than
+    /// just stopping. See `Queue::set_autoplay`.
+    pub autoplay: bool,
 }
 
 /// A playback queue, shared between whoever edits it and the engine that plays from it.
@@ -162,6 +165,14 @@ impl Queue {
 
     pub fn set_repeat(&self, repeat: Repeat) {
         self.mutate(|inner| inner.set_repeat(repeat));
+    }
+
+    /// Whether the queue running dry should fetch more tracks from TIDAL on its own. Unlike
+    /// `set_replay_gain`, this can be changed at runtime, not just at startup from the config
+    /// file. The actual behavior this enables is not implemented yet (a later change), only the
+    /// setting itself.
+    pub fn set_autoplay(&self, autoplay: bool) {
+        self.mutate(|inner| inner.set_autoplay(autoplay));
     }
 
     /// Sets how ReplayGain is chosen; see [`replaygain::Mode`]. There is no runtime way to change

@@ -2119,3 +2119,41 @@ same reasoning already recorded there.
 
 Next: the autoplay setting (part 4, no behavior yet), then its real behavior in `phoniad` (part
 5), then the TUI's autoplay toggle (part 6, closing #33).
+
+## 2026-10-08 — #33 part 4: the autoplay setting, no behavior yet
+
+Modeled like `shuffle`/`repeat`, not like `replaygain`: `Inner`/`Queue` grew an `autoplay: bool`
+field, changeable at runtime (`Queue::set_autoplay`, a new `Request::SetAutoplay`), not a
+config-file-only, set-once-at-startup value — the approved decision was a runtime toggle (like
+`SetMaxQuality`), unlike `replaygain`, which genuinely has no runtime setter. `[playback]
+autoplay` (default `false`, same "deliberate opt-in" reasoning as `replaygain`'s own default)
+supplies the startup value, applied once via `queue.set_autoplay(...)` right after construction,
+exactly where `replaygain`'s own startup value already is.
+
+The flag travels on the existing queue snapshot (`ipc::Queue.autoplay`, `#[serde(default)]`,
+protocol 1.12 → 1.13) rather than needing a new event: it is broadcast on `QueueChanged` for free,
+the same way `shuffle`/`repeat` already are. A new `autoplay` capability is advertised only
+alongside `catalog` (confirmed by a dedicated test: present when there's a catalog, absent
+without one), since the behavior this setting will eventually enable needs TIDAL to fetch more
+tracks from — there would be nothing for the flag to actually do on a daemon with no login.
+
+`phonia ctl autoplay [on|off]` (no argument flips it, reading the current value from
+`client.queue()` first) reuses the existing `MuteMode` (`On`/`Off`/`Toggle`) clap enum rather than
+a near-duplicate — it is already exactly the shape this needs.
+
+Verified live end to end against the real account: a scratch `phoniad` on a throwaway PipeWire
+null sink, `ctl autoplay on` then a plain `ctl autoplay` (toggle) correctly flipped
+`true` → `false`, visible in `ctl queue list --json`'s `autoplay` field each time, with the
+queue's `version` incrementing only on a real change (confirmed by a dedicated unit test:
+setting it to what it already was does not bump the version, same invariant `shuffle`/`repeat`
+already hold).
+
+This part is deliberately inert otherwise: nothing reads the flag to actually do anything yet.
+Full workspace green (new tests in `phonia-core`'s queue, `phonia-ipc`'s golden suite including a
+1.12-compat check that an older `Queue` answer still parses with `autoplay: false`, `phoniad`'s
+protocol suite, `phoniad`'s own `convert`/`daemon` unit tests), fmt+clippy clean.
+
+Next: the real behavior in `phoniad` (part 5) — hooked into the engine's existing prefetch
+mechanism, not `Event::QueueExhausted`, so the DAC is never released and re-acquired for it, per
+the architecture already settled in part 1's plan. Then the TUI's autoplay toggle (part 6,
+closing #33).

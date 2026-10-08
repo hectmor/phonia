@@ -501,6 +501,27 @@ fn shuffle_keeps_the_current_entry_first_and_off_restores_queue_order() {
 }
 
 #[test]
+fn autoplay_is_off_by_default_shows_in_the_snapshot_and_only_bumps_the_version_when_it_changes() {
+    let mut inner = Inner::new(1);
+    assert!(!inner.snapshot().autoplay);
+
+    inner.set_autoplay(true);
+    assert!(inner.snapshot().autoplay);
+    let version = inner.snapshot().version;
+
+    inner.set_autoplay(true);
+    assert_eq!(
+        inner.snapshot().version,
+        version,
+        "setting it to what it already was changes nothing"
+    );
+
+    inner.set_autoplay(false);
+    assert!(!inner.snapshot().autoplay);
+    assert_ne!(inner.snapshot().version, version);
+}
+
+#[test]
 fn a_shuffled_queue_plays_every_entry_exactly_once_per_cycle() {
     for seed in 0..30 {
         let mut inner = Inner::new(seed);

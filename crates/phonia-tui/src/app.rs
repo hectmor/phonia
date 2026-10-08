@@ -2184,6 +2184,7 @@ pub(crate) mod tests_support {
             current: None,
             shuffle: false,
             repeat: Repeat::Off,
+            autoplay: false,
         }
     }
 }

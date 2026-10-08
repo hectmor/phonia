@@ -180,6 +180,9 @@ pub struct Settings {
     pub replaygain: Sourced<crate::replaygain::Mode>,
     /// Whether finished plays are reported to TIDAL, for Recently Played.
     pub report_plays: Sourced<bool>,
+    /// The startup value of autoplay (fetching more tracks from TIDAL on a dry queue); can be
+    /// changed at runtime afterward.
+    pub autoplay: Sourced<bool>,
 }
 
 /// Decides every setting: command line over file over default.
@@ -234,6 +237,7 @@ pub fn resolve(overrides: Overrides, file: &ConfigFile) -> Settings {
             crate::replaygain::Mode::default(),
         ),
         report_plays: Sourced::pick(None, file.tidal.report_plays, true),
+        autoplay: Sourced::pick(None, file.playback.autoplay, false),
     }
 }
 
