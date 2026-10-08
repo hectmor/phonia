@@ -252,7 +252,10 @@ replaygain = "off"      # off | track | album | auto: apply TIDAL's ReplayGain? 
   only follow, not ones you created -- it mirrors TIDAL's own app exactly. Read-only for now:
   creating, renaming or moving a folder is not supported. `phonia ctl folder [<id>]` prints a
   folder's contents, sub-folders first, each row ending with the id to open it (`folder <id>`) or
-  to add it to the queue (`playlist <id>`, via `queue add playlist:<id>`).
+  to add it to the queue (`playlist <id>`, via `queue add playlist:<id>`). The TUI's own library
+  "Your playlists" tab is this same root, browsable exactly like an opened album or artist: Enter
+  on a sub-folder nests into it (and nests further from there), Enter on a playlist opens it; `h`
+  (or Esc) backs out one level at a time, down to the root.
 - `phonia config path` prints which file is used, and `phonia config show` prints every setting
   with where its value comes from (the file or the default). `--config <file>` (or the
   `PHONIA_CONFIG` environment variable) selects another file, also for `phoniad`.

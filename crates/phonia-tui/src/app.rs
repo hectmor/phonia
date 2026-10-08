@@ -181,6 +181,8 @@ impl State {
                 phonia_ipc::image::Kind::ArtistPicture,
                 artist.picture.as_deref()?,
             )),
+            // A folder has no cover of its own on TIDAL.
+            browse::View::Folder(_) => None,
         }
     }
 }
@@ -255,8 +257,12 @@ pub enum Tag {
     AddFrom { play_at: Option<usize> },
     /// The view pushed with this number: its tracks, or the next page of them.
     View { serial: u64 },
-    /// The request that loads the library.
+    /// The request that loads the library's favorite tracks and favorite albums.
     Library { generation: u64 },
+    /// The request that loads the root of "My Collection" (the Playlists tab), fired at the same
+    /// moment as `Library`'s own request: a separate request since it is folder-shaped data, not
+    /// part of `Payload::Library`'s own answer.
+    LibraryPlaylists { generation: u64 },
     /// The next page of one of the library's three lists.
     LibraryMore { tab: LibraryTab, generation: u64 },
     /// A track's lyrics; counts only for the generation asked last, so an answer that arrives
@@ -302,6 +308,10 @@ pub fn update(state: &mut State, msg: Msg) -> Effects {
         effects.commands.push(Cmd::Request {
             tag: Tag::Library { generation: 0 },
             request,
+        });
+        effects.commands.push(Cmd::Request {
+            tag: Tag::LibraryPlaylists { generation: 0 },
+            request: LibraryState::playlist_request(),
         });
     }
     // Entering the panel, or reconnecting while already in it, is also the retry for a fetch that
@@ -494,6 +504,21 @@ fn on_response(state: &mut State, tag: Tag, result: Result<Payload, String>) -> 
             }
             Effects::redraw()
         }
+        Tag::LibraryPlaylists { generation } => {
+            let Some(library) = &mut state.library else {
+                return Effects::default();
+            };
+            if generation != library.generation {
+                return Effects::default();
+            }
+            match result {
+                Ok(payload) => {
+                    library.finish_playlists(payload);
+                }
+                Err(reason) => library.fail_playlists(reason),
+            }
+            Effects::redraw()
+        }
         Tag::LibraryMore { tab, generation } => {
             let Some(library) = &mut state.library else {
                 return Effects::default();
@@ -651,6 +676,36 @@ fn on_view_response(state: &mut State, serial: u64, result: Result<Payload, Stri
                         artist.phase = browse::Phase::Failed(reason);
                     } else {
                         clear_pending(artist);
+                        state.last_error = Some(format!("could not load more results: {reason}"));
+                    }
+                }
+            }
+        }
+        Some(browse::View::Folder(folder)) => {
+            let opening = folder.phase == browse::Phase::Loading;
+            match result {
+                Ok(Payload::PlaylistFolder { page, .. }) => {
+                    if opening {
+                        folder.entries = crate::list::Found::from_page(page);
+                        folder.phase = browse::Phase::Done;
+                    } else {
+                        folder.entries.append(Some(page));
+                    }
+                }
+                Ok(_) => {
+                    let reason = "the daemon answered something unexpected".to_string();
+                    if opening {
+                        folder.phase = browse::Phase::Failed(reason);
+                    } else {
+                        folder.entries.loading = false;
+                        state.last_error = Some(reason);
+                    }
+                }
+                Err(reason) => {
+                    if opening {
+                        folder.phase = browse::Phase::Failed(reason);
+                    } else {
+                        folder.entries.loading = false;
                         state.last_error = Some(format!("could not load more results: {reason}"));
                     }
                 }
@@ -1068,6 +1123,7 @@ fn browsing_cursor(state: &mut State) -> Option<Cursor> {
             browse::ListRef::Tracks(found) => found.cursor,
             browse::ListRef::Albums(found) => found.cursor,
         }),
+        browse::View::Folder(folder) => Some(folder.entries.cursor),
     }
 }
 
@@ -1372,6 +1428,17 @@ fn load_more_results(state: &mut State) -> Vec<Cmd> {
                     }
                 }
             }
+            browse::View::Folder(folder) if folder.phase == browse::Phase::Done => {
+                let at = folder.folder.clone();
+                folder
+                    .entries
+                    .next_offset()
+                    .map(|offset| Request::PlaylistFolder {
+                        folder: at,
+                        offset,
+                        limit: Some(crate::search::PAGE_SIZE),
+                    })
+            }
             _ => None,
         };
         return match request {
@@ -1523,12 +1590,23 @@ fn act_on_library_result(state: &mut State, action: Action) -> Effects {
     let Some(library) = &state.library else {
         return Effects::default();
     };
-    if library.phase != browse::Phase::Done {
+    let ready = match library.tab {
+        LibraryTab::Playlists => library.playlists_phase == browse::Phase::Done,
+        LibraryTab::FavoriteTracks | LibraryTab::FavoriteAlbums => {
+            library.phase == browse::Phase::Done
+        }
+    };
+    if !ready {
         return Effects::default();
     }
     let Some(selected) = library.selected() else {
         return Effects::default();
     };
+    // A row of the Playlists tab (now the root of TIDAL's own folder tree) is handled on its
+    // own: a sub-folder opens into the stack, a playlist opens or adds exactly like elsewhere.
+    if let library::Selected::Entry(entry) = selected {
+        return act_on_folder_entry(state, action, entry.clone());
+    }
     if action == Action::Activate {
         match selected {
             library::Selected::Album(album) => {
@@ -1541,17 +1619,7 @@ fn act_on_library_result(state: &mut State, action: Action) -> Effects {
                     Header::Album(album),
                 );
             }
-            library::Selected::Playlist(playlist) => {
-                let playlist = playlist.clone();
-                return open_track_list(
-                    state,
-                    phonia_ipc::CatalogRef::Playlist {
-                        id: playlist.id.clone(),
-                    },
-                    Header::Playlist(playlist),
-                );
-            }
-            library::Selected::Track(_) => {}
+            library::Selected::Track(_) | library::Selected::Entry(_) => {}
         }
     }
     let play = action == Action::Activate;
@@ -1584,14 +1652,83 @@ fn act_on_library_result(state: &mut State, action: Action) -> Effects {
             },
             at,
         },
-        library::Selected::Playlist(playlist) => Request::QueueAddFrom {
-            from: phonia_ipc::CatalogRef::Playlist {
-                id: playlist.id.clone(),
-            },
-            at,
-        },
+        // Handled above, before this match.
+        library::Selected::Entry(_) => return Effects::default(),
     };
     send_add(state, request, play)
+}
+
+/// What Enter, `a` or `A` do on one entry of a playlist folder (the library's Playlists tab at
+/// its root, or an opened `browse::View::Folder`): a sub-folder opens with Enter and is left
+/// alone by `a`/`A` (nothing sensible to add from one directly, the same "read-only" scope as
+/// the rest of #39); a playlist behaves exactly as it does everywhere else.
+fn act_on_folder_entry(
+    state: &mut State,
+    action: Action,
+    entry: phonia_ipc::FolderEntry,
+) -> Effects {
+    match entry {
+        phonia_ipc::FolderEntry::Folder { id, name, .. } => {
+            if action == Action::Activate {
+                open_folder_view(state, Some(id), name)
+            } else {
+                Effects::default()
+            }
+        }
+        phonia_ipc::FolderEntry::Playlist(playlist) => {
+            if action == Action::Activate {
+                open_track_list(
+                    state,
+                    phonia_ipc::CatalogRef::Playlist {
+                        id: playlist.id.clone(),
+                    },
+                    Header::Playlist(playlist),
+                )
+            } else {
+                let at = if action == Action::AddToQueue {
+                    phonia_ipc::AddAt::End
+                } else {
+                    phonia_ipc::AddAt::Next
+                };
+                send_add(
+                    state,
+                    Request::QueueAddFrom {
+                        from: phonia_ipc::CatalogRef::Playlist { id: playlist.id },
+                        at,
+                    },
+                    false,
+                )
+            }
+        }
+        phonia_ipc::FolderEntry::Unknown => Effects::default(),
+    }
+}
+
+/// Opens a sub-folder from within a playlist folder (or from the library's root level): pushes
+/// it in a loading state and asks for its first page, the same way an album or a playlist opens.
+fn open_folder_view(state: &mut State, folder: Option<String>, name: String) -> Effects {
+    if !require_browsable(state, "a playlist folder") {
+        return Effects::redraw();
+    }
+    let serial = next_serial(state);
+    let Some(stack) = active_stack_mut(state) else {
+        return Effects::default();
+    };
+    stack.push(
+        serial,
+        browse::View::Folder(browse::FolderView::new(folder.clone(), name)),
+    );
+    Effects {
+        redraw: true,
+        commands: vec![Cmd::Request {
+            tag: Tag::View { serial },
+            request: Request::PlaylistFolder {
+                folder,
+                offset: 0,
+                limit: Some(crate::library::PAGE_SIZE),
+            },
+        }],
+    }
 }
 
 /// Sends a track, an album, a playlist or an artist's tracks to the queue: connected, and with the
@@ -1636,6 +1773,9 @@ fn move_cursor(state: &mut State, action: Action) {
                 browse::ListRef::Tracks(found) => (found.items.len(), &mut found.cursor),
                 browse::ListRef::Albums(found) => (found.items.len(), &mut found.cursor),
             },
+            browse::View::Folder(folder) => {
+                (folder.entries.items.len(), &mut folder.entries.cursor)
+            }
         }
     } else {
         match (state.focus, state.section()) {
@@ -1801,6 +1941,19 @@ fn browsed_row(state: &mut State) -> Option<Row> {
 /// inside an album (Enter continues playing from it, `a`/`A` add just it); an album (from an
 /// artist's page) opens with Enter, or is added whole with `a`/`A`.
 fn act_in_view(state: &mut State, action: Action) -> Effects {
+    if let Some(browse::View::Folder(folder)) = active_stack_mut(state).and_then(Stack::top_mut)
+        && folder.phase == browse::Phase::Done
+    {
+        let Some(entry) = folder
+            .entries
+            .items
+            .get(folder.entries.cursor.selected())
+            .cloned()
+        else {
+            return Effects::default();
+        };
+        return act_on_folder_entry(state, action, entry);
+    }
     match browsed_row(state) {
         Some(Row::Track { of, track, index }) => act_on_track_row(state, action, of, track, index),
         Some(Row::Album(album)) if action == Action::Activate => open_track_list(
@@ -4507,26 +4660,51 @@ mod tests {
         }
     }
 
+    fn library_folder(id: &str, name: &str, item_count: u32) -> phonia_ipc::FolderEntry {
+        phonia_ipc::FolderEntry::Folder {
+            id: id.into(),
+            name: name.into(),
+            item_count,
+        }
+    }
+
     /// Connected, with the catalog, having just moved to the Library section: the request that
     /// loads it, already sent (nothing has to be typed, unlike a search).
-    fn opening_library() -> (State, Tag) {
+    /// Both requests the library fires the moment its section is first shown: the favorite
+    /// tracks/albums request, and the root folder's own (the Playlists tab is now folder-shaped
+    /// data, fetched separately -- see `Tag::LibraryPlaylists`'s own doc).
+    fn opening_library() -> (State, Tag, Tag) {
         let mut state = State::default();
         update(&mut state, connected_msg(&["catalog"]));
         let effects = ch(&mut state, '3');
-        let (tag, request) = search_request(effects);
+        let [
+            Cmd::Request {
+                tag: library_tag,
+                request: library_request,
+            },
+            Cmd::Request {
+                tag: playlists_tag,
+                request: playlists_request,
+            },
+        ] = effects.commands.as_slice()
+        else {
+            panic!("expected two tagged requests, got {:?}", effects.commands);
+        };
         assert_eq!(
-            request,
+            *library_request,
             Request::Library {
                 limit: Some(crate::library::PAGE_SIZE)
             }
         );
-        (state, tag)
+        assert_eq!(*playlists_request, LibraryState::playlist_request());
+        (state, *library_tag, *playlists_tag)
     }
 
     /// The library loaded: two favorite tracks (the second not streamable), one favorite album,
-    /// two playlists. The focus is on the list, with the daemon able to browse.
+    /// two playlists (the root of "My Collection"). The focus is on the list, with the daemon
+    /// able to browse.
     fn with_library() -> State {
-        let (mut state, tag) = opening_library();
+        let (mut state, tag, playlists_tag) = opening_library();
         let mut tracks = vec![
             library_track("1", "Freak On a Leash"),
             library_track("2", "Blind"),
@@ -4548,9 +4726,23 @@ mod tests {
                         offset: 0,
                     },
                     my_playlists: phonia_ipc::Page {
+                        items: vec![],
+                        total: 0,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
+        update(
+            &mut state,
+            Msg::Response {
+                tag: playlists_tag,
+                result: Ok(Payload::PlaylistFolder {
+                    folder: None,
+                    page: phonia_ipc::Page {
                         items: vec![
-                            library_playlist("p-1", "Road trip"),
-                            library_playlist("p-2", "Focus"),
+                            phonia_ipc::FolderEntry::Playlist(library_playlist("p-1", "Road trip")),
+                            phonia_ipc::FolderEntry::Playlist(library_playlist("p-2", "Focus")),
                         ],
                         total: 2,
                         offset: 0,
@@ -4564,7 +4756,7 @@ mod tests {
 
     #[test]
     fn moving_to_the_library_asks_for_it_once_and_the_answer_fills_its_three_lists() {
-        let (mut state, tag) = opening_library();
+        let (mut state, tag, _) = opening_library();
         assert_eq!(tag, Tag::Library { generation: 0 });
         assert_eq!(
             state.library.as_ref().unwrap().phase,
@@ -4599,7 +4791,7 @@ mod tests {
 
     #[test]
     fn losing_the_connection_fails_the_library_if_it_was_still_loading() {
-        let (mut state, _) = opening_library();
+        let (mut state, _, _) = opening_library();
         disconnected(&mut state, Duration::from_secs(1));
         assert!(matches!(
             state.library.as_ref().unwrap().phase,
@@ -4775,6 +4967,190 @@ mod tests {
         assert_eq!(view.header().title(), "Focus");
     }
 
+    /// The root of "My Collection" has one sub-folder ("Moods", one item inside) then one
+    /// playlist ("Road trip"), sorted the way TIDAL's own API already does.
+    fn with_library_folder_at_root() -> State {
+        let (mut state, tag, playlists_tag) = opening_library();
+        update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Ok(Payload::Library {
+                    favorite_tracks: phonia_ipc::Page {
+                        items: vec![],
+                        total: 0,
+                        offset: 0,
+                    },
+                    favorite_albums: phonia_ipc::Page {
+                        items: vec![],
+                        total: 0,
+                        offset: 0,
+                    },
+                    my_playlists: phonia_ipc::Page {
+                        items: vec![],
+                        total: 0,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
+        update(
+            &mut state,
+            Msg::Response {
+                tag: playlists_tag,
+                result: Ok(Payload::PlaylistFolder {
+                    folder: None,
+                    page: phonia_ipc::Page {
+                        items: vec![
+                            library_folder("f1", "Moods", 1),
+                            phonia_ipc::FolderEntry::Playlist(library_playlist("p-1", "Road trip")),
+                        ],
+                        total: 2,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
+        ch(&mut state, 'l');
+        state
+    }
+
+    #[test]
+    fn entering_a_sub_folder_pushes_a_folder_view_and_asks_for_its_contents() {
+        let mut state = with_library_folder_at_root();
+        ch(&mut state, ']');
+        ch(&mut state, ']'); // Playlists tab
+        let (tag, request) = tagged(press(&mut state, KeyCode::Enter));
+        assert!(matches!(tag, Tag::View { .. }));
+        assert_eq!(
+            request,
+            Request::PlaylistFolder {
+                folder: Some("f1".into()),
+                offset: 0,
+                limit: Some(crate::library::PAGE_SIZE),
+            }
+        );
+        let Some(browse::View::Folder(view)) = state.library_views.top() else {
+            panic!("no folder view")
+        };
+        assert_eq!(view.title(), "Moods");
+        assert_eq!(view.phase, browse::Phase::Loading);
+    }
+
+    #[test]
+    fn a_sub_folders_own_answer_lists_its_contents_and_can_be_paged() {
+        let mut state = with_library_folder_at_root();
+        ch(&mut state, ']');
+        ch(&mut state, ']'); // Playlists tab
+        let (tag, _) = tagged(press(&mut state, KeyCode::Enter));
+        update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Ok(Payload::PlaylistFolder {
+                    folder: Some("f1".into()),
+                    page: phonia_ipc::Page {
+                        items: (0..50)
+                            .map(|n| {
+                                phonia_ipc::FolderEntry::Playlist(library_playlist(
+                                    &n.to_string(),
+                                    "x",
+                                ))
+                            })
+                            .collect(),
+                        total: 60,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
+        let Some(browse::View::Folder(view)) = state.library_views.top_mut() else {
+            panic!("no folder view")
+        };
+        assert_eq!(view.phase, browse::Phase::Done);
+        assert_eq!(view.entries.items.len(), 50);
+        view.entries.cursor.last(50);
+        let cmds = load_more_results(&mut state);
+        let [Cmd::Request { tag, request }] = cmds.as_slice() else {
+            panic!("expected one request, got {cmds:?}")
+        };
+        assert!(matches!(tag, Tag::View { .. }));
+        assert_eq!(
+            *request,
+            Request::PlaylistFolder {
+                folder: Some("f1".into()),
+                offset: 50,
+                limit: Some(crate::search::PAGE_SIZE),
+            }
+        );
+    }
+
+    #[test]
+    fn a_playlist_inside_an_opened_folder_opens_exactly_like_one_at_the_root() {
+        let mut state = with_library_folder_at_root();
+        ch(&mut state, ']');
+        ch(&mut state, ']'); // Playlists tab
+        let (tag, _) = tagged(press(&mut state, KeyCode::Enter));
+        update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Ok(Payload::PlaylistFolder {
+                    folder: Some("f1".into()),
+                    page: phonia_ipc::Page {
+                        items: vec![phonia_ipc::FolderEntry::Playlist(library_playlist(
+                            "p-inside",
+                            "Dark Jazz",
+                        ))],
+                        total: 1,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
+        let (_, request) = tagged(press(&mut state, KeyCode::Enter));
+        assert_eq!(
+            request,
+            Request::Tracks {
+                from: phonia_ipc::CatalogRef::Playlist {
+                    id: "p-inside".into()
+                },
+                offset: 0,
+                limit: Some(crate::search::PAGE_SIZE),
+            }
+        );
+        let Some(browse::View::TrackList(view)) = state.library_views.top() else {
+            panic!("expected a track list, not the folder, on top")
+        };
+        assert_eq!(view.header().title(), "Dark Jazz");
+    }
+
+    #[test]
+    fn closing_a_sub_folder_returns_to_the_root_of_my_collection() {
+        let mut state = with_library_folder_at_root();
+        ch(&mut state, ']');
+        ch(&mut state, ']'); // Playlists tab
+        tagged(press(&mut state, KeyCode::Enter));
+        assert!(!state.library_views.is_empty());
+        ch(&mut state, 'h');
+        assert!(state.library_views.is_empty());
+        assert_eq!(
+            state.library.as_ref().unwrap().tab,
+            LibraryTab::Playlists,
+            "still on the Playlists tab, showing its root again"
+        );
+    }
+
+    #[test]
+    fn add_to_queue_on_a_sub_folder_does_nothing_there_is_no_whole_folder_to_add() {
+        let mut state = with_library_folder_at_root();
+        ch(&mut state, ']');
+        ch(&mut state, ']'); // Playlists tab
+        let effects = apply(&mut state, Action::AddToQueue);
+        assert!(effects.commands.is_empty());
+        assert!(state.library_views.is_empty(), "nothing was opened either");
+    }
+
     #[test]
     fn closing_an_opened_library_view_returns_to_the_librarys_own_lists() {
         let mut state = with_library();
@@ -4792,7 +5168,7 @@ mod tests {
 
     #[test]
     fn a_long_list_of_favorites_loads_more_as_the_cursor_nears_the_end() {
-        let (mut state, tag) = opening_library();
+        let (mut state, tag, _) = opening_library();
         update(
             &mut state,
             Msg::Response {

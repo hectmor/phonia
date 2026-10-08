@@ -1695,15 +1695,31 @@ mod tests {
                         offset: 0,
                     },
                     my_playlists: phonia_ipc::Page {
-                        items: vec![phonia_ipc::PlaylistSummary {
-                            id: "p-1".into(),
-                            title: "Road trip".into(),
-                            creator: None,
-                            description: None,
-                            track_count: Some(10),
-                            duration_ms: None,
-                            cover: None,
-                        }],
+                        items: vec![],
+                        total: 0,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::LibraryPlaylists { generation: 0 },
+                result: Ok(phonia_ipc::Payload::PlaylistFolder {
+                    folder: None,
+                    page: phonia_ipc::Page {
+                        items: vec![phonia_ipc::FolderEntry::Playlist(
+                            phonia_ipc::PlaylistSummary {
+                                id: "p-1".into(),
+                                title: "Road trip".into(),
+                                creator: None,
+                                description: None,
+                                track_count: Some(10),
+                                duration_ms: None,
+                                cover: None,
+                            },
+                        )],
                         total: 1,
                         offset: 0,
                     },
@@ -1766,6 +1782,102 @@ mod tests {
         let text = screen(&state, 100, 14);
         assert!(text.contains("Library \u{203a} Issues"), "{text}");
         assert!(text.contains("Loading..."), "{text}");
+    }
+
+    #[test]
+    fn a_sub_folder_shows_its_own_breadcrumb_and_tells_a_folder_row_from_a_playlist_row() {
+        use crate::app::Tag;
+        let mut state = in_the_library();
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::Library { generation: 0 },
+                result: Ok(phonia_ipc::Payload::Library {
+                    favorite_tracks: phonia_ipc::Page {
+                        items: vec![],
+                        total: 0,
+                        offset: 0,
+                    },
+                    favorite_albums: phonia_ipc::Page {
+                        items: vec![],
+                        total: 0,
+                        offset: 0,
+                    },
+                    my_playlists: phonia_ipc::Page {
+                        items: vec![],
+                        total: 0,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::LibraryPlaylists { generation: 0 },
+                result: Ok(phonia_ipc::Payload::PlaylistFolder {
+                    folder: None,
+                    page: phonia_ipc::Page {
+                        items: vec![phonia_ipc::FolderEntry::Folder {
+                            id: "f1".into(),
+                            name: "Moods".into(),
+                            item_count: 1,
+                        }],
+                        total: 1,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
+        press(&mut state, 'l');
+        press(&mut state, ']'); // favorite albums
+        press(&mut state, ']'); // playlists (the root of "My Collection")
+        let text = screen(&state, 100, 14);
+        assert!(text.contains("Moods/ (1 item)"), "root row: {text}");
+
+        let (tag, request) = tagged_request(press_key(&mut state, KeyCode::Enter));
+        assert_eq!(
+            request,
+            phonia_ipc::Request::PlaylistFolder {
+                folder: Some("f1".into()),
+                offset: 0,
+                limit: Some(crate::library::PAGE_SIZE),
+            }
+        );
+        let text = screen(&state, 100, 14);
+        assert!(text.contains("Library \u{203a} Moods"), "{text}");
+        assert!(text.contains("Loading..."), "{text}");
+
+        update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Ok(phonia_ipc::Payload::PlaylistFolder {
+                    folder: Some("f1".into()),
+                    page: phonia_ipc::Page {
+                        items: vec![phonia_ipc::FolderEntry::Playlist(
+                            phonia_ipc::PlaylistSummary {
+                                id: "p-inside".into(),
+                                title: "Dark Jazz".into(),
+                                creator: None,
+                                description: None,
+                                track_count: Some(75),
+                                duration_ms: None,
+                                cover: None,
+                            },
+                        )],
+                        total: 1,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
+        let text = screen(&state, 100, 14);
+        assert!(text.contains("Dark Jazz"), "{text}");
+        assert!(
+            !text.contains("item)"),
+            "no folder row left to show: {text}"
+        );
     }
 
     #[test]

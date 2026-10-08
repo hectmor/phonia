@@ -2,10 +2,10 @@
 
 use super::first_visible;
 use crate::app::{Focus, State};
-use crate::browse::{ArtistTab, ArtistView, Header, Phase, Stack, TrackListView, View};
+use crate::browse::{ArtistTab, ArtistView, FolderView, Header, Phase, Stack, TrackListView, View};
 use crate::covers::{self, Covers};
 use crate::theme::Theme;
-use phonia_ipc::{AlbumSummary, TrackSummary, fmt};
+use phonia_ipc::{AlbumSummary, FolderEntry, TrackSummary, fmt};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
@@ -24,6 +24,7 @@ pub fn draw(
     match stack.top() {
         Some(View::TrackList(view)) => draw_track_list(state, view, theme, covers, frame, area),
         Some(View::Artist(view)) => draw_artist(state, view, theme, covers, frame, area),
+        Some(View::Folder(view)) => draw_folder(state, view, theme, frame, area),
         None => {}
     }
 }
@@ -242,6 +243,74 @@ fn draw_artist(
         },
     };
     frame.render_widget(Paragraph::new(lines), list_area);
+}
+
+/// A playlist folder: its own name, then its contents (sub-folders first, then playlists, the
+/// order TIDAL's own API already sorts them in -- nothing to re-sort here).
+fn draw_folder(state: &State, view: &FolderView, theme: &Theme, frame: &mut Frame, area: Rect) {
+    let [header_area, list_area] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled(view.title().to_string(), theme.accent),
+            Line::raw(""),
+        ]),
+        header_area,
+    );
+    let focused = state.focus == Focus::Main;
+    let lines = match &view.phase {
+        Phase::Loading => vec![Line::styled("Loading...", theme.dim)],
+        Phase::Failed(reason) => vec![Line::styled(reason.clone(), theme.error)],
+        Phase::Done => folder_rows(
+            &view.entries.items,
+            view.entries.cursor.selected(),
+            focused,
+            usize::from(list_area.height),
+            theme,
+        ),
+    };
+    frame.render_widget(Paragraph::new(lines), list_area);
+}
+
+/// A folder's own entries: a sub-folder ends with `/` and how many entries it has; a playlist
+/// prints exactly as it does everywhere else.
+fn folder_rows<'a>(
+    entries: &[FolderEntry],
+    cursor: usize,
+    focused: bool,
+    height: usize,
+    theme: &Theme,
+) -> Vec<Line<'a>> {
+    if entries.is_empty() {
+        return vec![Line::styled("Nothing in this folder.", theme.dim)];
+    }
+    let start = first_visible(cursor, height);
+    entries
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(height.max(1))
+        .map(|(index, entry)| {
+            let text = format!("{:>3}. {}", index + 1, folder_entry_text(entry));
+            row_line(text, index == cursor, focused, false, theme)
+        })
+        .collect()
+}
+
+/// The one line a folder entry shows: a sub-folder's name with a trailing `/` and its item
+/// count, or a playlist the same way search and the library already print one. Shared with the
+/// library section's own Playlists tab (its root level), which shows the same entries inline.
+pub(crate) fn folder_entry_text(entry: &FolderEntry) -> String {
+    match entry {
+        FolderEntry::Folder {
+            name, item_count, ..
+        } => {
+            let noun = if *item_count == 1 { "item" } else { "items" };
+            format!("{name}/ ({item_count} {noun})")
+        }
+        FolderEntry::Playlist(playlist) => fmt::playlist(playlist),
+        FolderEntry::Unknown => "(an entry this version does not know)".to_string(),
+    }
 }
 
 /// The artist's name, a line of its bio when there is one, and a blank line to set the tabs apart.

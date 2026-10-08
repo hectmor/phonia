@@ -80,7 +80,7 @@ done — it is its own product decision, not a leftover.
 |---|---|---|
 | #120 | Play reporting: finished plays reach TIDAL's own Recently Played | Closed (verified live against a real account) |
 | #32 | Letras sincronizadas: lyrics synced to playback in the TUI | Code complete, all 3 parts merged |
-| #39 | Carpetas de playlists: browse TIDAL's own playlist folders in the TUI | In progress (parts 1-2/3 merged) |
+| #39 | Carpetas de playlists: browse TIDAL's own playlist folders in the TUI | Code complete, all 3 parts merged |
 
 The rest of Phase 4 and all of Phase 5 are not started, except CI (#42) and
 rustfmt-in-CI (#50), both closed. Nothing else is planned in detail yet;
@@ -605,17 +605,21 @@ filtered down to owned-only the way the flat "Your playlists" list is;
 the existing "Your playlists" library tab becomes the root of the folder
 tree rather than a new tab; folders sort before playlists, both by name.
 
-Part 1 (merged) added `catalog::FolderEntry` and
-`Catalog::playlist_folder` to `phonia-core`, verified live against a real
-test folder on this account (one playlist followed, not owned, confirming
-why this view does not apply `my_playlists`' owned-only filter). Part 2
-(merged) is the wire protocol (`Request`/`Payload::PlaylistFolder`,
-1.10 → 1.11, additive, no new capability) and the daemon handler, plus
-`phonia ctl folder [<id>]`, verified live end to end against the real
-account (a scratch daemon, the real "test" folder and its real followed
-playlist). Part 3 (next, last) is the TUI — the library's playlist tab
-becomes browsable as a tree through the same `browse::Stack` an album or
-artist already nests through, closing #39.
+Part 1 added `catalog::FolderEntry` and `Catalog::playlist_folder` to
+`phonia-core`, verified live against a real test folder on this account
+(one playlist followed, not owned, confirming why this view does not
+apply `my_playlists`' owned-only filter). Part 2 is the wire protocol
+(`Request`/`Payload::PlaylistFolder`, 1.10 → 1.11, additive, no new
+capability) and the daemon handler, plus `phonia ctl folder [<id>]`,
+verified live end to end against the real account. Part 3 (last) is the
+TUI: the library's own "Your playlists" tab is now the root of the
+folder tree, nested through the same `browse::Stack` an album or artist
+already nests through (a new `browse::View::Folder`) — opening a
+sub-folder, and nesting further from there, falls out of that stack for
+free. The root is fetched by its own request (the old flat
+`Payload::Library.my_playlists` field stays on the wire for an older
+client, just unread here), so the Playlists tab loads and can fail
+independently of the other two. **This closes #39**, all 3 parts merged.
 
 ## Conventions this file assumes
 

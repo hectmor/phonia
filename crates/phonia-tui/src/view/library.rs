@@ -1,5 +1,6 @@
 //! The library section: the tabs, and the list of what is in the one shown.
 
+use super::browse::folder_entry_text;
 use super::first_visible;
 use crate::app::{Connection, Focus, State};
 use crate::browse::Phase;
@@ -23,8 +24,13 @@ fn draw_tabs(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
     };
     let mut spans = Vec::new();
     for tab in LibraryTab::ALL {
-        // The counts are known once it has loaded.
-        let label = if library.phase == Phase::Done {
+        // The counts are known once it has loaded -- the Playlists tab (the root of the folder
+        // tree) loads separately from the other two, so it has its own phase to check.
+        let ready = match tab {
+            LibraryTab::Playlists => library.playlists_phase == Phase::Done,
+            LibraryTab::FavoriteTracks | LibraryTab::FavoriteAlbums => library.phase == Phase::Done,
+        };
+        let label = if ready {
             format!("{} ({})", tab.title(), library.total(tab))
         } else {
             tab.title().to_string()
@@ -54,7 +60,11 @@ fn draw_list(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
         frame.render_widget(Paragraph::new(Line::styled(text, theme.dim)), area);
         return;
     };
-    let lines = match &library.phase {
+    let phase = match library.tab {
+        LibraryTab::Playlists => &library.playlists_phase,
+        LibraryTab::FavoriteTracks | LibraryTab::FavoriteAlbums => &library.phase,
+    };
+    let lines = match phase {
         Phase::Loading => vec![Line::styled("Loading...", theme.dim)],
         Phase::Failed(reason) => vec![Line::styled(reason.clone(), theme.error)],
         Phase::Done => rows(state, library, theme, usize::from(area.height)),
@@ -78,7 +88,12 @@ fn rows<'a>(state: &State, library: &LibraryState, theme: &Theme, height: usize)
             .iter()
             .map(fmt::album)
             .collect(),
-        LibraryTab::Playlists => library.playlists.items.iter().map(fmt::playlist).collect(),
+        LibraryTab::Playlists => library
+            .playlists
+            .items
+            .iter()
+            .map(folder_entry_text)
+            .collect(),
     };
     if texts.is_empty() {
         let what = library.tab.title().to_lowercase();
