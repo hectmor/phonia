@@ -289,7 +289,7 @@ fn the_server_banner() {
                 CAP_LYRICS.into(),
             ],
         }),
-        r#"{"type":"hello","protocol":{"major":1,"minor":10},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","catalog","lyrics"]}"#,
+        r#"{"type":"hello","protocol":{"major":1,"minor":11},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","catalog","lyrics"]}"#,
     );
 }
 
@@ -1125,7 +1125,7 @@ fn versions_are_compatible_across_minors_but_not_majors() {
     assert!(v(1, 0).compatible_with(v(1, 7)));
     assert!(v(1, 7).compatible_with(v(1, 0)));
     assert!(!v(1, 0).compatible_with(v(2, 0)));
-    assert_eq!(PROTOCOL, v(1, 10));
+    assert_eq!(PROTOCOL, v(1, 11));
 }
 
 #[test]
@@ -1379,5 +1379,45 @@ fn the_lyrics_request_and_its_answers() {
             lyrics: None,
         }),
         r#"{"type":"response","id":3,"ok":{"type":"lyrics","id":"518338","lyrics":null}}"#,
+    );
+}
+
+#[test]
+fn the_playlist_folder_request_and_its_answers() {
+    request(
+        1,
+        Request::PlaylistFolder {
+            folder: None,
+            offset: 0,
+            limit: None,
+        },
+        r#"{"id":1,"request":{"type":"playlist_folder","folder":null,"offset":0,"limit":null}}"#,
+    );
+    response(
+        1,
+        Reply::Ok(Payload::PlaylistFolder {
+            folder: None,
+            page: Page {
+                items: vec![
+                    FolderEntry::Folder {
+                        id: "f1".into(),
+                        name: "Moods".into(),
+                        item_count: 3,
+                    },
+                    FolderEntry::Playlist(PlaylistSummary {
+                        id: "p1".into(),
+                        title: "Dark Jazz".into(),
+                        creator: None,
+                        description: None,
+                        track_count: Some(75),
+                        duration_ms: Some(26_712_000),
+                        cover: Some("cover-id".into()),
+                    }),
+                ],
+                total: 2,
+                offset: 0,
+            },
+        }),
+        r#"{"type":"response","id":1,"ok":{"type":"playlist_folder","folder":null,"page":{"items":[{"type":"folder","id":"f1","name":"Moods","item_count":3},{"type":"playlist","id":"p1","title":"Dark Jazz","creator":null,"description":null,"track_count":75,"duration_ms":26712000,"cover":"cover-id"}],"total":2,"offset":0}}}"#,
     );
 }

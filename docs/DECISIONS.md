@@ -1913,3 +1913,41 @@ v2 API's own `create-folder`/`remove` calls `tidlers` already wraps.
 Verified live end-to-end in `a_real_playlist_folder` against the real account (root, then the
 real "test" folder's one followed playlist) — see that test's own doc comment for the exact
 confirmed shape. Full workspace green, fmt+clippy clean.
+
+## 2026-10-08 — #39 part 2: wire protocol 1.11 and the daemon handler
+
+`Request`/`Payload::PlaylistFolder { folder, offset, limit }` (additive, protocol 1.10 → 1.11),
+under the existing `catalog` capability — no new capability, same as `Playlists`/`Library`,
+since `playlist_folder` costs exactly as much as those already do and nothing about it needs its
+own feature flag. `dto::FolderEntry` is tagged (`{"type":"folder"|"playlist",...}`); its
+`Playlist` variant wraps the existing `PlaylistSummary` as an internally-tagged newtype rather
+than duplicating its fields — confirmed by the golden test that serde merges the tag with the
+wrapped struct's own fields exactly as hoped, with no special-casing needed. An `Unknown` variant
+covers an item type a future daemon/TIDAL adds and this client doesn't know, same as every other
+tagged wire enum here.
+
+The daemon's `playlist_folder` handler is a direct mirror of `playlists`/`library`: refused with
+`Unsupported` when there is no catalog, paged the same way, `convert::folder_entry` mapping the
+core `FolderEntry` to the wire one. It is dispatched the same way `Playlists`/`Library` already
+are (the default `Daemon::handle` path), not through `run_beside` — matching its two closest
+siblings by request shape and cost, rather than `Lyrics`/`Search`, which do use `run_beside` for
+reasons specific to them.
+
+`phonia ctl folder [<id>]` was added alongside (not originally scoped as its own PR step, but
+every previous protocol addition here has shipped with matching `ctl` support in the same
+breath, so this followed that precedent): prints a folder's contents, sub-folders first, each
+row ending with the id to open it (`folder <id>`) or queue it (`playlist <id>`). No id means the
+root of "My Collection".
+
+Verified live end-to-end against the real account: a scratch daemon on a throwaway PipeWire null
+sink, `phonia ctl folder` showed the real "test" folder, `phonia ctl folder <its id>` showed the
+real followed "Dark Jazz" playlist inside it, `--json` printed the matching wire shape — then shut
+down cleanly, sink unloaded, nothing left running. Full workspace green (fmt+clippy clean); new
+tests in `phonia-ipc`'s golden suite (the request/response pair, the version bump), `phoniad`'s
+protocol suite (folder contents told apart from a sub-folder, opening a sub-folder by id, the
+no-catalog refusal, added to the existing "none of these work without a catalog" list), and
+`phonia`'s own `ctl` formatting tests.
+
+Part 3 (next, last): the TUI — the existing "Your playlists" library tab becomes the root of the
+folder tree, nested through the same `browse::Stack` an album or artist already nests through.
+Closes #39 once merged.

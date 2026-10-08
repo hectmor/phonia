@@ -420,6 +420,11 @@ impl Daemon {
                 limit,
             } => self.playlists(from, offset, limit).await,
             Request::Library { limit } => self.library(limit).await,
+            Request::PlaylistFolder {
+                folder,
+                offset,
+                limit,
+            } => self.playlist_folder(folder, offset, limit).await,
             Request::Lyrics { id } => self.lyrics(id).await,
             Request::Search {
                 query,
@@ -698,6 +703,31 @@ impl Daemon {
             Ok(page) => Reply::Ok(Payload::Playlists {
                 from,
                 page: convert::page(&page, convert::playlist_summary),
+            }),
+            Err(failure) => catalog_failure(&failure),
+        }
+    }
+
+    /// One page of a playlist folder's own contents, sub-folders and playlists alike. `folder`
+    /// is `None` for the root of "My Collection".
+    async fn playlist_folder(
+        &self,
+        folder: Option<String>,
+        offset: u32,
+        limit: Option<u32>,
+    ) -> Reply {
+        let catalog = match self.catalog_or_refuse("list a playlist folder from") {
+            Ok(catalog) => catalog,
+            Err(reply) => return reply,
+        };
+        let limit = match list_limit(limit, DEFAULT_SEARCH_LIMIT) {
+            Ok(limit) => limit,
+            Err(reply) => return reply,
+        };
+        match catalog.playlist_folder(folder.clone(), offset, limit).await {
+            Ok(page) => Reply::Ok(Payload::PlaylistFolder {
+                folder,
+                page: convert::page(&page, convert::folder_entry),
             }),
             Err(failure) => catalog_failure(&failure),
         }

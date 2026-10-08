@@ -1,9 +1,10 @@
 //! The messages: what a client may ask, and what the daemon answers and announces.
 
 use crate::dto::{
-    AlbumListRef, AlbumSummary, ArtistSummary, CatalogKind, CatalogRef, EndReason, ItemId, Lyrics,
-    OutputInfo, Page, PlaylistListRef, PlaylistSummary, Quality, Queue, ReleaseReason, Repeat,
-    ReplayGain, Route, SinkReport, Spec, State, Status, StreamQuality, TrackSummary,
+    AlbumListRef, AlbumSummary, ArtistSummary, CatalogKind, CatalogRef, EndReason, FolderEntry,
+    ItemId, Lyrics, OutputInfo, Page, PlaylistListRef, PlaylistSummary, Quality, Queue,
+    ReleaseReason, Repeat, ReplayGain, Route, SinkReport, Spec, State, Status, StreamQuality,
+    TrackSummary,
 };
 use serde::{Deserialize, Serialize};
 
@@ -35,7 +36,7 @@ pub const CAP_LYRICS: &str = "lyrics";
 /// The protocol version this crate speaks.
 pub const PROTOCOL: Version = Version {
     major: 1,
-    minor: 10,
+    minor: 11,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,6 +229,18 @@ pub enum Request {
     Lyrics {
         id: String,
     },
+    /// One page of a playlist folder's own contents, sub-folders and playlists alike (since
+    /// 1.11): `folder` is `None` for the root of "My Collection", or `Some(id)` for a sub-folder,
+    /// using the id a [`crate::dto::FolderEntry::Folder`] from an earlier page already handed
+    /// back. Answered with [`Payload::PlaylistFolder`].
+    PlaylistFolder {
+        #[serde(default)]
+        folder: Option<String>,
+        #[serde(default)]
+        offset: u32,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
     /// Adds the tracks of an album or a playlist (since 1.6): the daemon lists them from TIDAL
     /// itself, so their titles and lengths come with them, and answers like `queue_add`, with
     /// [`Payload::Added`]. A track TIDAL lists but does not stream where the daemon is comes back
@@ -389,6 +402,13 @@ pub enum Payload {
     Lyrics {
         id: String,
         lyrics: Option<Lyrics>,
+    },
+    /// A page of a playlist folder's contents, and which folder it was (since 1.11). `folder`
+    /// repeats what was asked, so a client can tell which folder (root, or which sub-folder) the
+    /// page belongs to.
+    PlaylistFolder {
+        folder: Option<String>,
+        page: Page<FolderEntry>,
     },
     /// The state right now, and the sequence number of the last event it includes.
     Snapshot {
