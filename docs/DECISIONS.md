@@ -2077,3 +2077,45 @@ shape; `queue add radio:33723914` added all 100 real tracks to a real queue. Ful
 
 Next: the TUI's on-demand "open this track's radio" action (part 3), then the autoplay setting
 and its real behavior (parts 4-5), then the TUI's autoplay toggle (part 6, closing #33).
+
+## 2026-10-08 — #33 part 3: `o` opens a track's radio in the TUI; queue/now-playing deferred
+
+A new `Action::OpenRadio` (key `o`, `Group::Search` like `a`/`A`, which also already work beyond
+the Search section) and `browse::Header::Radio { title }` (title precomputed as `"Radio: <seed
+track>"`, so `Header::title()` keeps returning a plain `&str` like its other two variants; `cover()`
+is always `None`, a radio is not itself a TIDAL object with its own artwork). `open_track_radio`
+is a two-line wrapper around the EXISTING `open_track_list` — a track's radio reuses the exact
+same `browse::TrackListView`/`Stack` machinery an album or a playlist already opens into, so
+nesting (a radio opened from inside an already-open album, or even from inside another radio)
+falls out for free, same precedent as #39's folders nesting through the same stack.
+
+`OpenRadio` is handled at the same three places that already resolve "the row under the cursor"
+for `Activate`/`AddToQueue`/`AddNext` -- `act_on_result` (search), `act_on_library_result`
+(library), `act_on_track_row` (a track already inside an open view) -- each gaining one early
+branch: a `Track` row opens its radio, anything else (an album, a playlist, an artist, a
+sub-folder) does nothing. Found and fixed one real latent bug while wiring this:
+`act_on_folder_entry`'s own non-`Activate` branch for a `FolderEntry::Playlist` row unconditionally
+built an "add to queue" request for ANY action that wasn't `Activate` -- harmless while the only
+two non-`Activate` actions that could reach it were `AddToQueue`/`AddNext` (both correctly meaning
+"add"), but `OpenRadio` reaching the same branch would have silently queued the whole playlist
+instead of doing nothing. Fixed by checking for `AddToQueue`/`AddNext` explicitly rather than
+"anything that isn't Activate".
+
+**Deliberately out of scope for this part, and said so rather than silently skipped**: opening a
+queue entry's or the now-playing track's own radio. Both need somewhere to SHOW the opened radio
+that neither the Queue section nor a global "now playing" view currently has (`active_stack_mut`
+only knows a stack for `Section::Search`/`Section::Library` today) -- building that is its own
+small design decision (a new Queue-section stack? jump over to Search/Library and open it there?),
+not something to improvise silently inside an unrelated implementation PR. Confirmed with a
+regression test (`o_does_nothing_on_a_queue_entry_a_deliberate_follow_up_not_this_part`) that this
+is the current, intended behavior, not an oversight to be caught by a future bug report.
+
+4 new tests (12 total for this part across the 3 entry points plus the folder-bug regression and
+the queue no-op), 312 `phonia-tui` tests passing (up from 308). Full workspace green, fmt+clippy
+clean. No live pty-driven TUI check attempted this time -- #39's own part 3 already hit and
+documented the same startup-handshake limitation in this exact harness; nothing new to learn from
+repeating it, so the (thorough) unit/TestBackend coverage carries this part's verification weight,
+same reasoning already recorded there.
+
+Next: the autoplay setting (part 4, no behavior yet), then its real behavior in `phoniad` (part
+5), then the TUI's autoplay toggle (part 6, closing #33).

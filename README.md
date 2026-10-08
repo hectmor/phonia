@@ -260,7 +260,10 @@ replaygain = "off"      # off | track | album | auto: apply TIDAL's ReplayGain? 
   `tracks`/`queue_add_from` requests -- no new request type): tracks TIDAL picks to follow a
   track, seeded by it, with the seed itself always filtered out of the answer (TIDAL's own API
   lists it first). `phonia ctl radio <id>` prints it (`--limit`, at most 100); `queue add
-  radio:<id>` adds it whole, the same way `album:<id>`/`playlist:<id>` already do.
+  radio:<id>` adds it whole, the same way `album:<id>`/`playlist:<id>` already do. In the TUI,
+  `o` on a track (a search result, a favorite track, or one inside an already-open album,
+  playlist, artist page or radio) opens its radio the same way Enter opens an album; opening a
+  queue entry's or the now-playing track's radio is a deliberate follow-up, not covered yet.
 - `phonia config path` prints which file is used, and `phonia config show` prints every setting
   with where its value comes from (the file or the default). `--config <file>` (or the
   `PHONIA_CONFIG` environment variable) selects another file, also for `phoniad`.
