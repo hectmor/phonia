@@ -33,6 +33,7 @@ decisions log, and the issue tracker alone.
 | 4 — SONE-like features | [Fase 4](https://github.com/hectmor/phonia/milestone/5) | In progress (see below) |
 | 5 — Extras and packaging | [Fase 5](https://github.com/hectmor/phonia/milestone/6) | Partly started |
 | 6 — Layout and appearance | [Fase 6](https://github.com/hectmor/phonia/milestone/7) | In progress (see below) |
+| 7 — Home screen and discovery | [Fase 7](https://github.com/hectmor/phonia/milestone/8) | Started (see below) |
 
 Phases 0 and 1 delivered: TIDAL PKCE login, HiRes/DASH streaming, bit-perfect
 ALSA output, a playback engine and in-memory queue, the daemon and its IPC
@@ -99,6 +100,18 @@ Brand new milestone, started right after #120. The owner's concrete ask
 track title with the artist on its own quieter line underneath, instead
 of today's single `Artist - Title` string — see `docs/DECISIONS.md` for
 the full design discussion and the decisions made.
+
+### Phase 7 — Home screen and discovery
+
+| Issue | What | Status |
+|---|---|---|
+| #139 | Home screen in the TUI (local data only) | In progress (see below) |
+
+Brand new milestone, started right after #33. A lightweight home
+screen using only data phonia already fetches (resuming, favorites,
+playlist folders) — a real TIDAL-style editorial/personalized home
+(mixes, new releases) is a deliberately separate, not-yet-investigated
+future issue, the same territory #33 left "My Mixes" in.
 
 ## Right now
 
@@ -687,6 +700,25 @@ in the bar whenever it is on. **This closes #33**, all 6 parts merged:
 on-demand track radio (browse, queue, and the TUI) plus autoplay (the
 setting, its real behavior, and the TUI toggle). Personal "My Mixes"
 remain a deliberately separate future issue.
+
+Phase 7 starts with **#139 (a Home screen in the TUI)**, planned with
+Opus as a 4-part plan: a new `Section::Home` holding no data of its
+own (it reads `state.status`/`state.queue`/`state.library`, the same
+state Queue and Library already hold), showing a "Continue" row plus
+three 6-item blocks (favorite albums, playlist folders, favorite
+tracks) each ending in a "See all" row into the matching Library tab.
+Opening an album, a playlist or a folder from Home nests inside Home's
+own stack, the same way Library already nests its own.
+
+Part 1 (merged) is a real, pre-existing bug found while planning, not
+tied to Home itself but in its path: Enter on a track inside an album,
+a playlist, a folder or a radio opened from the *library* read
+`search_views` unconditionally (a leftover from before the library got
+its own stack) instead of whichever stack actually opened that view —
+so it silently did nothing whenever no search view happened to be
+open, or used the wrong list's data if one was. Fixed to read the
+active stack generically, with regression tests opening from both an
+album and a radio.
 
 ## Conventions this file assumes
 
