@@ -81,10 +81,11 @@ done — it is its own product decision, not a leftover.
 | #120 | Play reporting: finished plays reach TIDAL's own Recently Played | Closed (verified live against a real account) |
 | #32 | Letras sincronizadas: lyrics synced to playback in the TUI | Code complete, all 3 parts merged |
 | #39 | Carpetas de playlists: browse TIDAL's own playlist folders in the TUI | Code complete, all 3 parts merged |
+| #33 | Mixes, radio y autoplay de pistas similares | In progress (part 1/6) |
 
 The rest of Phase 4 and all of Phase 5 are not started, except CI (#42) and
 rustfmt-in-CI (#50), both closed. Nothing else is planned in detail yet;
-issues #33–#45 hold one-line descriptions each, to be scoped with Opus when
+issues #34–#45 hold one-line descriptions each, to be scoped with Opus when
 their turn comes.
 
 ### Phase 6 — Layout and appearance
@@ -620,6 +621,30 @@ free. The root is fetched by its own request (the old flat
 `Payload::Library.my_playlists` field stays on the wire for an older
 client, just unread here), so the Playlists tab loads and can fail
 independently of the other two. **This closes #39**, all 3 parts merged.
+
+Phase 4 continues with **#33 (mixes, radio and autoplay of similar
+tracks)**, planned with Opus as a 6-part plan, scoped down (after an
+explicit decision) to on-demand track radio plus autoplay; personal
+"My Mixes" are left for a future issue, since they need endpoints this
+plan did not investigate.
+
+Part 1 added `Catalog::track_radio` to `phonia-core`: TIDAL's
+`/tracks/{id}/radio`, confirmed live to return bare tracks (reusing the
+existing `parse_track_items`, which already tolerates that shape) with
+the seed track itself always listed first — filtered out locally
+(`parse_radio`), since nothing that asks for a track's radio wants that
+same track back. The two-step `/tracks/{id}/mix` + `/mixes/{id}/items`
+alternative was also confirmed live (first item was, as far as checked,
+the same list `radio` already gives in one request) and was not used,
+since one request beats two for what autoplay will call repeatedly.
+
+Parts 2-3 (next) are the wire/daemon/`ctl` addition (a new
+`CatalogRef::TrackRadio`, reusing the existing `Request::Tracks`/
+`QueueAddFrom` machinery almost for free) and the TUI's on-demand
+"open this track's radio" action. Parts 4-5 are the autoplay setting
+and its actual behavior in `phoniad` (hooked into the existing
+prefetch mechanism, not `QueueExhausted`, so the DAC is never released
+and re-acquired). Part 6 is the TUI's autoplay toggle, closing #33.
 
 ## Conventions this file assumes
 

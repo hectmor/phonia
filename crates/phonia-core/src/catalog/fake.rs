@@ -28,6 +28,11 @@ pub enum Call {
         offset: u32,
         limit: u32,
     },
+    TrackRadio {
+        id: String,
+        offset: u32,
+        limit: u32,
+    },
     Album {
         id: String,
     },
@@ -92,6 +97,8 @@ struct State {
     my_playlists: Vec<Playlist>,
     /// Keyed by folder id; `None` is the root of "My Collection".
     folders: HashMap<Option<String>, Vec<FolderEntry>>,
+    /// Keyed by the seed track's id, for `track_radio`.
+    radios: HashMap<String, Vec<Track>>,
     lyrics: HashMap<String, Lyrics>,
     error: Option<CatalogError>,
     delay: Duration,
@@ -190,6 +197,17 @@ impl FakeCatalog {
             .unwrap()
             .folders
             .insert(folder.map(str::to_string), entries);
+        self
+    }
+
+    /// A track's radio, for `track_radio`. As the real one does, the seed's own id is filtered
+    /// out of whatever is given here, so it never needs to be left out by the caller.
+    pub fn with_radio(self, seed: &str, tracks: Vec<Track>) -> Self {
+        self.state
+            .lock()
+            .unwrap()
+            .radios
+            .insert(seed.to_string(), tracks);
         self
     }
 
@@ -323,6 +341,30 @@ impl Catalog for FakeCatalog {
         };
         self.answer(call, move |state| match state.playlists.get(&id) {
             Some(tracks) => Ok(page_of(tracks, offset, limit)),
+            None => Err(CatalogError::NotFound),
+        })
+    }
+
+    fn track_radio(
+        &self,
+        id: String,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Track>, CatalogError>> {
+        let call = Call::TrackRadio {
+            id: id.clone(),
+            offset,
+            limit,
+        };
+        self.answer(call, move |state| match state.radios.get(&id) {
+            Some(tracks) => {
+                let filtered: Vec<Track> = tracks
+                    .iter()
+                    .filter(|track| track.id != id)
+                    .cloned()
+                    .collect();
+                Ok(page_of(&filtered, offset, limit))
+            }
             None => Err(CatalogError::NotFound),
         })
     }

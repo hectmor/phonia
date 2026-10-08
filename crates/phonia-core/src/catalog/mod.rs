@@ -256,6 +256,17 @@ pub trait Catalog: Send + Sync {
         limit: u32,
     ) -> BoxFuture<'static, Result<Page<Track>, CatalogError>>;
 
+    /// TIDAL's own "radio" for a track: tracks picked to follow it, seeded by it. The seed track
+    /// itself is never among the results (TIDAL's own answer always lists it first; it is
+    /// filtered out here, since nothing that asks for a track's radio wants that track back). At
+    /// most [`MAX_ITEMS_LIMIT`] per page.
+    fn track_radio(
+        &self,
+        id: String,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Track>, CatalogError>>;
+
     /// An album itself: its title, artists, release date, and so on, not its tracks.
     fn album(&self, id: String) -> BoxFuture<'static, Result<Album, CatalogError>>;
 

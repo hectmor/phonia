@@ -2007,3 +2007,53 @@ passed, and the actual logic is already the most heavily unit-tested part of thi
 
 Full workspace green, fmt+clippy clean. README/ROADMAP/DECISIONS.md all updated — **this closes
 #39**, all 3 parts (PRs to follow this entry).
+
+## 2026-10-08 — #33 part 1: `Catalog::track_radio`, using `/tracks/{id}/radio` over the two-step mix
+
+Planned with Opus (Phase 4, next after #39). The planning investigation couldn't run live (read
+only), so the plan's own first step — confirming the real shape — became part 1's own first
+action, the same escalation #39's own PR1 used.
+
+**User's 4 decisions, all = recommended:** (1) scope is on-demand track radio (browse/queue) plus
+autoplay; personal "My Mixes" (a different, uninvestigated set of endpoints) is a future issue;
+(2) autoplay defaults to `off`, with a runtime toggle that is not persisted — same shape as
+`SetMaxQuality`; (3) the autoplay seed is the last track that played, refilling with ~10 tracks
+once the last queued entry starts (not a fixed original seed, not a whole 100-track page at once);
+(4) autoplayed tracks are plain queue entries, no new `QueueItem` field.
+
+**Real investigation, live against this account** (seed `33723914`, Korn - "Falling Away from
+Me", a track id already known real/streamable from this file's own earlier album-listing
+checks): `GET /tracks/{id}/mix` returns just `{"id":"<mixId>"}`; that mix's own
+`/mixes/{mixId}/items` and `GET /tracks/{id}/radio` directly were, as far as checked, the same
+100-track list — `radio` gets there in one request instead of two, which matters because autoplay
+will call this repeatedly, so `track_radio` uses `/tracks/{id}/radio` and the mix endpoints are
+not wired up at all. **Confirmed, and the reason for `parse_radio`'s one real behavior**: the seed
+track itself always comes back as the FIRST item of its own radio — `Catalog::track_radio` filters
+it out (`item.id != seed`) before returning, since nothing that asks for a track's radio wants
+that same track handed back; `total` stays TIDAL's own count regardless (same "a page shorter than
+the total says is fine, that's TIDAL's count" precedent `parse_track_items` already set for
+videos left out of an album/playlist listing). Also confirmed: `radio`'s `items` are bare tracks
+(no `{"item":...}` envelope, unlike a playlist's or an album's own listing) — already handled by
+the existing `parse_track_items`, which tolerates either shape, so no new parsing had to be built,
+only a thin `parse_radio` wrapper that filters the seed.
+
+**6-part plan**, this is part 1: `Catalog::track_radio(id, offset, limit) -> Page<Track>` added to
+the trait, `TidalCatalog` (`/tracks/{id}/radio`, `parse_radio`) and `FakeCatalog`
+(`with_radio(seed, tracks)`, filtering the seed the same way so a test against the fake behaves
+like one against the real catalog). Part 2 is the wire/daemon addition — a new
+`CatalogRef::TrackRadio { id }` reusing the EXISTING `Request::Tracks`/`Payload::Tracks` and
+`Request::QueueAddFrom` machinery (which already pages/queues any `CatalogRef`), so this is
+expected to need no new protocol request type, only a new tagged variant plus one daemon dispatch
+arm, cheaper than #39's own protocol bump. Part 3 is `ctl`/the TUI's on-demand "open this track's
+radio" action. Parts 4-5 are the autoplay setting and its real behavior: the architectural
+decision (found by reading the actual code, not assumed) is that autoplay belongs entirely in
+`phoniad`, hooked into the EXISTING prefetch mechanism (`maybe_prefetch`, which already looks ~30s
+ahead and opens the next track for gapless joins) rather than reacting to `Event::QueueExhausted`
+-- by the time the queue is reported exhausted the engine has already released the DAC, so
+reacting there would cost a gap and a re-acquire; appending tracks while the last queued entry is
+still playing keeps gapless intact. `Repeat::One`/`Repeat::All` never trigger it, by construction
+(the queue's own `peek` cannot reach "nothing more" in those modes unless the queue is genuinely
+empty). Part 6 is the TUI's autoplay toggle, closing #33.
+
+Verified live end to end against the real account (`a_real_track_radio`, `--ignored`). Full
+workspace green, fmt+clippy clean.

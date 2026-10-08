@@ -277,6 +277,22 @@ impl Catalog for TidalCatalog {
         })
     }
 
+    fn track_radio(
+        &self,
+        id: String,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Track>, CatalogError>> {
+        let catalog = self.clone();
+        Box::pin(async move {
+            check_id(&id)?;
+            let body = catalog
+                .get(&format!("/tracks/{id}/radio"), items_query(offset, limit))
+                .await?;
+            parse_radio(&body, &id)
+        })
+    }
+
     fn album(&self, id: String) -> BoxFuture<'static, Result<Album, CatalogError>> {
         let catalog = self.clone();
         Box::pin(async move {
@@ -917,6 +933,15 @@ fn parse_track_items(body: &str) -> Result<Page<Track>, CatalogError> {
     Ok(out)
 }
 
+/// A track's radio: the same item shape `parse_track_items` already reads (confirmed live:
+/// bare tracks, no `{"item":...}` envelope, but that function already tolerates either), with the
+/// seed itself filtered out -- confirmed live that TIDAL's own answer always lists it first.
+fn parse_radio(body: &str, seed_id: &str) -> Result<Page<Track>, CatalogError> {
+    let mut page = parse_track_items(body)?;
+    page.items.retain(|track| track.id != seed_id);
+    Ok(page)
+}
+
 /// A page of favorited items: each entry is `{"created": "<when>", "item": {...}}`; the date is
 /// not kept, only the item itself.
 fn parse_favorited_items<Raw: DeserializeOwned, T: From<Raw>>(
@@ -1436,6 +1461,26 @@ mod tests {
         let page = parse_track_items(r#"{"items":[{"id":1,"title":"x"}],"totalNumberOfItems":1}"#)
             .unwrap();
         assert_eq!(page.items[0].id, "1");
+    }
+
+    #[test]
+    fn a_tracks_radio_never_lists_the_seed_itself() {
+        let page = parse_radio(
+            r#"{"items":[
+                {"id":1,"title":"Seed"},
+                {"id":2,"title":"Recommended"}
+            ],"totalNumberOfItems":100}"#,
+            "1",
+        )
+        .unwrap();
+        assert_eq!(
+            page.items.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            ["2"]
+        );
+        assert_eq!(
+            page.total, 100,
+            "TIDAL's own count is kept even though the seed was filtered out locally"
+        );
     }
 
     #[test]
@@ -2022,6 +2067,47 @@ mod tests {
         assert!(
             matches!(&inside.items[0], FolderEntry::Playlist(p) if !p.title.is_empty()),
             "expected the one playlist inside"
+        );
+    }
+
+    /// Against the real TIDAL and this account: confirms `track_radio`'s real shape and settles
+    /// why it uses `/tracks/{id}/radio` directly rather than the two-step `/tracks/{id}/mix` +
+    /// `/mixes/{id}/items` (both investigated 2026-10-08; `/tracks/{id}/mix` for this track
+    /// answered `{"id":"0018682685fe04d57b9c46a5ef44d1"}`, and that mix's own items were, as far
+    /// as checked, the same list `/tracks/{id}/radio` already gives in one request). Confirmed:
+    /// `radio`'s `items` are bare tracks (no `{"item":...}` envelope, unlike a playlist's or an
+    /// album's own listing) -- `parse_track_items` already handles that shape, see
+    /// `a_listing_of_bare_tracks_is_read_too`. Also confirmed, and the reason `track_radio`
+    /// filters the seed out: the seed track itself comes back as the FIRST item of its own
+    /// radio. Run with `--ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "needs a TIDAL login and network"]
+    async fn a_real_track_radio() {
+        use crate::auth::{Interaction, open_store};
+        use crate::config::SessionStoreKind;
+        use crate::openers::TidalOpener;
+
+        let store = open_store(SessionStoreKind::default(), Interaction::Allow).unwrap();
+        let opener =
+            TidalOpener::from_store(tidal::build_http_client().unwrap(), store, Quality::Hires);
+        let catalog = opener.catalog();
+
+        let seed = "33723914";
+        let radio = catalog.track_radio(seed.into(), 0, 10).await.unwrap();
+        println!(
+            "radio of {seed}: {} of {}: {:?}",
+            radio.items.len(),
+            radio.total,
+            radio
+                .items
+                .iter()
+                .map(|t| (&t.id, &t.title))
+                .collect::<Vec<_>>()
+        );
+        assert!(!radio.items.is_empty());
+        assert!(
+            radio.items.iter().any(|t| t.id != seed),
+            "a real radio has more than just the seed back"
         );
     }
 }
