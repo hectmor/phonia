@@ -12,24 +12,26 @@
 use crate::browse::Phase;
 use crate::cursor::Cursor;
 use crate::list::Found;
-use phonia_ipc::{AlbumSummary, FolderEntry, Payload, Request, TrackSummary};
+use phonia_ipc::{AlbumSummary, ArtistSummary, FolderEntry, Payload, Request, TrackSummary};
 
 /// How many of each list one page asks for.
 pub const PAGE_SIZE: u32 = 50;
 
-/// The three lists the library has.
+/// The four lists the library has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LibraryTab {
     #[default]
     FavoriteTracks,
     FavoriteAlbums,
+    FavoriteArtists,
     Playlists,
 }
 
 impl LibraryTab {
-    pub const ALL: [LibraryTab; 3] = [
+    pub const ALL: [LibraryTab; 4] = [
         LibraryTab::FavoriteTracks,
         LibraryTab::FavoriteAlbums,
+        LibraryTab::FavoriteArtists,
         LibraryTab::Playlists,
     ];
 
@@ -37,6 +39,7 @@ impl LibraryTab {
         match self {
             LibraryTab::FavoriteTracks => "Favorite tracks",
             LibraryTab::FavoriteAlbums => "Favorite albums",
+            LibraryTab::FavoriteArtists => "Favorite artists",
             LibraryTab::Playlists => "Your playlists",
         }
     }
@@ -65,6 +68,7 @@ impl LibraryTab {
 pub enum Selected<'a> {
     Track(&'a TrackSummary),
     Album(&'a AlbumSummary),
+    Artist(&'a ArtistSummary),
     /// A row of the Playlists tab, now the root of TIDAL's own folder tree: either a sub-folder
     /// or a playlist (which may be one only followed, not owned -- see
     /// `phonia_core::catalog::FolderEntry`'s own doc for why).
@@ -75,13 +79,22 @@ pub enum Selected<'a> {
 pub struct LibraryState {
     /// Counts the one request that loads favorite tracks and favorite albums (`Payload::Library`),
     /// and guards a late answer to it after the connection was lost meanwhile (the same way a
-    /// search's generation does). Also guards the root folder's own initial fetch below, fired at
-    /// the same moment: both are invalidated together on a reconnect.
+    /// search's generation does). Also guards the root folder's own initial fetch below, and the
+    /// favorite artists' own, both fired at the same moment: all three are invalidated together
+    /// on a reconnect.
     pub generation: u64,
     pub phase: Phase,
     pub tab: LibraryTab,
     pub favorite_tracks: Found<TrackSummary>,
     pub favorite_albums: Found<AlbumSummary>,
+    /// The logged-in user's favorite artists. Fetched by its own request (`artists_request`),
+    /// since it is a separate `Request::Artists`/`Payload::Artists` pair (since 1.14), not part
+    /// of `Payload::Library`'s own answer -- so a problem with this one list cannot take the
+    /// other two down with it.
+    pub favorite_artists: Found<ArtistSummary>,
+    /// Whether favorite artists' own first page has arrived: independent of `phase`, since it is
+    /// a separate request that can succeed or fail on its own.
+    pub artists_phase: Phase,
     /// The root of "My Collection" (the Playlists tab): sub-folders and playlists, in the order
     /// TIDAL's own API already sorts them. Fetched by its own request (`playlist_request`), not
     /// `Payload::Library`'s own `my_playlists` field -- that field is folder-unaware (a flat,
@@ -94,8 +107,8 @@ pub struct LibraryState {
 
 impl LibraryState {
     /// A library about to be loaded, and the request that loads favorite tracks and favorite
-    /// albums. The root folder (the Playlists tab) needs a second, separate request: see
-    /// `playlist_request`.
+    /// albums. The root folder (the Playlists tab) and favorite artists each need their own,
+    /// separate request: see `playlist_request` and `artists_request`.
     pub fn new() -> (Self, Request) {
         (
             Self {
@@ -104,6 +117,8 @@ impl LibraryState {
                 tab: LibraryTab::default(),
                 favorite_tracks: Found::default(),
                 favorite_albums: Found::default(),
+                favorite_artists: Found::default(),
+                artists_phase: Phase::Loading,
                 playlists: Found::default(),
                 playlists_phase: Phase::Loading,
             },
@@ -123,11 +138,22 @@ impl LibraryState {
         }
     }
 
+    /// The request that loads the first page of favorite artists, fired at the same moment as
+    /// `new`'s own request.
+    pub fn artists_request() -> Request {
+        Request::Artists {
+            from: phonia_ipc::ArtistListRef::FavoriteArtists,
+            offset: 0,
+            limit: Some(PAGE_SIZE),
+        }
+    }
+
     /// Where the cursor of each list is, to tell whether a key moved one.
-    pub fn list_cursors(&self) -> [Cursor; 3] {
+    pub fn list_cursors(&self) -> [Cursor; 4] {
         [
             self.favorite_tracks.cursor,
             self.favorite_albums.cursor,
+            self.favorite_artists.cursor,
             self.playlists.cursor,
         ]
     }
@@ -142,6 +168,10 @@ impl LibraryState {
             LibraryTab::FavoriteAlbums => (
                 &mut self.favorite_albums.cursor,
                 self.favorite_albums.items.len(),
+            ),
+            LibraryTab::FavoriteArtists => (
+                &mut self.favorite_artists.cursor,
+                self.favorite_artists.items.len(),
             ),
             LibraryTab::Playlists => (&mut self.playlists.cursor, self.playlists.items.len()),
         }
@@ -188,10 +218,29 @@ impl LibraryState {
         self.playlists_phase = Phase::Failed(reason);
     }
 
+    /// Takes the daemon's answer to `artists_request`: favorite artists' first page. `false` if
+    /// it was something else.
+    pub fn finish_artists(&mut self, payload: Payload) -> bool {
+        let Payload::Artists { page, .. } = payload else {
+            self.fail_artists(
+                "the daemon answered something other than a list of artists".to_string(),
+            );
+            return false;
+        };
+        self.favorite_artists = Found::from_page(page);
+        self.artists_phase = Phase::Done;
+        true
+    }
+
+    pub fn fail_artists(&mut self, reason: String) {
+        self.artists_phase = Phase::Failed(reason);
+    }
+
     /// Whether the tab shown has finished its own (possibly separate) initial load.
     fn tab_ready(&self, tab: LibraryTab) -> bool {
         match tab {
             LibraryTab::Playlists => self.playlists_phase == Phase::Done,
+            LibraryTab::FavoriteArtists => self.artists_phase == Phase::Done,
             LibraryTab::FavoriteTracks | LibraryTab::FavoriteAlbums => self.phase == Phase::Done,
         }
     }
@@ -213,6 +262,11 @@ impl LibraryState {
                 offset: self.favorite_albums.next_offset()?,
                 limit: Some(PAGE_SIZE),
             },
+            LibraryTab::FavoriteArtists => Request::Artists {
+                from: phonia_ipc::ArtistListRef::FavoriteArtists,
+                offset: self.favorite_artists.next_offset()?,
+                limit: Some(PAGE_SIZE),
+            },
             LibraryTab::Playlists => Request::PlaylistFolder {
                 folder: None,
                 offset: self.playlists.next_offset()?,
@@ -230,6 +284,9 @@ impl LibraryState {
             (LibraryTab::FavoriteAlbums, Payload::Albums { page, .. }) => {
                 self.favorite_albums.append(Some(page))
             }
+            (LibraryTab::FavoriteArtists, Payload::Artists { page, .. }) => {
+                self.favorite_artists.append(Some(page))
+            }
             (LibraryTab::Playlists, Payload::PlaylistFolder { page, .. }) => {
                 self.playlists.append(Some(page))
             }
@@ -242,6 +299,7 @@ impl LibraryState {
         match tab {
             LibraryTab::FavoriteTracks => self.favorite_tracks.loading = false,
             LibraryTab::FavoriteAlbums => self.favorite_albums.loading = false,
+            LibraryTab::FavoriteArtists => self.favorite_artists.loading = false,
             LibraryTab::Playlists => self.playlists.loading = false,
         }
     }
@@ -259,6 +317,11 @@ impl LibraryState {
                 .items
                 .get(self.favorite_albums.cursor.selected())
                 .map(Selected::Album),
+            LibraryTab::FavoriteArtists => self
+                .favorite_artists
+                .items
+                .get(self.favorite_artists.cursor.selected())
+                .map(Selected::Artist),
             LibraryTab::Playlists => self
                 .playlists
                 .items
@@ -268,15 +331,21 @@ impl LibraryState {
     }
 
     /// The connection went away: if it was still loading, this (and the root folder's own
-    /// request) will never be answered, and if either were, late, the answer must not count.
+    /// request, and favorite artists' own) will never be answered, and if any were, late, the
+    /// answer must not count.
     pub fn connection_lost(&mut self) {
-        let was_loading = self.phase == Phase::Loading || self.playlists_phase == Phase::Loading;
+        let was_loading = self.phase == Phase::Loading
+            || self.playlists_phase == Phase::Loading
+            || self.artists_phase == Phase::Loading;
         if self.phase == Phase::Loading {
             self.phase = Phase::Failed("the connection to the daemon was lost".to_string());
         }
         if self.playlists_phase == Phase::Loading {
             self.playlists_phase =
                 Phase::Failed("the connection to the daemon was lost".to_string());
+        }
+        if self.artists_phase == Phase::Loading {
+            self.artists_phase = Phase::Failed("the connection to the daemon was lost".to_string());
         }
         if was_loading {
             self.generation += 1;
@@ -288,6 +357,7 @@ impl LibraryState {
         match tab {
             LibraryTab::FavoriteTracks => self.favorite_tracks.total,
             LibraryTab::FavoriteAlbums => self.favorite_albums.total,
+            LibraryTab::FavoriteArtists => self.favorite_artists.total,
             LibraryTab::Playlists => self.playlists.total,
         }
     }
@@ -372,18 +442,23 @@ mod tests {
             "the late answer will not match"
         );
 
-        // One already loaded (both the library and the root folder) is not touched by a later
-        // disconnect.
+        // One already loaded (the library, the root folder, and favorite artists) is not touched
+        // by a later disconnect.
         let (mut done, _) = LibraryState::new();
         done.finish(library_payload(vec![track("1")], 1));
         done.finish_playlists(Payload::PlaylistFolder {
             folder: None,
             page: page(vec![], 0),
         });
+        done.finish_artists(Payload::Artists {
+            from: phonia_ipc::ArtistListRef::FavoriteArtists,
+            page: page(vec![], 0),
+        });
         let generation = done.generation;
         done.connection_lost();
         assert_eq!(done.phase, Phase::Done);
         assert_eq!(done.playlists_phase, Phase::Done);
+        assert_eq!(done.artists_phase, Phase::Done);
         assert_eq!(done.generation, generation);
     }
 
@@ -394,9 +469,16 @@ mod tests {
             LibraryTab::FavoriteTracks.next(),
             LibraryTab::FavoriteAlbums
         );
-        assert_eq!(LibraryTab::FavoriteAlbums.next(), LibraryTab::Playlists);
+        assert_eq!(
+            LibraryTab::FavoriteAlbums.next(),
+            LibraryTab::FavoriteArtists
+        );
+        assert_eq!(LibraryTab::FavoriteArtists.next(), LibraryTab::Playlists);
         assert_eq!(LibraryTab::Playlists.next(), LibraryTab::Playlists);
-        assert_eq!(LibraryTab::Playlists.previous(), LibraryTab::FavoriteAlbums);
+        assert_eq!(
+            LibraryTab::Playlists.previous(),
+            LibraryTab::FavoriteArtists
+        );
         assert_eq!(
             LibraryTab::FavoriteTracks.previous(),
             LibraryTab::FavoriteTracks

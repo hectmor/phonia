@@ -777,6 +777,20 @@ three already fail or succeed together through one `tokio::join!`). No TUI chang
 Library "Favorite artists" tab (part 2), then Home's own block (part 3); recently played (a real
 new mechanism — nothing today stores or exposes local play history) follows in parts 4-6.
 
+Part 2 adds the Library "Favorite artists" tab: `LibraryTab` grows to four
+(tracks, albums, artists, playlists), `LibraryState` gains its own
+`favorite_artists`/`artists_phase` loaded by `artists_request()`, fired at
+the same moment as the library and the playlist-folder requests (a third,
+independent fetch -- the same reason the Playlists tab already has its
+own). Enter on a favorite artist opens its page nested on the library's
+own stack, exactly like a favorite album does; `a`/`A` add its top tracks
+whole. Found and fixed a real bug along the way: `open_artist_view`
+pushed onto `search_views` unconditionally instead of through
+`active_stack_mut`, harmless only because Search was its one caller --
+opening an artist from Library (now possible) would have put the view on
+the wrong stack, the same shape of bug #140 and `find_view` (#139 part 4)
+already taught to watch for.
+
 ## Conventions this file assumes
 
 - Issues are closed by the project owner by hand after their pull requests

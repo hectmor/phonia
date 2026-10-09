@@ -1761,12 +1761,30 @@ mod tests {
                 }),
             },
         );
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::LibraryArtists { generation: 0 },
+                result: Ok(phonia_ipc::Payload::Artists {
+                    from: phonia_ipc::ArtistListRef::FavoriteArtists,
+                    page: phonia_ipc::Page {
+                        items: vec![phonia_ipc::ArtistSummary {
+                            id: "780".into(),
+                            name: "Korn".into(),
+                            picture: None,
+                        }],
+                        total: 1,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
         state
     }
 
     #[test]
     fn before_the_library_loads_it_says_so() {
-        let text = screen(&in_the_library(), 80, 14);
+        let text = screen(&in_the_library(), 100, 14);
         assert!(text.contains("Loading..."), "{text}");
         assert!(
             text.contains("Favorite tracks") && text.contains("Your playlists"),
@@ -1802,8 +1820,24 @@ mod tests {
         let text = screen(&state, 120, 14);
         assert!(text.contains("Favorite tracks (42)"), "{text}");
         assert!(text.contains("Favorite albums (1)"), "{text}");
+        assert!(text.contains("Favorite artists (1)"), "{text}");
         assert!(text.contains("Your playlists (1)"), "{text}");
         assert!(text.contains("1. Korn - Freak On a Leash"), "{text}");
+    }
+
+    #[test]
+    fn the_favorite_artists_tab_lists_them_and_opens_one() {
+        use crate::app::Tag;
+        let mut state = with_library();
+        press(&mut state, 'l');
+        press(&mut state, ']'); // favorite albums
+        press(&mut state, ']'); // favorite artists
+        let text = screen(&state, 120, 14);
+        assert!(text.contains("1. Korn"), "{text}");
+        let (tag, _) = tagged_request(press_key(&mut state, KeyCode::Enter));
+        assert!(matches!(tag, Tag::View { .. }));
+        let text = screen(&state, 100, 14);
+        assert!(text.contains("Library \u{203a} Korn"), "{text}");
     }
 
     #[test]
@@ -1866,6 +1900,7 @@ mod tests {
         );
         press(&mut state, 'l');
         press(&mut state, ']'); // favorite albums
+        press(&mut state, ']'); // favorite artists
         press(&mut state, ']'); // playlists (the root of "My Collection")
         let text = screen(&state, 100, 14);
         assert!(text.contains("Moods/ (1 item)"), "root row: {text}");
