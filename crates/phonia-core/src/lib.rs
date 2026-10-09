@@ -16,5 +16,7 @@ mod session;
 pub mod stream;
 pub mod tidal;
 
-#[cfg(test)]
-mod testutil;
+/// Shared by in-crate unit tests, and by other crates' own integration tests (`phoniad`'s MPRIS
+/// tests, for one) through the `test-support` feature, enabled only as a dev-dependency.
+#[cfg(any(test, feature = "test-support"))]
+pub mod testutil;

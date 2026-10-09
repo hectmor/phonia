@@ -13,3 +13,7 @@ phonia-ipc.workspace = true
 serde_json.workspace = true
 tidlers.workspace = true
 tokio.workspace = true
+zbus.workspace = true
+
+[dev-dependencies]
+phonia-core = { workspace = true, features = ["test-support"] }

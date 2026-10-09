@@ -2911,3 +2911,77 @@ Nothing from this module is called anywhere yet — `mpris::mod` only declares `
 and `phoniad::lib` adds `pub mod mpris;`, both otherwise inert. Part 3 is the zbus adapter that
 actually holds a `Model`, subscribes to `Daemon::subscribe()`, and puts any of this on the
 session bus.
+
+## 2026-10-09 — #34 part 3: the zbus adapter, read-only
+
+Added `crates/phoniad/src/mpris/service.rs`, wiring the pure `mpris::model` from part 2 to a real
+`org.mpris.MediaPlayer2.phonia` service on the session bus — zbus becomes a direct `phoniad`
+dependency for the first time (already pulled in transitively via `phonia-core`, so no new crate
+in the workspace). `main.rs` starts it right after the outputs-watch task, only when `[daemon]
+mpris` is on, and keeps the returned `Handle` alive for the rest of `run()` so dropping it at
+shutdown closes the connection and frees the name.
+
+**Shape, copied from #13's `output/dbus.rs` almost directly**: a unit `Root` struct and a
+`Player` struct holding the one `Model` the whole service shares, each a plain
+`#[interface] impl` block (zbus's own object-server macro, not a hand-rolled dispatcher). A
+background `tokio::spawn`'d task holds the `InterfaceRef<Player>` the object server itself
+handed back after registering it, and mutates the model through `InterfaceRef::get_mut()` —
+the exact same lock the object server takes to serve a property read, so a client reading
+`Metadata` mid-update can never see a half-applied event. Subscribing to `Daemon::subscribe()`
+and reading `Daemon::snapshot()` for the initial state, exactly as planned, keeps `Daemon::fan_in`
+itself untouched: MPRIS is purely an additive new consumer of the same event stream IPC clients
+already get.
+
+**Deliberately not wired up (this is what makes it "part 3, not part 4/5")**: every `Player`
+transport method (`Play`, `Pause`, `PlayPause`, `Stop`, `Next`, `Previous`, `Seek`,
+`SetPosition`, `OpenUri`) and both `Root` methods (`Raise`, `Quit`) are literal no-op bodies, and
+every `Can*` property getter (`CanGoNext`/`Previous`/`Play`/`Pause`/`Seek`, `CanQuit`,
+`CanRaise`) is a hardcoded `false` — regardless of what `model::Model` itself would say, since a
+client must never be invited to press a transport button that currently does nothing. The one
+exception is `CanControl`, hardcoded `true` for the whole lifetime of the process (the spec's own
+invariant: this player does implement MPRIS, independent of which individual capability is on).
+Part 4 flips the `Can*` getters to read the model and fills the transport methods in with
+`self.model.*_request()` (already written in part 2) routed through `Daemon::handle`; part 5
+does the same for `Seek`/`SetPosition` and adds the writable `Volume`/`LoopStatus`/`Shuffle`
+properties. Metadata, `PlaybackStatus`, `Volume`, `LoopStatus`, `Shuffle` and `Position` are
+genuinely live from here on — a lock-screen widget or `playerctl metadata` already works after
+this PR, just with the corresponding buttons silently doing nothing.
+
+**Batching, resync, and the one signal that is never batched**: an incoming `ipc::Event` is
+applied to the model and diffed (`Changed`, from part 2); only the properties that model
+actually reports changed — and only the five this service tracks (`PlaybackStatus`, `Metadata`,
+`Volume`, `LoopStatus`, `Shuffle`; deliberately not the still-hardcoded `Can*` ones) — go into one
+manually-built `HashMap<&str, Value>` and one `zbus::fdo::Properties::properties_changed` call, so
+a track change that also starts playback announces both in the same signal a real client sees as
+one atomic update. A subscriber that falls behind the broadcast channel (`RecvError::Lagged`)
+resyncs from a fresh `Daemon::snapshot()` and reports every tracked property as changed, the same
+"full resync beats a partial, possibly-wrong diff" rule the IPC side already uses for its own
+lagged clients. `Seeked` is its own signal, never folded into the batch, fired whenever `Changed`
+carries a `seeked_us` (today only from `ipc::Event::Seeked`, which nothing yet triggers — that is
+part 5 — but the signal plumbing itself is already correct and tested via `model.rs`'s own unit
+test for the field).
+
+**The bus name and startup**: `org.mpris.MediaPlayer2.phonia` first, `...phonia.instance<pid>` if
+that is taken, skipping MPRIS entirely (one logged line, `main.rs` carries on) if even that
+fails — exactly the approved decision. The whole connection attempt, including the bus lookup, is
+wrapped in a two-second timeout so a stuck session-bus activation cannot hold up `phoniad`'s own
+startup; the same "fails soft, never blocks or crashes" rule #31's hardware-mixer check already
+established, since the daemon must stay usable headless or on a minimal install with no session
+bus at all.
+
+**Testing**: `crates/phoniad/tests/mpris.rs`, five `#[ignore = "needs dbus-daemon"]` tests against
+a private bus (never the user's real session bus), mirroring `output/dbus.rs`'s own tests almost
+exactly — metadata and `PlaybackStatus` are served once a track is genuinely playing; every
+`Can*` flag reads `false` and every transport method leaves the daemon's `Status` byte-for-byte
+unchanged; a real `Request::Pause` produces one batched `PropertiesChanged` signal; `Root` never
+quits or raises the daemon even when asked directly; the bus name falls back to the instance-pid
+form when another connection already holds the plain one. Reaching `testutil::Bus` from a
+different crate's integration tests needed one new piece of plumbing: `phonia-core` gained a
+`test-support` Cargo feature (`[features] test-support = []`) gating `pub mod testutil` (it was
+`#[cfg(test)]`-private before), and `phoniad/Cargo.toml` depends on `phonia-core` a second time,
+under `[dev-dependencies]`, with that feature on — a dev-dependency's features apply only to test
+and bench builds, never to a normal lib or bin build, so nothing test-only reaches a release
+binary. `service::start` (production: the session bus, swallows its own error into one logged
+line) stays separate from the new `service::start_on_bus` (any bus address, reports the error) —
+the same `on_bus`-builder split `DbusReserver` already uses — so the tests can assert on failure
+without needing a feature gate of their own on `phoniad` itself.

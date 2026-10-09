@@ -8,7 +8,7 @@
 use phonia_ipc::{Event, ItemId, Queue, Repeat, Request, SeekTarget, State, Status, Volume};
 
 /// The object path for `mpris:trackid` when nothing is current, per the MPRIS spec.
-const NO_TRACK: &str = "/org/mpris/MediaPlayer2/TrackList/NoTrack";
+pub(crate) const NO_TRACK: &str = "/org/mpris/MediaPlayer2/TrackList/NoTrack";
 
 /// The pixel size asked for an `mpris:artUrl` -- big enough for a lock-screen widget.
 const ART_PX: u32 = 640;
