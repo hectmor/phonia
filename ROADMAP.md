@@ -816,6 +816,22 @@ on first. New `Request::RecentlyPlayed`/`Payload::RecentlyPlayed`/
 1.15, not gated on `catalog`), plus `phonia ctl recent` so the feature
 is usable before the TUI catches up in part 6.
 
+Part 5 saves the log across a `phoniad` restart: `recent::state_dir`
+(`$XDG_STATE_HOME/phonia`), `recent::load`/`save` (atomic temp-file-
+then-rename, the same precaution `auth::store`'s own session file
+takes), loaded at `Daemon::start` and saved by a background
+`spawn_blocking` task whenever the log actually changes. `recent_path`
+moved into `DaemonParts` rather than resolved inside `Daemon::start`
+itself, matching how every other filesystem/network dependency
+(`catalog`, `play_log`, the session store) already arrives pre-resolved
+-- also what makes it possible to test at all: a test fixture can now
+point two separate daemons at the same temp file and confirm the
+second one starts already knowing what the first played, a real
+round-trip through the filesystem, not just the pure `load`/`save`
+functions in isolation. Every other existing test fixture passes `None`
+on purpose, so running the test suite never touches a real machine's
+actual state directory.
+
 ## Conventions this file assumes
 
 - Issues are closed by the project owner by hand after their pull requests

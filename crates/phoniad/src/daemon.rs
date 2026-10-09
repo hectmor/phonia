@@ -22,6 +22,7 @@ use phonia_core::queue::{ItemId, Queue, QueueSnapshot, QueueTrack};
 use phonia_core::recent::{PlayedTrack, Tracker as RecentTracker};
 use phonia_ipc as ipc;
 use phonia_ipc::{AddAt, ErrorCode, NewTrack, Payload, ProtocolError, Reply, Request};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -121,6 +122,9 @@ pub struct DaemonParts {
     pub catalog: Option<Arc<dyn Catalog>>,
     /// Reports finished plays to TIDAL, if `[tidal] report_plays` is on.
     pub play_log: Option<PlayLog>,
+    /// Where the recently played log is saved and loaded from at startup; `None` skips
+    /// persistence entirely (no state directory on this platform, or a test that wants none).
+    pub recent_path: Option<PathBuf>,
 }
 
 pub struct Daemon {
@@ -157,6 +161,10 @@ pub struct Daemon {
     /// and `Request::RecentlyPlayed`, so a plain lock is enough (same reasoning as `play_log`'s
     /// own tracker above).
     recent: Mutex<RecentTracker>,
+    /// Where the recently played log is saved, if this platform has a state directory at all
+    /// (see `phonia_core::recent::state_dir`). `None` just means persistence is skipped --
+    /// never a reason to fail starting the daemon.
+    recent_path: Option<PathBuf>,
 }
 
 impl Daemon {
@@ -177,6 +185,11 @@ impl Daemon {
 
         let (events, _) = broadcast::channel(EVENT_BACKLOG);
         let (shutdown, _) = watch::channel(false);
+        let recent = parts
+            .recent_path
+            .as_deref()
+            .map(phonia_core::recent::load)
+            .unwrap_or_default();
         let daemon = Arc::new(Daemon {
             controller,
             outputs: parts.outputs,
@@ -199,7 +212,8 @@ impl Daemon {
             last_report: Mutex::new(None),
             lyrics_cache: Mutex::new(LyricsCache::new()),
             autoplay: Mutex::new(autoplay::Autoplay::default()),
-            recent: Mutex::new(RecentTracker::new()),
+            recent: Mutex::new(RecentTracker::seeded(recent)),
+            recent_path: parts.recent_path,
         });
 
         // The volume can be changed from the desktop's mixer too; the daemon follows and announces it.
@@ -345,12 +359,21 @@ impl Daemon {
             engine::Event::TrackEnded { reason, .. } => recent.ended(*reason),
             _ => false,
         };
-        let items = changed.then(|| recent.recent().items().to_vec());
+        let snapshot = changed.then(|| recent.recent().clone());
         drop(recent);
-        if let Some(items) = items {
+        if let Some(snapshot) = snapshot {
             self.publish(|_| ipc::Event::RecentlyPlayedChanged {
-                items: items.iter().map(convert::played_track).collect(),
+                items: snapshot.items().iter().map(convert::played_track).collect(),
             });
+            if let Some(path) = self.recent_path.clone() {
+                tokio::task::spawn_blocking(move || {
+                    if let Err(error) = phonia_core::recent::save(&path, &snapshot) {
+                        eprintln!(
+                            "phonia: saving {path:?}: {error} -- recently played may not survive a restart"
+                        );
+                    }
+                });
+            }
         }
     }
 

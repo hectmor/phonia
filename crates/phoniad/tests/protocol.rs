@@ -45,12 +45,19 @@ async fn fixture_with(
     blocking: bool,
     options: phonia_core::engine::Options,
 ) -> Fixture {
-    fixture_full(name, blocking, options, None).await
+    fixture_full(name, blocking, options, None, None).await
 }
 
 /// A fixture with a catalog of the test's choosing (none, like a daemon with no TIDAL login).
 async fn fixture_with_catalog(name: &str, catalog: Option<Arc<dyn Catalog>>) -> Fixture {
-    fixture_full(name, false, Default::default(), catalog).await
+    fixture_full(name, false, Default::default(), catalog, None).await
+}
+
+/// A fixture that persists its recently played log to `recent_path`, so a second fixture pointed
+/// at the same path can confirm it survived -- no test fixture writes to the real state
+/// directory by default (see `fixture_full`'s own `None`), only this one, into a temp file.
+async fn fixture_with_recent_path(name: &str, recent_path: PathBuf) -> Fixture {
+    fixture_full(name, false, Default::default(), None, Some(recent_path)).await
 }
 
 async fn fixture_full(
@@ -58,6 +65,7 @@ async fn fixture_full(
     blocking: bool,
     options: phonia_core::engine::Options,
     catalog: Option<Arc<dyn Catalog>>,
+    recent_path: Option<PathBuf>,
 ) -> Fixture {
     let sinks = if blocking {
         FakeSinkFactory::blocking()
@@ -114,6 +122,7 @@ async fn fixture_full(
         engine: options,
         replaygain: phonia_core::replaygain::Mode::default(),
         autoplay: false,
+        recent_path,
     })
     .unwrap();
     let dir = std::env::temp_dir().join(format!(
@@ -3076,4 +3085,50 @@ async fn a_track_cut_short_well_under_the_threshold_is_not_recently_played() {
         "the interrupted track is not in {items:?}"
     );
     f.finish().await;
+}
+
+/// The log is saved by a background task (`spawn_blocking`, fire-and-forget) whenever it
+/// changes, and loaded back at startup -- a second daemon pointed at the same file starts
+/// already knowing what the first one played.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recently_played_survives_a_restart_when_saved_to_disk() {
+    let dir = std::env::temp_dir().join(format!(
+        "phoniad-recent-persist-test-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join("recently_played.json");
+
+    let f = fixture_with_recent_path("recent-persist-1", path.clone()).await;
+    let client = f.client().await;
+    let (_, mut events) = client.subscribe().await.unwrap();
+    let source = f.wav("song.wav", 20_000);
+    added(client.request(add(&[&source], AddAt::End)).await.unwrap());
+    client.request(Request::Play { item: None }).await.unwrap();
+    events_until(&mut events, |event| matches!(event, Event::QueueExhausted)).await;
+    f.finish().await;
+
+    // The save itself is fire-and-forget (`spawn_blocking`, not awaited by anything above): give
+    // it a moment to land rather than assuming it already has.
+    let mut saved = phonia_core::recent::load(&path);
+    for _ in 0..40 {
+        if !saved.items().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        saved = phonia_core::recent::load(&path);
+    }
+    assert_eq!(saved.items().len(), 1, "the first daemon's play was saved");
+
+    // A second daemon, pointed at the same file, starts already knowing it.
+    let f2 = fixture_with_recent_path("recent-persist-2", path.clone()).await;
+    let client2 = f2.client().await;
+    let Payload::RecentlyPlayed { items } = client2.request(Request::RecentlyPlayed).await.unwrap()
+    else {
+        panic!("not recently played");
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].source, source);
+    f2.finish().await;
+    let _ = std::fs::remove_dir_all(&dir);
 }

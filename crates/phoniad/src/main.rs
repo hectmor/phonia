@@ -152,6 +152,8 @@ async fn run(args: Args) -> Result<()> {
         },
         replaygain: settings.replaygain.value,
         autoplay: settings.autoplay.value,
+        recent_path: phonia_core::recent::state_dir()
+            .map(|dir| dir.join(phonia_core::recent::STATE_FILE)),
     })?;
 
     daemon.refresh_route().await;
