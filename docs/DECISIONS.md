@@ -2868,3 +2868,46 @@ transport control (Play/Pause/PlayPause/Stop/Next/Previous go through `Daemon::h
 `Can*` flags turn on) — media keys work. Part 5 (last, closes #34) seeking and the writable
 properties (`Seek`/`SetPosition`/`Seeked` signal, writable Volume/LoopStatus/Shuffle), plus the
 README feature section. Parts 4 and 5 may merge into one PR if four PRs are preferred over five.
+
+## 2026-10-09 — #34 part 2: the pure `mpris::model` policy module
+
+Added `crates/phoniad/src/mpris/model.rs`, the pure half of the split the approved plan called
+for: no zbus, no D-Bus, no async, nothing wired to a real bus — a plain `Model` built from
+`(&Status, &Queue)` via `from_snapshot` and kept current by `apply(&Event) -> Changed`, the same
+pure/synchronous shape `autoplay.rs` already uses so it can be unit-tested directly with plain
+`phonia_ipc` values. 21 new tests, no new workspace dependency (zbus is not pulled into `phoniad`
+yet — that is part 3).
+
+What it actually computes, settled by the already-approved decisions, not new ones:
+
+- `PlaybackStatus::collapse` implements the "sticky" rule exactly as decided — verified in tests
+  against both the originally-cited edge cases (a seek while paused does not jump to Playing; a
+  pause requested mid-load lands back in Paused once the load settles) and a third one found
+  while writing the model: a `TrackStarted` always forces `Playing` outright, since a gapless
+  join sends no `StateChanged` at all and the track playing *is* the only evidence.
+- `Metadata` building: the object-path track id falls back to `Queue::current` when an event's
+  own `item_id` is absent (snapshot construction has no event to read it from); `art_url` goes
+  through `phonia_ipc::image::url(AlbumCover, ..., 640)`, `None` on an empty or malformed cover
+  id exactly as that function already defines; `xesam:url` is only ever built for a `file:`
+  source, reformatted into a real three-slash `file://` URI; `xesam:artist` wraps the wire's
+  already-joined string as a one-element `Vec` and is never split on `", "`, since that would
+  wrongly break a name like "Earth, Wind & Fire" into two artists.
+- `Raw::can_go_next`/`can_go_previous` match the "ignore autoplay, computed from the order alone"
+  decision: false only when the order is non-empty, repeat is off, and the current entry is
+  already last; true the instant nothing is current yet (there is necessarily more ahead).
+  `can_go_previous` is true as soon as anything is current, since Previous always does something
+  (restart vs. real history) that the queue alone can't predict ahead of time.
+- Volume mapping matches the decision exactly: no hardware control reads 1.0 and is not
+  controllable; muted reads 0.0 but stays controllable; `set_volume_requests` sends a plain
+  `SetVolume{0}` for exactly 0.0, or `SetVolume{percent}` **and** `SetMute{false}` for anything
+  above it, so a slider never silently snaps back while a stale mute flag lingers underneath.
+- Every MPRIS call maps onto the existing `Request` enum with no new daemon-side request: `Play`/
+  `PlayPause` pick `Request::Play{None}` from Stopped (nothing to resume) vs. `Resume`/
+  `TogglePause` otherwise; `SetPosition` is refused (returns `None`, not an error) for the wrong
+  `track_id`, a negative position, or one past the known track length, exactly as the MPRIS spec
+  requires; `Seek`'s signed microsecond offset becomes `SeekTarget::Forward`/`Backward`.
+
+Nothing from this module is called anywhere yet — `mpris::mod` only declares `pub mod model;`
+and `phoniad::lib` adds `pub mod mpris;`, both otherwise inert. Part 3 is the zbus adapter that
+actually holds a `Model`, subscribes to `Daemon::subscribe()`, and puts any of this on the
+session bus.
