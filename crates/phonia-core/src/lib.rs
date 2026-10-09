@@ -10,6 +10,7 @@ pub mod openers;
 pub mod output;
 pub mod play_log;
 pub mod queue;
+pub mod recent;
 pub mod replaygain;
 mod session;
 pub mod stream;

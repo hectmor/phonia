@@ -263,6 +263,22 @@ pub struct QueueItem {
     pub cover: Option<String>,
 }
 
+/// One entry of the recently played log (since 1.15, #144): kept by the daemon in memory (and,
+/// once it is saved, across its own restarts), not by TIDAL -- covers local files too, unlike
+/// `play_log`'s own TIDAL-only reporting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayedTrack {
+    pub source: String,
+    pub title: Option<String>,
+    #[serde(default)]
+    pub artist: Option<String>,
+    pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub cover: Option<String>,
+    /// When this play started, milliseconds since the Unix epoch.
+    pub played_at_ms: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Repeat {

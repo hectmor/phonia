@@ -291,12 +291,13 @@ fn the_server_banner() {
                 CAP_VOLUME.into(),
                 CAP_GAPLESS.into(),
                 CAP_QUALITY.into(),
+                CAP_RECENTLY_PLAYED.into(),
                 CAP_CATALOG.into(),
                 CAP_LYRICS.into(),
                 CAP_AUTOPLAY.into(),
             ],
         }),
-        r#"{"type":"hello","protocol":{"major":1,"minor":14},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","catalog","lyrics","autoplay"]}"#,
+        r#"{"type":"hello","protocol":{"major":1,"minor":15},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","recently_played","catalog","lyrics","autoplay"]}"#,
     );
 }
 
@@ -1140,7 +1141,7 @@ fn versions_are_compatible_across_minors_but_not_majors() {
     assert!(v(1, 0).compatible_with(v(1, 7)));
     assert!(v(1, 7).compatible_with(v(1, 0)));
     assert!(!v(1, 0).compatible_with(v(2, 0)));
-    assert_eq!(PROTOCOL, v(1, 14));
+    assert_eq!(PROTOCOL, v(1, 15));
 }
 
 #[test]
@@ -1270,6 +1271,47 @@ fn the_favorite_artists_list_request_and_response_since_1_14() {
             from: ArtistListRef::Unknown,
             offset: 0,
             limit: None
+        }
+    );
+}
+
+#[test]
+fn the_recently_played_request_response_and_event_since_1_15() {
+    request(
+        1,
+        Request::RecentlyPlayed,
+        r#"{"id":1,"request":{"type":"recently_played"}}"#,
+    );
+    let played = PlayedTrack {
+        source: "tidal:33723914".into(),
+        title: Some("Here to Stay".into()),
+        artist: Some("Korn".into()),
+        duration_ms: Some(271_000),
+        cover: None,
+        played_at_ms: 1_700_000_000_000,
+    };
+    response(
+        2,
+        Reply::Ok(Payload::RecentlyPlayed {
+            items: vec![played.clone()],
+        }),
+        r#"{"type":"response","id":2,"ok":{"type":"recently_played","items":[{"source":"tidal:33723914","title":"Here to Stay","artist":"Korn","duration_ms":271000,"cover":null,"played_at_ms":1700000000000}]}}"#,
+    );
+    let json = serde_json::to_string(&ServerMessage::Event {
+        seq: 1,
+        event: Event::RecentlyPlayedChanged {
+            items: vec![played.clone()],
+        },
+    })
+    .unwrap();
+    let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        parsed,
+        ServerMessage::Event {
+            seq: 1,
+            event: Event::RecentlyPlayedChanged {
+                items: vec![played]
+            }
         }
     );
 }

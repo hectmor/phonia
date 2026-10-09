@@ -2613,3 +2613,58 @@ favorite albums and the playlist folder (every "press `j` N times to reach row X
 however many new rows came before it — the usual mechanical fallout of adding a block, not a
 behavior change), `view/mod.rs` (the block's own count and "See all" show). Full workspace green
 (351 phonia-tui tests, up from 347), fmt+clippy clean.
+
+**PR4 (recently played: core and daemon, in memory only), code complete**: new
+`phonia-core/src/recent.rs`. `PlayedTrack` (source/title/artist/duration_ms/cover/played_at_ms),
+`RecentlyPlayed` (a `Vec`, most recent first, `record()` dedupes by source — removes any existing
+entry with the same source before inserting at the front, then truncates to `MAX_RECENT` = 50),
+and `Tracker` (a pure state machine over `started`/`position`/`ended`, mirroring the shape of
+`play_log::SessionTracker` but deliberately much simpler — it only has to decide "has this been
+heard long enough", not build a session TIDAL would accept). **Simplification decided while
+implementing, consistent with decision 1's own tradeoff note**: `Tracker` does NOT replicate
+`SessionTracker`'s pause/resume/seek accounting. It just compares `engine::Event::Position`'s raw
+value against `MIN_HEARD_MS` (30s) directly — this is correct, not merely convenient, because
+`Position` itself already stalls while paused (its own doc comment: "sent about four times a
+second while playing, and also when a track starts, pauses or ends" — nothing fires again until
+it resumes), so a plain position check already excludes paused time by construction. A seek
+forward past the threshold counts; accepted, per the plan's own tradeoff, as fine for a list that
+is a local convenience, not anything reported anywhere. A track that ends `Interrupted`/`Failed`
+before crossing the threshold is simply dropped, the same "below the threshold, never happened"
+rule TIDAL's own reporting already follows; starting a new track silently drops whatever was
+pending and unrecorded for the old one (no displaced-session bookkeeping, unlike
+`SessionTracker`'s own `close_open` — recently-played has no obligation to account for every
+session, only to remember the ones that counted).
+
+Daemon side: a new `recent: Mutex<Tracker>` field, a plain lock (the same reasoning `play_log`'s
+own tracker already uses: only ever touched from `fan_in`, no async access). `note_recently_played`
+sits beside `note_play_log` in `fan_in`, for the identical reason given there: resolving the
+source has to happen against the exact queue snapshot at that moment, since a gapless join can
+move the queue on before a `TrackEnded` for the track it followed is even converted. Publishes
+`Event::RecentlyPlayedChanged` (the whole list, same shape `QueueChanged` already uses for the
+whole queue) only when `Tracker::position`/`::ended` actually recorded something, not on every
+position tick. New `CAP_RECENTLY_PLAYED` (protocol 1.15), deliberately NOT gated on `catalog`
+(it needs no TIDAL call, and local files are tracked too) — the daemon always advertises it,
+confirmed by a dedicated test with no catalog at all. `Request::RecentlyPlayed`/
+`Payload::RecentlyPlayed` added to `Daemon::handle` directly (not left to the `mutating` catch-all,
+which would have misrouted it to `change()`'s own defensive "reached the wrong handler" branch —
+the same category of mistake #140/`find_view`/`open_artist_view` already taught to check for,
+just caught before it shipped this time instead of after).
+
+Also added `phonia ctl recent`, printing the log (or "none yet"), with no standalone paging
+command needed (there is none — the daemon always returns the whole capped list). Decided to add
+this now, ahead of the TUI's own block (part 6), specifically so the feature is observable and
+testable end-to-end before the TUI catches up, the same reasoning that gave early CLI commands to
+several previous daemon-side features.
+
+Tests: 7 pure unit tests in `recent.rs` (recorded once not on every later position, a short track
+only via `Completed`, ending something already recorded by position is a no-op, starting a new
+track drops an unrecorded pending one, replaying moves an entry to the front with a fresh time
+instead of duplicating it, nothing resolved is never tracked, the log caps at `MAX_RECENT`); 4
+new `phoniad` integration tests (the capability is always advertised even with no catalog, a
+fresh daemon's log is empty, a REAL short synthetic track played to completion through the actual
+engine ends up recently played with `RecentlyPlayedChanged` observed on the wire, a track cut
+short immediately is not); a `ctl.rs` unit test for `format_recent`; golden wire tests for the
+new request/response/event, protocol bumped to 1.15 in the two hardcoded strings already pinning
+it. Full workspace green (phonia-core 569 tests up from 562, phoniad 80 up from 76), fmt+clippy
+clean. No TUI change yet — `State`/`home.rs` are untouched; parts 5 (persistence) and 6 (the Home
+block, closing #144) are next.

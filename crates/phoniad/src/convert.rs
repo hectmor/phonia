@@ -373,6 +373,17 @@ pub fn sink_report(report: &SinkReport, output: &str) -> ipc::SinkReport {
     }
 }
 
+pub fn played_track(entry: &phonia_core::recent::PlayedTrack) -> ipc::PlayedTrack {
+    ipc::PlayedTrack {
+        source: entry.source.clone(),
+        title: entry.title.clone(),
+        artist: entry.artist.clone(),
+        duration_ms: entry.duration_ms,
+        cover: entry.cover.clone(),
+        played_at_ms: entry.played_at_ms,
+    }
+}
+
 /// An engine event as clients see it. `queue` is the queue as it is now, to name entries.
 pub fn event(event: &engine::Event, queue: &QueueSnapshot) -> ipc::Event {
     match event {

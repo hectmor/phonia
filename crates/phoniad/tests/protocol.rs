@@ -2874,6 +2874,32 @@ async fn a_daemon_with_a_catalog_announces_the_autoplay_capability_but_not_witho
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_daemon_always_announces_the_recently_played_capability_even_without_a_catalog() {
+    let f = fixture_with_catalog("recent-hello-nocatalog", None).await;
+    let client = f.client().await;
+    assert!(
+        client
+            .server()
+            .capabilities
+            .iter()
+            .any(|c| c == CAP_RECENTLY_PLAYED)
+    );
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_daemon_has_nothing_recently_played_yet() {
+    let f = fixture("recent-empty", false).await;
+    let client = f.client().await;
+    let Payload::RecentlyPlayed { items } = client.request(Request::RecentlyPlayed).await.unwrap()
+    else {
+        panic!("not recently played");
+    };
+    assert!(items.is_empty());
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn asking_for_lyrics_does_not_hold_up_the_requests_behind_it() {
     let catalog = FakeCatalog::new()
         .with_lyrics("1", synced_lyrics())
@@ -2991,5 +3017,63 @@ async fn without_a_catalog_a_playlist_folder_cannot_be_answered() {
         .await
         .unwrap_err();
     assert_eq!(protocol_code(error), ErrorCode::Unsupported);
+    f.finish().await;
+}
+
+// ---- recently played -------------------------------------------------------------------------
+
+/// A track short enough to finish well under the 30s threshold still ends up recently played,
+/// since it was heard in full (`EndReason::Completed`) -- the rule #144 decided for a track
+/// that never reaches the threshold on its own `Position`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_short_track_played_to_completion_is_recently_played() {
+    let f = fixture("recent-completed", false).await;
+    let client = f.client().await;
+    let (_, mut events) = client.subscribe().await.unwrap();
+
+    let source = f.wav("song.wav", 20_000);
+    added(client.request(add(&[&source], AddAt::End)).await.unwrap());
+    client.request(Request::Play { item: None }).await.unwrap();
+
+    let seen = events_until(&mut events, |event| matches!(event, Event::QueueExhausted)).await;
+    assert!(seen.iter().any(
+        |(_, event)| matches!(event, Event::RecentlyPlayedChanged { items } if items.len() == 1)
+    ));
+
+    let Payload::RecentlyPlayed { items } = client.request(Request::RecentlyPlayed).await.unwrap()
+    else {
+        panic!("not recently played");
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].source, source);
+    assert_eq!(items[0].title.as_deref(), Some("song.wav"));
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_track_cut_short_well_under_the_threshold_is_not_recently_played() {
+    let f = fixture("recent-interrupted", false).await;
+    let client = f.client().await;
+
+    let (a, b) = (f.wav("a.wav", 200_000), f.wav("b.wav", 20_000));
+    let (ids, _, _) = added(client.request(add(&[&a, &b], AddAt::End)).await.unwrap());
+    let (_, mut events) = client.subscribe().await.unwrap();
+    client
+        .request(Request::Play { item: Some(ids[0]) })
+        .await
+        .unwrap();
+    events_until(&mut events, |e| matches!(e, Event::TrackStarted { .. })).await;
+    // Cuts it short almost immediately, long before the threshold.
+    client.request(Request::Next).await.unwrap();
+    events_until(&mut events, |e| matches!(e, Event::TrackStarted { .. })).await;
+
+    let Payload::RecentlyPlayed { items } = client.request(Request::RecentlyPlayed).await.unwrap()
+    else {
+        panic!("not recently played");
+    };
+    assert!(
+        items.iter().all(|item| item.source != a),
+        "the interrupted track is not in {items:?}"
+    );
     f.finish().await;
 }
