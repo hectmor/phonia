@@ -33,7 +33,7 @@ decisions log, and the issue tracker alone.
 | 4 — SONE-like features | [Fase 4](https://github.com/hectmor/phonia/milestone/5) | In progress (see below) |
 | 5 — Extras and packaging | [Fase 5](https://github.com/hectmor/phonia/milestone/6) | Partly started |
 | 6 — Layout and appearance | [Fase 6](https://github.com/hectmor/phonia/milestone/7) | In progress (see below) |
-| 7 — Home screen and discovery | [Fase 7](https://github.com/hectmor/phonia/milestone/8) | Started (see below) |
+| 7 — Home screen and discovery | [Fase 7](https://github.com/hectmor/phonia/milestone/8) | Code complete (see below) |
 
 Phases 0 and 1 delivered: TIDAL PKCE login, HiRes/DASH streaming, bit-perfect
 ALSA output, a playback engine and in-memory queue, the daemon and its IPC
@@ -105,7 +105,7 @@ the full design discussion and the decisions made.
 
 | Issue | What | Status |
 |---|---|---|
-| #139 | Home screen in the TUI (local data only) | In progress (see below) |
+| #139 | Home screen in the TUI (local data only) | Code complete (see below) |
 
 Brand new milestone, started right after #33. A lightweight home
 screen using only data phonia already fetches (resuming, favorites,
@@ -745,6 +745,20 @@ or once loaded it turns out to be empty -- two states that would otherwise need 
 track directly (the same one-track behavior Library's own Favorite Tracks tab already has) or
 jumps into Library on a "See all" row -- opening an album, a playlist or a folder is still part
 4's job, nested inside Home's own stack.
+
+Part 4 (last) wires that nested opening, **closing #139**: a new `home_views: Stack` field, added
+to `active_stack_mut`'s match alongside Search's and Library's own -- at which point essentially
+all of the existing "browsing an opened view" machinery (`act_in_view`, `act_on_track_row`,
+`browsed_row`, `move_cursor`'s browsing branch, `pop_view_if_browsing`, the artist-tab switch)
+turned out to need no Home-specific code at all, since every one of them is already written
+generically against whichever stack `active_stack_mut` returns. Enter on an album or a folder row
+now opens it (an album via `open_track_list`, a folder/playlist via the existing
+`act_on_folder_entry`, unchanged); `a`/`A` add without opening; `o` opens a favorite track's radio.
+A real bug was caught while testing this, the same shape as #140: `find_view` (which a `Request::
+Tracks`/`Request::PlaylistFolder` answer uses to find the view it belongs to by serial) checked
+only `search_views` and `library_views`, so an answer to a view opened from Home was silently
+dropped, leaving it stuck on "Loading" forever. Fixed by trying `home_views` too, same as #140's
+fix taught: a hardcoded two-stack list quietly breaks the moment a third one exists.
 
 ## Conventions this file assumes
 

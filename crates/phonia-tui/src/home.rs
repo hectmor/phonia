@@ -208,31 +208,32 @@ pub fn selectable_count(rows: &[Row]) -> usize {
     rows.iter().filter(|row| row.selectable()).count()
 }
 
-/// What Enter on the `selected`-th selectable row does.
+/// The row under the cursor, owned rather than borrowed (unlike `library::Selected`) since it has
+/// to survive past `rows(state)`'s own borrow of `state` -- there is no `LibraryState`-like place
+/// here to borrow from for longer than one call. `None` for a header, a spacer, or past the end:
+/// none of those are a thing to act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Intent {
-    /// Nothing to do: a header, a spacer, past the end, or a row not wired up yet (opening an
-    /// album, a playlist or a folder from Home nested in its own stack is #139's last part).
-    Nothing,
-    /// Sent as is.
-    Request(Request),
-    /// Plays just this one track, the same as Enter on a favorite track in the Library section.
-    PlayTrack(TrackSummary),
+pub enum Selected {
+    Continue(Continue),
+    Album(AlbumSummary),
+    Entry(FolderEntry),
+    Track(TrackSummary),
     /// Jumps into the Library section, on this tab, to see the rest of a block.
-    JumpTo(LibraryTab),
+    SeeAll(LibraryTab),
 }
 
-pub fn intent(state: &State, selected: usize) -> Intent {
-    let rows = rows(state);
-    match rows.iter().filter(|row| row.selectable()).nth(selected) {
-        Some(Row::Continue(continue_)) => continue_
-            .request()
-            .map(Intent::Request)
-            .unwrap_or(Intent::Nothing),
-        Some(Row::Track(track)) => Intent::PlayTrack((*track).clone()),
-        Some(Row::SeeAll { tab, .. }) => Intent::JumpTo(*tab),
-        Some(Row::Album(_)) | Some(Row::Entry(_)) | Some(Row::Header(_)) | Some(Row::Spacer)
-        | None => Intent::Nothing,
+pub fn selected(state: &State, index: usize) -> Option<Selected> {
+    match rows(state)
+        .iter()
+        .filter(|row| row.selectable())
+        .nth(index)?
+    {
+        Row::Continue(continue_) => Some(Selected::Continue(continue_.clone())),
+        Row::Album(album) => Some(Selected::Album((*album).clone())),
+        Row::Entry(entry) => Some(Selected::Entry((*entry).clone())),
+        Row::Track(track) => Some(Selected::Track((*track).clone())),
+        Row::SeeAll { tab, .. } => Some(Selected::SeeAll(*tab)),
+        Row::Header(_) | Row::Spacer => None,
     }
 }
 
@@ -530,49 +531,52 @@ mod tests {
     }
 
     #[test]
-    fn intent_on_the_continue_row_is_its_own_request() {
+    fn selected_on_the_continue_row_carries_its_own_request() {
         let mut q = queue();
         q.items = vec![item(1, "tidal:1", Some("Song"))];
         q.current = Some(ItemId(1));
         let state = state_with(None, Some(q));
+        let Some(Selected::Continue(continue_)) = selected(&state, 0) else {
+            panic!("expected the Continue row");
+        };
         assert_eq!(
-            intent(&state, 0),
-            Intent::Request(Request::Play {
+            continue_.request(),
+            Some(Request::Play {
                 item: Some(ItemId(1))
             })
         );
     }
 
     #[test]
-    fn intent_on_a_favorite_track_plays_just_that_track() {
+    fn selected_on_a_favorite_track_row_is_the_track_itself() {
         let state = with_library(|library| {
             library.favorite_tracks = crate::list::Found::from_page(page(vec![track("1")], 1));
         });
-        assert_eq!(intent(&state, 1), Intent::PlayTrack(track("1")));
+        assert_eq!(selected(&state, 1), Some(Selected::Track(track("1"))));
     }
 
     #[test]
-    fn intent_on_see_all_jumps_to_the_matching_tab() {
+    fn selected_on_see_all_names_the_matching_tab() {
         let state = with_library(|library| {
             library.favorite_albums = crate::list::Found::from_page(page(vec![album("1")], 1));
         });
         assert_eq!(
-            intent(&state, 2),
-            Intent::JumpTo(LibraryTab::FavoriteAlbums)
+            selected(&state, 2),
+            Some(Selected::SeeAll(LibraryTab::FavoriteAlbums))
         );
     }
 
     #[test]
-    fn intent_on_an_album_or_a_folder_row_does_nothing_yet() {
+    fn selected_on_an_album_or_a_folder_row_is_the_album_or_the_entry() {
         let state = with_library(|library| {
             library.favorite_albums = crate::list::Found::from_page(page(vec![album("1")], 1));
         });
-        assert_eq!(intent(&state, 1), Intent::Nothing);
+        assert_eq!(selected(&state, 1), Some(Selected::Album(album("1"))));
     }
 
     #[test]
-    fn intent_past_the_end_does_nothing() {
+    fn selected_past_the_end_is_none() {
         let state = State::default();
-        assert_eq!(intent(&state, 5), Intent::Nothing);
+        assert_eq!(selected(&state, 5), None);
     }
 }

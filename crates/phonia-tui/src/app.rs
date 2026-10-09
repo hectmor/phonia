@@ -129,6 +129,8 @@ pub struct State {
     pub library: Option<LibraryState>,
     /// The album and playlist views opened from the library.
     pub library_views: Stack,
+    /// The album, playlist and folder views opened from Home's own content blocks.
+    pub home_views: Stack,
     /// The track whose lyrics are loaded, loading, or failed; `None` until the Lyrics section has
     /// been opened once with a TIDAL track playing (pull, not pushed for every track -- see
     /// `maybe_load_lyrics`).
@@ -164,12 +166,16 @@ impl State {
     /// or playlist's cover, an opened artist's picture, or, in the queue section, the currently
     /// playing track's own album cover. `None` with nothing open, nothing playing, or no cover.
     pub fn open_cover(&self) -> Option<(phonia_ipc::image::Kind, &str)> {
+        let now_playing = || {
+            let cover = self.status.as_ref()?.track.as_ref()?.cover.as_deref()?;
+            Some((phonia_ipc::image::Kind::AlbumCover, cover))
+        };
         let stack = match self.section() {
-            // Home's own "Continue" row is about the same now-playing track Queue shows.
-            Section::Home | Section::Queue => {
-                let cover = self.status.as_ref()?.track.as_ref()?.cover.as_deref()?;
-                return Some((phonia_ipc::image::Kind::AlbumCover, cover));
-            }
+            // Nothing of Home's own open yet: its "Continue" row is about the same now-playing
+            // track Queue shows.
+            Section::Home if self.home_views.is_empty() => return now_playing(),
+            Section::Home => &self.home_views,
+            Section::Queue => return now_playing(),
             Section::Search => &self.search_views,
             Section::Library => &self.library_views,
             // Nothing to show here: the lyrics have no cover of their own.
@@ -372,6 +378,7 @@ fn update_now(state: &mut State, msg: Msg) -> Effects {
                 library.connection_lost();
             }
             state.library_views.connection_lost();
+            state.home_views.connection_lost();
             if let Some(lyrics) = &mut state.lyrics {
                 lyrics.connection_lost();
             }
@@ -603,14 +610,16 @@ fn clear_pending(artist: &mut browse::ArtistView) {
     artist.singles.loading = false;
 }
 
-/// The view pushed with `serial`, wherever it is: the one opened from a search result, or the one
-/// opened from the library — whichever stack actually has it, regardless of which section the user
+/// The view pushed with `serial`, wherever it is: the one opened from a search result, from the
+/// library, or from Home — whichever stack actually has it, regardless of which section the user
 /// has since moved to.
 fn find_view(state: &mut State, serial: u64) -> Option<&mut browse::View> {
     if let Some(view) = state.search_views.find_mut(serial) {
         Some(view)
+    } else if let Some(view) = state.library_views.find_mut(serial) {
+        Some(view)
     } else {
-        state.library_views.find_mut(serial)
+        state.home_views.find_mut(serial)
     }
 }
 
@@ -1096,6 +1105,8 @@ struct Snapshot {
     library_tab: Option<LibraryTab>,
     library_cursors: Option<[Cursor; 3]>,
     library_view: Option<u64>,
+    home_cursor: Cursor,
+    home_view: Option<u64>,
     /// The cursor of whatever is open on top of the current section's stack, since moving within
     /// an opened album, playlist or artist page does not otherwise touch anything above.
     browsing_cursor: Option<Cursor>,
@@ -1107,6 +1118,8 @@ fn snapshot(state: &mut State) -> Snapshot {
         help: state.help,
         sidebar: state.sidebar,
         queue_cursor: state.queue_cursor,
+        home_cursor: state.home_cursor,
+        home_view: state.home_views.top_serial(),
         search_tab: state.search.tab,
         search_cursors: state.search.list_cursors(),
         search_view: state.search_views.top_serial(),
@@ -1117,12 +1130,13 @@ fn snapshot(state: &mut State) -> Snapshot {
     }
 }
 
-/// The stack of views the section that has one (search or the library) is showing now, if the
-/// current section is one of those.
+/// The stack of views the section that has one (search, the library, or Home) is showing now, if
+/// the current section is one of those.
 fn active_stack_mut(state: &mut State) -> Option<&mut Stack> {
     match state.section() {
         Section::Search => Some(&mut state.search_views),
         Section::Library => Some(&mut state.library_views),
+        Section::Home => Some(&mut state.home_views),
         _ => None,
     }
 }
@@ -1222,7 +1236,11 @@ fn apply(state: &mut State, action: Action) -> Effects {
                 // Nothing to open or play from here.
                 return Effects::default();
             } else if state.section() == Section::Home {
-                return act_on_home(state, action);
+                return if state.home_views.is_empty() {
+                    act_on_home_result(state, action)
+                } else {
+                    act_in_view(state, action)
+                };
             } else {
                 return edit_queue(state, action);
             }
@@ -1238,7 +1256,9 @@ fn apply(state: &mut State, action: Action) -> Effects {
                     act_on_library_result(state, action)
                 }
                 Section::Library => act_in_view(state, action),
-                Section::Home | Section::Queue | Section::Lyrics => Effects::default(),
+                Section::Home if state.home_views.is_empty() => act_on_home_result(state, action),
+                Section::Home => act_in_view(state, action),
+                Section::Queue | Section::Lyrics => Effects::default(),
             };
         }
         Action::OpenRadio => {
@@ -1249,10 +1269,12 @@ fn apply(state: &mut State, action: Action) -> Effects {
                     act_on_library_result(state, action)
                 }
                 Section::Library => act_in_view(state, action),
+                Section::Home if state.home_views.is_empty() => act_on_home_result(state, action),
+                Section::Home => act_in_view(state, action),
                 // A queue entry (and "now playing" generally) is a deliberate follow-up: it
                 // needs its own place to show an opened radio in, which neither section has
                 // today (see docs/DECISIONS.md).
-                Section::Home | Section::Queue | Section::Lyrics => Effects::default(),
+                Section::Queue | Section::Lyrics => Effects::default(),
             };
         }
         Action::StartSearch => {
@@ -1822,7 +1844,10 @@ fn move_cursor(state: &mut State, action: Action) {
     let search_tab = state.search.tab;
     let library_tab = state.library.as_ref().map(|library| library.tab);
     let browsing = state.focus == Focus::Main
-        && matches!(state.section(), Section::Search | Section::Library)
+        && matches!(
+            state.section(),
+            Section::Search | Section::Library | Section::Home
+        )
         && active_stack_mut(state).is_some_and(|stack| !stack.is_empty());
     let (len, cursor) = if browsing {
         let Some(view) = active_stack_mut(state).and_then(Stack::top_mut) else {
@@ -2141,34 +2166,69 @@ fn send_add_from(state: &mut State, of: phonia_ipc::CatalogRef, play_at: Option<
     }
 }
 
-/// Enter on Home's "Continue" row: sends whatever it currently offers (resume, replay, or start
-/// the queue), and does nothing for an empty queue or while disconnected.
-fn act_on_home(state: &mut State, action: Action) -> Effects {
-    if action != Action::Activate || state.connection != Connection::Connected {
+/// Acts on the row under Home's own cursor, while nothing is open on its stack (`home_views`):
+/// Enter on the Continue row sends whatever it currently offers; Enter on a favorite track plays
+/// just that one, the same as Library's own Favorite Tracks tab; `a`/`A` there add it without
+/// playing; `o` opens its radio. Enter on an album opens it (nested in Home's own stack, like
+/// Library already does with its own); `a`/`A` there add the whole album without opening it. An
+/// entry (a sub-folder or a playlist) is handled exactly like the library's own Playlists tab, by
+/// the same shared function. Enter on a "See all" row jumps into Library on the matching tab.
+fn act_on_home_result(state: &mut State, action: Action) -> Effects {
+    if state.section() != Section::Home || state.focus != Focus::Main {
         return Effects::default();
     }
-    match home::intent(state, state.home_cursor.selected()) {
-        home::Intent::Nothing => Effects::default(),
-        home::Intent::Request(request) => {
+    let Some(selected) = home::selected(state, state.home_cursor.selected()) else {
+        return Effects::default();
+    };
+    if action == Action::OpenRadio {
+        return match selected {
+            home::Selected::Track(track) => {
+                open_track_radio(state, track.id.clone(), track.title.clone())
+            }
+            _ => Effects::default(),
+        };
+    }
+    if let home::Selected::Entry(entry) = selected {
+        return act_on_folder_entry(state, action, entry);
+    }
+    match selected {
+        home::Selected::Continue(continue_) => {
+            if action != Action::Activate {
+                return Effects::default();
+            }
+            let Some(request) = continue_.request() else {
+                return Effects::default();
+            };
             state.last_error = None;
             Effects {
                 redraw: false,
                 commands: vec![Cmd::Send(request)],
             }
         }
-        home::Intent::PlayTrack(track) => {
+        home::Selected::SeeAll(tab) => {
+            if action != Action::Activate {
+                return Effects::default();
+            }
+            jump_to_library(state, tab)
+        }
+        home::Selected::Track(track) => {
             if !track.streamable {
                 state.last_error = Some(format!("{} is not available where you are", track.title));
                 return Effects::redraw();
             }
+            let at = if action == Action::AddToQueue {
+                phonia_ipc::AddAt::End
+            } else {
+                phonia_ipc::AddAt::Next
+            };
             match phonia_ipc::source::tidal(&track.id) {
                 Ok(source) => send_add(
                     state,
                     Request::QueueAdd {
                         tracks: vec![phonia_ipc::NewTrack { source }],
-                        at: phonia_ipc::AddAt::Next,
+                        at,
                     },
-                    true,
+                    action == Action::Activate,
                 ),
                 Err(reason) => {
                     state.last_error = Some(reason);
@@ -2176,7 +2236,32 @@ fn act_on_home(state: &mut State, action: Action) -> Effects {
                 }
             }
         }
-        home::Intent::JumpTo(tab) => jump_to_library(state, tab),
+        home::Selected::Album(album) => {
+            if action == Action::Activate {
+                return open_track_list(
+                    state,
+                    phonia_ipc::CatalogRef::Album {
+                        id: album.id.clone(),
+                    },
+                    Header::Album(album),
+                );
+            }
+            let at = if action == Action::AddToQueue {
+                phonia_ipc::AddAt::End
+            } else {
+                phonia_ipc::AddAt::Next
+            };
+            send_add(
+                state,
+                Request::QueueAddFrom {
+                    from: phonia_ipc::CatalogRef::Album { id: album.id },
+                    at,
+                },
+                false,
+            )
+        }
+        // Handled above, before this match.
+        home::Selected::Entry(_) => Effects::default(),
     }
 }
 
@@ -4887,6 +4972,243 @@ mod tests {
             name: name.into(),
             item_count,
         }
+    }
+
+    /// Connected, with the catalog, left on Home (the default section) with its library already
+    /// loaded: one favorite album ("9", "Issues"), one sub-folder at the root of "My Collection"
+    /// ("f1", "Moods"), two favorite tracks ("1" "Freak On a Leash", "2" "Blind" -- not
+    /// streamable). Selectable rows, in order: Continue (0), the album (1), its "See all" (2),
+    /// the folder (3), its "See all" (4), the two tracks (5, 6), their "See all" (7). The focus
+    /// is on the main panel.
+    fn with_home_library() -> State {
+        let mut state = State::default();
+        update(&mut state, connected_msg(&["catalog"]));
+        let mut tracks = vec![
+            library_track("1", "Freak On a Leash"),
+            library_track("2", "Blind"),
+        ];
+        tracks[1].streamable = false;
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::Library { generation: 0 },
+                result: Ok(Payload::Library {
+                    favorite_tracks: phonia_ipc::Page {
+                        items: tracks,
+                        total: 2,
+                        offset: 0,
+                    },
+                    favorite_albums: phonia_ipc::Page {
+                        items: vec![library_album("9", "Issues")],
+                        total: 1,
+                        offset: 0,
+                    },
+                    my_playlists: phonia_ipc::Page {
+                        items: vec![],
+                        total: 0,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::LibraryPlaylists { generation: 0 },
+                result: Ok(Payload::PlaylistFolder {
+                    folder: None,
+                    page: phonia_ipc::Page {
+                        items: vec![library_folder("f1", "Moods", 1)],
+                        total: 1,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
+        ch(&mut state, 'l');
+        state
+    }
+
+    #[test]
+    fn enter_on_a_favorite_album_from_home_opens_it_nested_in_homes_own_stack() {
+        let mut state = with_home_library();
+        ch(&mut state, 'j'); // the album
+        let (tag, request) = tagged(press(&mut state, KeyCode::Enter));
+        let Tag::View { serial } = tag else {
+            panic!("not a view tag")
+        };
+        assert_eq!(
+            request,
+            Request::Tracks {
+                from: phonia_ipc::CatalogRef::Album { id: "9".into() },
+                offset: 0,
+                limit: Some(crate::search::PAGE_SIZE),
+            }
+        );
+        assert_eq!(state.home_views.top_serial(), Some(serial));
+        let Some(browse::View::TrackList(view)) = state.home_views.top() else {
+            panic!("no view opened onto Home's own stack")
+        };
+        assert_eq!(view.header().title(), "Issues");
+        assert!(
+            state.library_views.is_empty() && state.search_views.is_empty(),
+            "opened onto Home, not Library or Search"
+        );
+    }
+
+    /// Same regression #140 fixed for the library, now covered for Home too: a track inside a
+    /// view opened from Home must be measured against Home's own stack, not Search's or
+    /// Library's.
+    #[test]
+    fn enter_on_a_track_inside_an_album_opened_from_home_plays_from_it() {
+        let mut state = with_home_library();
+        ch(&mut state, 'j'); // the album
+        let (tag, _) = tagged(press(&mut state, KeyCode::Enter));
+        let Tag::View { serial } = tag else {
+            panic!("not a view tag")
+        };
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::View { serial },
+                result: Ok(Payload::Tracks {
+                    from: phonia_ipc::CatalogRef::Album { id: "9".into() },
+                    page: page_of(
+                        vec![library_track("1", "First"), library_track("2", "Second")],
+                        2,
+                        0,
+                    )
+                    .unwrap(),
+                }),
+            },
+        );
+        ch(&mut state, 'j'); // the 2nd track
+        let (tag, request) = tagged(press(&mut state, KeyCode::Enter));
+        assert_eq!(
+            request,
+            Request::QueueAddFrom {
+                from: phonia_ipc::CatalogRef::Album { id: "9".into() },
+                at: phonia_ipc::AddAt::Next,
+            }
+        );
+        assert_eq!(tag, Tag::AddFrom { play_at: Some(1) });
+    }
+
+    #[test]
+    fn a_on_a_favorite_album_from_home_adds_it_whole_without_opening_it() {
+        let mut state = with_home_library();
+        ch(&mut state, 'j'); // the album
+        let (_, request) = tagged(ch(&mut state, 'a'));
+        assert_eq!(
+            request,
+            Request::QueueAddFrom {
+                from: phonia_ipc::CatalogRef::Album { id: "9".into() },
+                at: phonia_ipc::AddAt::End,
+            }
+        );
+        assert!(state.home_views.is_empty(), "added, not opened");
+    }
+
+    #[test]
+    fn entering_a_sub_folder_from_home_pushes_a_folder_view_nested_in_its_own_stack() {
+        let mut state = with_home_library();
+        ch(&mut state, 'j'); // the album
+        ch(&mut state, 'j'); // its "See all"
+        ch(&mut state, 'j'); // the folder
+        let (tag, request) = tagged(press(&mut state, KeyCode::Enter));
+        let Tag::View { serial } = tag else {
+            panic!("not a view tag")
+        };
+        assert_eq!(
+            request,
+            Request::PlaylistFolder {
+                folder: Some("f1".into()),
+                offset: 0,
+                limit: Some(crate::library::PAGE_SIZE),
+            }
+        );
+        assert_eq!(state.home_views.top_serial(), Some(serial));
+        assert!(matches!(
+            state.home_views.top(),
+            Some(browse::View::Folder(_))
+        ));
+    }
+
+    #[test]
+    fn enter_on_see_all_from_home_jumps_into_the_matching_library_tab() {
+        let mut state = with_home_library();
+        ch(&mut state, 'j'); // the album
+        ch(&mut state, 'j'); // its "See all"
+        let effects = press(&mut state, KeyCode::Enter);
+        assert!(effects.commands.is_empty(), "no request, just a jump");
+        assert_eq!(state.section(), Section::Library);
+        assert_eq!(
+            state.library.as_ref().unwrap().tab,
+            LibraryTab::FavoriteAlbums
+        );
+        assert!(state.home_views.is_empty(), "nothing opened on Home");
+    }
+
+    #[test]
+    fn o_on_a_favorite_track_row_from_home_opens_its_radio() {
+        let mut state = with_home_library();
+        for _ in 0..5 {
+            ch(&mut state, 'j'); // album, its see-all, folder, its see-all, track "1"
+        }
+        let (tag, request) = tagged(ch(&mut state, 'o'));
+        assert!(matches!(tag, Tag::View { .. }));
+        assert_eq!(
+            request,
+            Request::Tracks {
+                from: phonia_ipc::CatalogRef::TrackRadio { id: "1".into() },
+                offset: 0,
+                limit: Some(crate::search::PAGE_SIZE),
+            }
+        );
+        assert!(!state.home_views.is_empty());
+    }
+
+    #[test]
+    fn enter_on_a_favorite_track_row_from_home_plays_just_that_track() {
+        let mut state = with_home_library();
+        for _ in 0..5 {
+            ch(&mut state, 'j');
+        }
+        let (tag, request) = tagged(press(&mut state, KeyCode::Enter));
+        assert_eq!(tag, Tag::Add { play: true });
+        assert_eq!(
+            request,
+            Request::QueueAdd {
+                tracks: vec![phonia_ipc::NewTrack {
+                    source: phonia_ipc::source::tidal("1").unwrap(),
+                }],
+                at: phonia_ipc::AddAt::Next,
+            }
+        );
+        assert!(state.home_views.is_empty(), "played, not opened");
+    }
+
+    #[test]
+    fn closing_an_opened_home_view_returns_to_homes_own_rows() {
+        let mut state = with_home_library();
+        ch(&mut state, 'j'); // the album
+        press(&mut state, KeyCode::Enter);
+        assert!(!state.home_views.is_empty());
+        ch(&mut state, 'h');
+        assert!(state.home_views.is_empty());
+        assert_eq!(state.section(), Section::Home);
+    }
+
+    #[test]
+    fn losing_the_connection_fails_an_open_home_view_still_loading() {
+        let mut state = with_home_library();
+        ch(&mut state, 'j'); // the album
+        press(&mut state, KeyCode::Enter);
+        disconnected(&mut state, Duration::from_secs(1));
+        let Some(browse::View::TrackList(view)) = state.home_views.top() else {
+            panic!("no view opened")
+        };
+        assert!(matches!(view.phase, browse::Phase::Failed(_)));
     }
 
     /// Connected, with the catalog, having just moved to the Library section: the request that
