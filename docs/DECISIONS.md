@@ -2406,3 +2406,65 @@ real totals, nothing shows before the library loads, moving down highlights the 
 specifically — reusing the existing `REVERSED`-modifier-count pattern already used for search/
 library row highlighting). Full workspace green (335 phonia-tui tests, up from 320), fmt+clippy
 clean.
+
+## 2026-10-08 (latest): #139 part 4 (last): opening albums, playlists and folders nested in Home — CLOSES #139
+
+New `home_views: Stack` field on `State`, added to `active_stack_mut`'s match alongside Search's
+and Library's own (`Section::Home => Some(&mut state.home_views)`). **The headline finding of this
+part: almost none of the "browsing an opened view" machinery needed Home-specific code at all.**
+`act_in_view`, `act_on_track_row`, `browsed_row`, `pop_view_if_browsing`, `move_cursor`'s browsing
+branch, and the artist-tab-switch check under `TabNext`/`TabPrevious` are all already written
+generically against whatever `active_stack_mut(state)` returns for the *current* section — they
+were never Search-or-Library-specific to begin with, just never exercised by a third section
+before. Adding Home to that one function's match was enough to make opening, paging, adding from,
+playing from, and closing a nested view all work for Home exactly as they already do for Library,
+with no duplicated logic.
+
+**The `Selected`-from-part-3 refactor paid for itself here.** Because `home::Selected` already
+separated "which row, as owned data" from "what action does with it", extending
+`act_on_home_result` (renamed from part 2/3's `act_on_home`, to match `act_on_library_result`'s
+own naming) to handle `AddToQueue`/`AddNext`/`OpenRadio` — not just `Activate` — was a matter of
+mirroring `act_on_library_result`'s own shape arm by arm, not a redesign: `Selected::Track` gets
+the exact streamable-check-then-`send_add` logic Library's Favorite Tracks tab already has (now
+for all four actions, not just Activate); `Selected::Album`'s `Activate` opens via
+`open_track_list` nested onto `home_views`, otherwise `send_add`s the whole album; `Selected::
+Entry` is handed whole to the existing `act_on_folder_entry`, unchanged, since it already handles
+a folder/playlist/`Unknown` entry for all four actions on its own.
+
+**Scope decided while implementing, not re-asked**: `a`/`A`/`o` were only specified for Enter in
+the original plan, but extending them to Home's own unopened rows (not just once something is
+opened) was judged the right call for parity with Library, which already supports both on its
+equivalent rows — otherwise Home's rows would have been inconsistently *less* capable than
+Library's for the exact same data, which the plan's own "nests the same way Library's own already
+works" framing argues against, not for.
+
+**A real bug found via the new integration tests, the same shape as #140's**: `find_view` (which
+routes a `Tag::View` answer — `Request::Tracks` or `Request::PlaylistFolder` — back to the view
+that asked for it, by serial) checked only `search_views` and `library_views`, a hardcoded
+two-stack list from before Home's own stack existed. A view opened from Home therefore never
+received its answer and sat on "Loading" forever — caught immediately by
+`enter_on_a_track_inside_an_album_opened_from_home_plays_from_it` (modeled directly on #140's own
+regression test). Fixed the same way #140 was: read whichever stack actually holds the serial,
+trying all three instead of two. **Lesson repeated for the second time this issue**: a function
+enumerating "the stacks that can have an open view" by name, rather than deriving the list from
+`Section::ALL`, silently drops a case the moment a new stack is added — `active_stack_mut` already
+matches on `state.section()` and is therefore exhaustive-checked by the compiler on every new
+`Section` variant, while `find_view` has no such safety net since it searches by serial across
+*all* stacks regardless of section and the compiler cannot tell it is missing one. Worth watching
+for a third time if a future section ever grows its own stack again.
+
+Snapshot's own change-detection grew `home_cursor`/`home_view` fields (mirroring `library_tab`/
+`library_cursors`/`library_view`), `Msg::Disconnected` now also calls `home_views.connection_lost()`,
+and `open_cover`/`draw_main` each grew the same "nothing open: show the Continue-row-equivalent
+state; something open: show the stack's own cover/breadcrumb" branch Library already had. 9 new
+integration tests in `app.rs` (opening an album/folder/playlist from Home, the #140-shaped
+regression, adding without opening, jumping via "See all", opening a track's radio, playing a
+favorite track, closing an opened view, losing the connection while one is still loading) plus the
+`Intent` → `Selected` rename carried through `home.rs`'s own unit tests. Full workspace green (344
+phonia-tui tests, up from 335), fmt+clippy clean.
+
+**#139 (Home screen in the TUI) is now FULLY DONE, all 4 PRs merged.** A lightweight home reading
+only data phonia already fetches locally (resume/replay/start, favorite albums, playlist folders,
+favorite tracks, each opening nested in Home's own stack exactly like Library's own). A real
+TIDAL-style editorial/personalized home (mixes, new releases) remains the deliberately separate,
+not-yet-investigated future issue #33 already left "My Mixes" in.

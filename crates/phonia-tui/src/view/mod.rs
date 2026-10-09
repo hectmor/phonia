@@ -105,11 +105,21 @@ fn draw_sidebar(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
 
 fn draw_main(state: &State, theme: &Theme, covers: &Covers, frame: &mut Frame, area: Rect) {
     let focused = state.focus == Focus::Main;
+    // Home, likewise, may have an album, a playlist or a folder opened from one of its blocks.
     if state.section() == Section::Home {
-        let block = panel(Section::Home.title(), focused, theme);
+        let crumbs = state.home_views.titles();
+        let title = std::iter::once(Section::Home.title())
+            .chain(crumbs)
+            .collect::<Vec<_>>()
+            .join(" \u{203a} ");
+        let block = panel(&title, focused, theme);
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        home::draw(state, theme, focused, frame, inner);
+        if state.home_views.is_empty() {
+            home::draw(state, theme, focused, frame, inner);
+        } else {
+            browse::draw(state, &state.home_views, theme, covers, frame, inner);
+        }
         return;
     }
     // The search has its own layout inside the panel: the line, the tabs and the results, or an
