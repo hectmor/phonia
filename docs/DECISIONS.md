@@ -2668,3 +2668,52 @@ new request/response/event, protocol bumped to 1.15 in the two hardcoded strings
 it. Full workspace green (phonia-core 569 tests up from 562, phoniad 80 up from 76), fmt+clippy
 clean. No TUI change yet — `State`/`home.rs` are untouched; parts 5 (persistence) and 6 (the Home
 block, closing #144) are next.
+
+**PR5 (recently played: saving it to disk), code complete**: `recent::state_dir()`
+(`dirs::state_dir().join("phonia")` — state, deliberately apart from `config::dir()`'s config
+directory and `auth::store`'s own credential one, since it is neither a setting nor a secret);
+`recent::STATE_FILE` = `recently_played.json`; `recent::load`/`save`, mirroring `auth::store`'s
+own atomic write exactly (temp file, `fsync`, rename) and its own "missing or corrupt is never a
+hard failure" rule (a missing file loads as an empty log silently; a corrupt one too, but after a
+warning on stderr — this is a convenience log, not a credential, so losing it is never worth
+failing `phoniad`'s own startup over). `PlayedTrack`/`RecentlyPlayed` both gained
+`Serialize`/`Deserialize` (already available in `phonia-core`, no new dependency).
+
+**Real design correction made while wiring this in, caught before it caused a problem rather
+than after**: the first draft resolved `recent_path` directly inside `Daemon::start` itself
+(calling `recent::state_dir()` there). That differs from how every other filesystem or network
+dependency — `catalog`, `play_log`, the session store — already arrives at `Daemon::start`
+*pre-resolved* through `DaemonParts`, built once in `main.rs`. Two reasons this had to change,
+not just a style preference: (1) it would have made `Daemon::start` impossible to test with a
+temp path, since nothing outside it could override where persistence writes; (2) left as
+written, it would have gone unnoticed until the *test suite itself* started silently writing to
+the real `$XDG_STATE_HOME/phonia/recently_played.json` on whatever machine ran `cargo test` the
+moment a test played a track to completion — caught by reasoning through the consequence before
+writing a single test, not by observing it happen. Fixed by moving `recent_path: Option<PathBuf>`
+into `DaemonParts`, resolved in `main.rs` exactly like the others; every existing test fixture in
+`protocol.rs` now passes `None` explicitly (`fixture_full`'s own default), so the full suite never
+touches a real disk location outside its own temp directories. A new `fixture_with_recent_path`
+helper exists only for the one test that needs to inject a real temp path on purpose.
+
+The background save itself (`tokio::task::spawn_blocking`, fire-and-forget, not awaited by
+`fan_in`) only fires when `Tracker::position`/`::ended` actually recorded something, the same
+gate `Event::RecentlyPlayedChanged` already uses — publishing the event and saving the file share
+one `changed` check, not two independent ones that could drift apart.
+
+Tests: 4 new `recent.rs` unit tests (a missing file loads empty, a corrupt one too after a
+warning, save-then-load round-trips exactly, saving creates a parent directory that does not
+exist yet and cleanly replaces an older save) using the same temp-directory convention every
+other `phonia-core` module's own tests already follow. One real end-to-end `phoniad` integration
+test: a first daemon (pointed at a temp file via `fixture_with_recent_path`) plays a short track
+to completion and shuts down; after polling briefly for the fire-and-forget save to land, a
+*second*, entirely separate daemon instance is started pointed at the *same* file and its very
+first `Request::RecentlyPlayed` already has the first daemon's entry — a genuine restart
+simulation, not a mock of one. Full workspace green (phonia-core 573 tests up from 569, phoniad 81
+up from 80), fmt+clippy clean.
+
+**#144's recently played is now fully wired end to end except the TUI.** Part 6 (last) adds the
+Home block (`State.recently_played`, `Row::Played`/`Selected::Played`, fetched on connect and
+kept current by `RecentlyPlayedChanged`) and, as planned from the start, is also where `home::
+Row::Header(LibraryTab)` finally generalizes to `Row::Header(Block)` — recently played has no
+matching `LibraryTab` to point at, the exact situation that generalization exists for. Closes
+#144.

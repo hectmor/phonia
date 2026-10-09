@@ -1,11 +1,27 @@
-//! A bounded, in-memory log of recently played tracks, kept by the daemon (see #144). Unlike
-//! `play_log`, which reports a finished play to TIDAL, nothing here ever leaves the process: this
-//! is purely local, and covers local files too, not just TIDAL tracks.
+//! A bounded log of recently played tracks, kept by the daemon and saved across its own restarts
+//! (see #144). Unlike `play_log`, which reports a finished play to TIDAL, nothing here ever
+//! leaves the machine: this is purely local, and covers local files too, not just TIDAL tracks.
 
 use crate::engine::EndReason;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 
 /// The most entries kept at once; the oldest is dropped once a new one would exceed it.
 pub const MAX_RECENT: usize = 50;
+
+/// The file the log is saved to, inside [`state_dir`].
+pub const STATE_FILE: &str = "recently_played.json";
+
+/// Where the log is kept across a `phoniad` restart: state, not configuration (`config::dir`) or
+/// a credential (`auth::store`) -- it is neither a setting nor a secret, just a convenience that
+/// happens to be worth keeping. `None` on a platform with no such directory (`dirs::state_dir`'s
+/// own limit, not phonia's): persistence is then simply skipped, never a startup failure.
+pub fn state_dir() -> Option<PathBuf> {
+    dirs::state_dir().map(|dir| dir.join("phonia"))
+}
 
 /// A track counts as played once it has been heard this long -- the same threshold TIDAL itself
 /// uses for its own Recently Played (see `crate::play_log::MIN_HEARD`), reused here as a simple
@@ -16,7 +32,7 @@ pub const MAX_RECENT: usize = 50;
 pub const MIN_HEARD_MS: u64 = 30_000;
 
 /// One entry of the log.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlayedTrack {
     pub source: String,
     pub title: Option<String>,
@@ -29,7 +45,7 @@ pub struct PlayedTrack {
 
 /// The log itself: most recent first, deduplicated by source (playing something again moves it
 /// back to the front with a fresh timestamp, rather than listing it twice).
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecentlyPlayed {
     items: Vec<PlayedTrack>,
 }
@@ -44,6 +60,54 @@ impl RecentlyPlayed {
         self.items.insert(0, track);
         self.items.truncate(MAX_RECENT);
     }
+}
+
+/// Loads the log from `path`. A missing file is simply an empty log (the ordinary case: a first
+/// run, or a platform with no [`state_dir`]); a corrupt one is also treated as empty, after a
+/// warning on stderr -- this is a convenience log, never worth failing a daemon's startup over.
+pub fn load(path: &Path) -> RecentlyPlayed {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return RecentlyPlayed::default();
+        }
+        Err(error) => {
+            eprintln!(
+                "phonia: reading {path:?}: {error} -- starting with an empty recently played log"
+            );
+            return RecentlyPlayed::default();
+        }
+    };
+    match serde_json::from_str::<RecentlyPlayed>(&text) {
+        Ok(recent) => recent,
+        Err(error) => {
+            eprintln!(
+                "phonia: {path:?} is not a valid recently played log ({error}) -- starting empty"
+            );
+            RecentlyPlayed::default()
+        }
+    }
+}
+
+/// Saves the log to `path`, replacing it in one step (a temporary file, then a rename), so a
+/// crash never leaves it half written -- the same precaution `auth::store`'s own session file
+/// takes. Creates `path`'s parent directory if it does not exist yet.
+pub fn save(path: &Path, recent: &RecentlyPlayed) -> std::io::Result<()> {
+    let json = serde_json::to_string(recent).expect("a recently played log always serializes");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension("json.tmp");
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    file.write_all(json.as_bytes())?;
+    file.sync_all()?;
+    fs::rename(&temporary, path)
 }
 
 /// What is heard of the current track so far, until it is recorded or displaced.
@@ -66,6 +130,14 @@ pub struct Tracker {
 impl Tracker {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Starts already knowing `recent` -- the log loaded from disk at startup, if there was one.
+    pub fn seeded(recent: RecentlyPlayed) -> Self {
+        Self {
+            recent,
+            current: None,
+        }
     }
 
     pub fn recent(&self) -> &RecentlyPlayed {
@@ -205,5 +277,54 @@ mod tests {
         }
         assert_eq!(recent.items().len(), MAX_RECENT);
         assert_eq!(recent.items()[0].source, (MAX_RECENT + 4).to_string());
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("phonia-recent-test-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn a_missing_file_loads_as_an_empty_log_not_an_error() {
+        let path = temp_dir("missing").join(STATE_FILE);
+        assert_eq!(load(&path), RecentlyPlayed::default());
+    }
+
+    #[test]
+    fn a_corrupt_file_also_loads_as_empty_after_a_warning() {
+        let dir = temp_dir("corrupt");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(STATE_FILE);
+        fs::write(&path, b"not json at all").unwrap();
+        assert_eq!(load(&path), RecentlyPlayed::default());
+    }
+
+    #[test]
+    fn saving_then_loading_round_trips_exactly() {
+        let dir = temp_dir("round-trip");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(STATE_FILE);
+        let mut recent = RecentlyPlayed::default();
+        recent.record(entry("tidal:1", 1_000));
+        recent.record(entry("tidal:2", 2_000));
+        save(&path, &recent).unwrap();
+        assert_eq!(load(&path), recent);
+    }
+
+    #[test]
+    fn saving_creates_the_parent_directory_and_replaces_an_older_save() {
+        // The directory does not exist yet at all: `save` must create it.
+        let path = temp_dir("nested").join("sub").join(STATE_FILE);
+        let mut first = RecentlyPlayed::default();
+        first.record(entry("tidal:1", 1_000));
+        save(&path, &first).unwrap();
+        assert_eq!(load(&path), first);
+
+        let mut second = RecentlyPlayed::default();
+        second.record(entry("tidal:2", 2_000));
+        save(&path, &second).unwrap();
+        assert_eq!(load(&path), second);
     }
 }

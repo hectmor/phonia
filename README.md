@@ -296,6 +296,9 @@ autoplay = false        # fetch more tracks from TIDAL when the queue runs dry? 
   playing something again moves it to the front with a fresh time rather than listing it twice),
   capped at 50. A track counts as played once actually heard for 30s (TIDAL's own rule for its
   own Recently Played), or, if shorter, once it plays to the end. `phonia ctl recent` prints it.
+  Saved to `$XDG_STATE_HOME/phonia/recently_played.json` (atomically, a temp file then a rename)
+  whenever it changes, and loaded back the next time `phoniad` starts, so it survives a restart;
+  a missing or unreadable file is simply an empty log, never a reason `phoniad` fails to start.
 - `phonia config path` prints which file is used, and `phonia config show` prints every setting
   with where its value comes from (the file or the default). `--config <file>` (or the
   `PHONIA_CONFIG` environment variable) selects another file, also for `phoniad`.
