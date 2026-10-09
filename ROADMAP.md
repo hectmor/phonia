@@ -791,6 +791,16 @@ opening an artist from Library (now possible) would have put the view on
 the wrong stack, the same shape of bug #140 and `find_view` (#139 part 4)
 already taught to watch for.
 
+Part 3 adds the Home "Favorite artists" block, right after favorite
+albums: `home::Row::Artist`, a block gated on `library.artists_phase ==
+Done` like the others, Enter opening the artist's page nested on Home's
+own stack (not Library's), `a`/`A` adding its top tracks whole. No
+`Row::Header`/`Block` generalization yet -- the plan's own suggestion to
+split `Header(LibraryTab)` into a `Block` enum is deferred to part 6,
+when recently played (which has no matching `LibraryTab`) actually needs
+it; adding that abstraction now, for a block that still maps onto a real
+tab, would be scaffolding for a need that is not there yet.
+
 ## Conventions this file assumes
 
 - Issues are closed by the project owner by hand after their pull requests

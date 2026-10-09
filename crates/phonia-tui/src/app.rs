@@ -2304,6 +2304,30 @@ fn act_on_home_result(state: &mut State, action: Action) -> Effects {
                 false,
             )
         }
+        home::Selected::Artist(artist) => {
+            if action == Action::Activate {
+                return open_artist_view(
+                    state,
+                    artist.id.clone(),
+                    artist.name.clone(),
+                    artist.picture.clone(),
+                );
+            }
+            // Enter opened the page above; a/A here add its most listened to tracks, whole.
+            let at = if action == Action::AddToQueue {
+                phonia_ipc::AddAt::End
+            } else {
+                phonia_ipc::AddAt::Next
+            };
+            send_add(
+                state,
+                Request::QueueAddFrom {
+                    from: phonia_ipc::CatalogRef::ArtistTopTracks { id: artist.id },
+                    at,
+                },
+                false,
+            )
+        }
         // Handled above, before this match.
         home::Selected::Entry(_) => Effects::default(),
     }
@@ -5027,11 +5051,11 @@ mod tests {
     }
 
     /// Connected, with the catalog, left on Home (the default section) with its library already
-    /// loaded: one favorite album ("9", "Issues"), one sub-folder at the root of "My Collection"
-    /// ("f1", "Moods"), two favorite tracks ("1" "Freak On a Leash", "2" "Blind" -- not
-    /// streamable). Selectable rows, in order: Continue (0), the album (1), its "See all" (2),
-    /// the folder (3), its "See all" (4), the two tracks (5, 6), their "See all" (7). The focus
-    /// is on the main panel.
+    /// loaded: one favorite album ("9", "Issues"), one favorite artist ("780", "Korn"), one
+    /// sub-folder at the root of "My Collection" ("f1", "Moods"), two favorite tracks ("1" "Freak
+    /// On a Leash", "2" "Blind" -- not streamable). Selectable rows, in order: Continue (0), the
+    /// album (1), its "See all" (2), the artist (3), its "See all" (4), the folder (5), its "See
+    /// all" (6), the two tracks (7, 8), their "See all" (9). The focus is on the main panel.
     fn with_home_library() -> State {
         let mut state = State::default();
         update(&mut state, connected_msg(&["catalog"]));
@@ -5071,6 +5095,20 @@ mod tests {
                     folder: None,
                     page: phonia_ipc::Page {
                         items: vec![library_folder("f1", "Moods", 1)],
+                        total: 1,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::LibraryArtists { generation: 0 },
+                result: Ok(Payload::Artists {
+                    from: phonia_ipc::ArtistListRef::FavoriteArtists,
+                    page: phonia_ipc::Page {
+                        items: vec![library_artist("780", "Korn")],
                         total: 1,
                         offset: 0,
                     },
@@ -5162,11 +5200,57 @@ mod tests {
     }
 
     #[test]
-    fn entering_a_sub_folder_from_home_pushes_a_folder_view_nested_in_its_own_stack() {
+    fn enter_on_a_favorite_artist_from_home_opens_its_page_nested_in_homes_own_stack() {
         let mut state = with_home_library();
         ch(&mut state, 'j'); // the album
         ch(&mut state, 'j'); // its "See all"
-        ch(&mut state, 'j'); // the folder
+        ch(&mut state, 'j'); // the artist
+        let (tag, request) = tagged(press(&mut state, KeyCode::Enter));
+        let Tag::View { serial } = tag else {
+            panic!("not a view tag")
+        };
+        assert_eq!(
+            request,
+            Request::Artist {
+                id: "780".into(),
+                limit: None,
+            }
+        );
+        assert_eq!(state.home_views.top_serial(), Some(serial));
+        let Some(browse::View::Artist(view)) = state.home_views.top() else {
+            panic!("no artist view opened onto Home's own stack")
+        };
+        assert_eq!(view.name, "Korn");
+        assert!(
+            state.library_views.is_empty() && state.search_views.is_empty(),
+            "opened onto Home, not Library or Search"
+        );
+    }
+
+    #[test]
+    fn a_on_a_favorite_artist_from_home_adds_its_top_tracks_whole_without_opening_it() {
+        let mut state = with_home_library();
+        ch(&mut state, 'j'); // the album
+        ch(&mut state, 'j'); // its "See all"
+        ch(&mut state, 'j'); // the artist
+        assert!(ch(&mut state, 'o').commands.is_empty(), "no radio to open");
+        let (_, request) = tagged(ch(&mut state, 'a'));
+        assert_eq!(
+            request,
+            Request::QueueAddFrom {
+                from: phonia_ipc::CatalogRef::ArtistTopTracks { id: "780".into() },
+                at: phonia_ipc::AddAt::End,
+            }
+        );
+        assert!(state.home_views.is_empty(), "added, not opened");
+    }
+
+    #[test]
+    fn entering_a_sub_folder_from_home_pushes_a_folder_view_nested_in_its_own_stack() {
+        let mut state = with_home_library();
+        for _ in 0..5 {
+            ch(&mut state, 'j'); // album, its see-all, artist, its see-all, the folder
+        }
         let (tag, request) = tagged(press(&mut state, KeyCode::Enter));
         let Tag::View { serial } = tag else {
             panic!("not a view tag")
@@ -5204,8 +5288,8 @@ mod tests {
     #[test]
     fn o_on_a_favorite_track_row_from_home_opens_its_radio() {
         let mut state = with_home_library();
-        for _ in 0..5 {
-            ch(&mut state, 'j'); // album, its see-all, folder, its see-all, track "1"
+        for _ in 0..7 {
+            ch(&mut state, 'j'); // album, see-all, artist, see-all, folder, see-all, track "1"
         }
         let (tag, request) = tagged(ch(&mut state, 'o'));
         assert!(matches!(tag, Tag::View { .. }));
@@ -5223,7 +5307,7 @@ mod tests {
     #[test]
     fn enter_on_a_favorite_track_row_from_home_plays_just_that_track() {
         let mut state = with_home_library();
-        for _ in 0..5 {
+        for _ in 0..7 {
             ch(&mut state, 'j');
         }
         let (tag, request) = tagged(press(&mut state, KeyCode::Enter));

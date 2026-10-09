@@ -35,12 +35,13 @@ chain works with real hardware (a Fosi Audio DS2 during development).
   has a sidebar (Home, Queue, Search, Library, Lyrics), a main panel and a bar at the bottom. It
   opens on Home (#139). Its first row, "Continue", picks up whatever the queue was doing: resumes
   a paused track at its exact position, replays a stopped one from the start, or starts the queue
-  if nothing has played yet this session; `Enter` on it does that. Underneath, up to three blocks
-  show the library's own favorite albums, playlist folders and favorite tracks (six each), every
-  one ending in a "See all (N) →" row that jumps into the matching Library tab for the rest.
-  `Enter` on a favorite track there plays just that track, the same as it does in Library itself;
-  `Enter` on an album or a folder opens it nested in Home's own stack, exactly like opening one
-  from Library does (`a`/`A` add it whole without opening it, `h`/`Left`/`Backspace` closes it back
+  if nothing has played yet this session; `Enter` on it does that. Underneath, up to four blocks
+  show the library's own favorite albums, favorite artists (#144), playlist folders and favorite
+  tracks (six each), every one ending in a "See all (N) →" row that jumps into the matching
+  Library tab for the rest. `Enter` on a favorite track there plays just that track, the same as
+  it does in Library itself; `Enter` on an album, an artist or a folder opens it nested in Home's
+  own stack, exactly like opening one from Library does (`a`/`A` add it whole without opening it,
+  `h`/`Left`/`Backspace` closes it back
   to Home's own rows). The queue is listed
   live, in queue order (the order `phonia ctl queue list` shows and that edits act on, not the
   shuffled play order), with the one playing marked and the row under the cursor highlighted. With

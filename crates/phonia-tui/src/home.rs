@@ -5,7 +5,7 @@
 use crate::app::State;
 use crate::browse::Phase;
 use crate::library::LibraryTab;
-use phonia_ipc::{AlbumSummary, FolderEntry, ItemId, Request, TrackSummary};
+use phonia_ipc::{AlbumSummary, ArtistSummary, FolderEntry, ItemId, Request, TrackSummary};
 
 /// How many of a block's items show before its own "See all" row.
 const BLOCK_SIZE: usize = 6;
@@ -120,6 +120,7 @@ pub enum Row<'a> {
     /// A block's own title: the matching Library tab's, so the two agree on what to call it.
     Header(LibraryTab),
     Album(&'a AlbumSummary),
+    Artist(&'a ArtistSummary),
     Entry(&'a FolderEntry),
     Track(&'a TrackSummary),
     /// Closes a block: jumps into Library on `tab`, showing all `total` of it, not just the
@@ -138,10 +139,10 @@ impl Row<'_> {
 }
 
 /// Every row Home shows right now: the Continue row, always, then one block per non-empty list
-/// the library already holds (favorite albums, playlist folders, favorite tracks, in that order),
-/// each capped at [`BLOCK_SIZE`] with a "See all" row into the rest. A list not loaded yet, or
-/// loaded and empty, contributes no block at all -- there is nothing to show two ways (not ready,
-/// or ready and empty), so neither needs its own row.
+/// the library already holds (favorite albums, favorite artists, playlist folders, favorite
+/// tracks, in that order), each capped at [`BLOCK_SIZE`] with a "See all" row into the rest. A
+/// list not loaded yet, or loaded and empty, contributes no block at all -- there is nothing to
+/// show two ways (not ready, or ready and empty), so neither needs its own row.
 pub fn rows(state: &State) -> Vec<Row<'_>> {
     let mut rows = vec![Row::Continue(continuation(state))];
     let Some(library) = &state.library else {
@@ -154,6 +155,15 @@ pub fn rows(state: &State) -> Vec<Row<'_>> {
             &library.favorite_albums.items,
             library.favorite_albums.total,
             Row::Album,
+        );
+    }
+    if library.artists_phase == Phase::Done {
+        push_block(
+            &mut rows,
+            LibraryTab::FavoriteArtists,
+            &library.favorite_artists.items,
+            library.favorite_artists.total,
+            Row::Artist,
         );
     }
     if library.playlists_phase == Phase::Done {
@@ -216,6 +226,7 @@ pub fn selectable_count(rows: &[Row]) -> usize {
 pub enum Selected {
     Continue(Continue),
     Album(AlbumSummary),
+    Artist(ArtistSummary),
     Entry(FolderEntry),
     Track(TrackSummary),
     /// Jumps into the Library section, on this tab, to see the rest of a block.
@@ -230,6 +241,7 @@ pub fn selected(state: &State, index: usize) -> Option<Selected> {
     {
         Row::Continue(continue_) => Some(Selected::Continue(continue_.clone())),
         Row::Album(album) => Some(Selected::Album((*album).clone())),
+        Row::Artist(artist) => Some(Selected::Artist((*artist).clone())),
         Row::Entry(entry) => Some(Selected::Entry((*entry).clone())),
         Row::Track(track) => Some(Selected::Track((*track).clone())),
         Row::SeeAll { tab, .. } => Some(Selected::SeeAll(*tab)),
@@ -390,10 +402,19 @@ mod tests {
         }
     }
 
+    fn artist(id: &str, name: &str) -> ArtistSummary {
+        ArtistSummary {
+            id: id.into(),
+            name: name.into(),
+            picture: None,
+        }
+    }
+
     fn with_library(mut build: impl FnMut(&mut LibraryState)) -> State {
         let (mut library, _) = LibraryState::new();
         library.phase = Phase::Done;
         library.playlists_phase = Phase::Done;
+        library.artists_phase = Phase::Done;
         build(&mut library);
         State {
             library: Some(library),
@@ -460,9 +481,11 @@ mod tests {
     }
 
     #[test]
-    fn all_three_blocks_show_in_order_when_every_list_has_something() {
+    fn all_four_blocks_show_in_order_when_every_list_has_something() {
         let state = with_library(|library| {
             library.favorite_albums = crate::list::Found::from_page(page(vec![album("a")], 1));
+            library.favorite_artists =
+                crate::list::Found::from_page(page(vec![artist("780", "Korn")], 1));
             library.playlists = crate::list::Found::from_page(page(
                 vec![FolderEntry::Folder {
                     id: "f".into(),
@@ -485,8 +508,34 @@ mod tests {
             headers,
             vec![
                 LibraryTab::FavoriteAlbums,
+                LibraryTab::FavoriteArtists,
                 LibraryTab::Playlists,
                 LibraryTab::FavoriteTracks,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_favorite_artists_block_ends_in_a_see_all_row_with_the_real_total() {
+        let state = with_library(|library| {
+            library.favorite_artists = crate::list::Found::from_page(page(
+                vec![artist("780", "Korn"), artist("1", "Tool")],
+                5,
+            ));
+        });
+        let rows = rows(&state);
+        assert_eq!(
+            rows,
+            vec![
+                Row::Continue(Continue::Empty),
+                Row::Spacer,
+                Row::Header(LibraryTab::FavoriteArtists),
+                Row::Artist(&artist("780", "Korn")),
+                Row::Artist(&artist("1", "Tool")),
+                Row::SeeAll {
+                    tab: LibraryTab::FavoriteArtists,
+                    total: 5
+                },
             ]
         );
     }
@@ -572,6 +621,18 @@ mod tests {
             library.favorite_albums = crate::list::Found::from_page(page(vec![album("1")], 1));
         });
         assert_eq!(selected(&state, 1), Some(Selected::Album(album("1"))));
+    }
+
+    #[test]
+    fn selected_on_a_favorite_artist_row_is_the_artist_itself() {
+        let state = with_library(|library| {
+            library.favorite_artists =
+                crate::list::Found::from_page(page(vec![artist("780", "Korn")], 1));
+        });
+        assert_eq!(
+            selected(&state, 1),
+            Some(Selected::Artist(artist("780", "Korn")))
+        );
     }
 
     #[test]
