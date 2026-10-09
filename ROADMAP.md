@@ -881,22 +881,27 @@ daemon must stay usable headless or on a minimal install, the same
 "fails soft, never blocks or crashes" spirit as #31's own hardware
 check.
 
-**Part 1 (config setting) and part 2 (the pure `mpris::model` policy
-module) are done, merged via PR #151 and the PR that follows this
-entry.** Part 2 is `crates/phoniad/src/mpris/model.rs`: no zbus, no
-D-Bus, no async -- a plain `Model` built from `(Status, Queue)` and
-kept current by `apply(&Event) -> Changed`, mirroring `autoplay.rs`'s
-own pure/unit-tested shape. It carries the "sticky" `PlaybackStatus`
-collapse, `Metadata` building (object-path track ids, cover ids turned
-into real `art_url`s via `phonia_ipc::image`, `file:` sources turned
-into real `file://` URIs, the artist string never split since that
-would break a name like "Earth, Wind & Fire"), the `Can*` flags
-(`CanGoNext`/`Previous` computed from queue order/current/repeat
-alone, ignoring autoplay on purpose), volume mapping (no hardware
-mixer reads as 1.0 and refuses writes, muted reads as 0.0, writing
-above 0 also unmutes), and every MPRIS call's mapping onto the
-existing `Request` enum -- nothing wired to a real D-Bus connection
-yet. That is part 3.
+**Parts 1-3 are done.** Part 1 (config setting, PR #151) and part 2
+(the pure `mpris::model` policy module, PR #152) are described above.
+Part 3 wires that model to a real session-bus connection:
+`crates/phoniad/src/mpris/service.rs` adds zbus as a direct `phoniad`
+dependency, registers `org.mpris.MediaPlayer2.phonia` (falling back to
+`...phonia.instance<pid>`, else skipping with one logged line) and
+serves `Root` + `Player` from the exact shape #13's `output/dbus.rs`
+already uses. A background task holds the `Model` behind the object
+server's own lock (`InterfaceRef::get_mut`), subscribes to
+`Daemon::subscribe()`, and batches every property a single
+`ipc::Event` actually changes into one `PropertiesChanged` signal,
+resyncing from a fresh `Daemon::snapshot()` on a lagged subscriber.
+Deliberately not wired up yet: every transport method is a no-op and
+every `Can*` property is a hardcoded `false` -- a client must never be
+invited to press a button that does nothing. That is part 4.
+Integration-tested against a private bus (`phonia-core`'s own
+`testutil::Bus`, now reachable from `phoniad`'s tests through a new
+`test-support` Cargo feature, a `[dev-dependencies]`-only path so
+nothing test-only ships in a release build) in
+`crates/phoniad/tests/mpris.rs`, `#[ignore = "needs dbus-daemon"]`
+like `phonia-core`'s own D-Bus tests.
 
 ## Conventions this file assumes
 

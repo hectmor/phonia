@@ -6,3 +6,4 @@
 //! event stream is a later part of #34, not added yet.
 
 pub mod model;
+pub mod service;

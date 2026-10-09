@@ -166,6 +166,15 @@ async fn run(args: Args) -> Result<()> {
     })
     .ok();
 
+    // Media keys, lock-screen widgets, `playerctl`... (#34). Never holds up startup: a missing
+    // session bus only logs a line, the daemon must stay usable headless or on a minimal
+    // install.
+    let _mpris = if settings.mpris.value {
+        phoniad::mpris::service::start(daemon.clone()).await
+    } else {
+        None
+    };
+
     let path = settings.socket_path(phonia_ipc::socket::default_socket_path);
     let (listener, _guard) = socket::bind(&path).await?;
     match &loaded.path {

@@ -25,3 +25,6 @@ pulseaudio.workspace = true
 toml.workspace = true
 uuid.workspace = true
 zbus.workspace = true
+
+[features]
+test-support = []

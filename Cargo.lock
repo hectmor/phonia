@@ -2094,6 +2094,7 @@ dependencies = [
  "serde_json",
  "tidlers",
  "tokio",
+ "zbus",
 ]
 
 [[package]]
