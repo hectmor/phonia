@@ -3,13 +3,13 @@
 //! subscribe to (`Daemon::subscribe`/`snapshot`) -- `Daemon::fan_in` itself is untouched, this is
 //! purely an additive consumer, like `server.rs` is.
 //!
-//! Transport (`Play`/`Pause`/`PlayPause`/`Stop`/`Next`/`Previous`) is wired up: each method maps
-//! to `self.model.*_request()` (written in [`super::model`]) and routes it through
-//! `Daemon::handle`, exactly like `phonia ctl` already does -- no new control-plane code, just a
-//! new caller of the same one. `CanGoNext`/`CanGoPrevious`/`CanPlay`/`CanPause` read the model
-//! now too. `Seek`/`SetPosition`/`OpenUri` stay no-ops and `CanSeek` stays a hardcoded `false`
-//! until part 5, which also adds the writable `Volume`/`LoopStatus`/`Shuffle` properties and the
-//! `Seeked` signal's real trigger (the signal plumbing itself already works).
+//! Every transport method, including `Seek`/`SetPosition`, maps to `self.model.*_request()`
+//! (written in [`super::model`]) and routes it through `Daemon::handle`, exactly like `phonia
+//! ctl` already does -- no new control-plane code, just a new caller of the same one. `Volume`,
+//! `LoopStatus` and `Shuffle` are writable the same way. `OpenUri`/`Raise`/`Quit` are permanently
+//! out of scope (#34 decision 2). The `Seeked` signal needed no new trigger: the engine already
+//! publishes `ipc::Event::Seeked` for any seek, including one `Request::Seek` started right here,
+//! and part 2/3 already turn that into the signal.
 
 use super::model::{self, Changed, Model};
 use crate::daemon::Daemon;
@@ -177,10 +177,7 @@ async fn emit(
 }
 
 /// The MPRIS properties this service tracks and batches into one `PropertiesChanged` signal.
-/// `CanSeek` is deliberately absent: until part 5 wires `Seek`/`SetPosition` up, that getter is
-/// a hardcoded `false`, so the model changing its own opinion of it is not something a client is
-/// told about yet.
-const TRACKED_PROPERTIES: [&str; 9] = [
+const TRACKED_PROPERTIES: [&str; 10] = [
     "PlaybackStatus",
     "Metadata",
     "Volume",
@@ -190,6 +187,7 @@ const TRACKED_PROPERTIES: [&str; 9] = [
     "CanGoPrevious",
     "CanPlay",
     "CanPause",
+    "CanSeek",
 ];
 
 fn property_value(model: &Model, name: &str) -> Value<'static> {
@@ -203,6 +201,7 @@ fn property_value(model: &Model, name: &str) -> Value<'static> {
         "CanGoPrevious" => Value::from(model.can_go_previous()),
         "CanPlay" => Value::from(model.can_play()),
         "CanPause" => Value::from(model.can_pause()),
+        "CanSeek" => Value::from(model.can_seek()),
         other => unreachable!("{other} is not one of mpris::service's TRACKED_PROPERTIES"),
     }
 }
@@ -218,6 +217,7 @@ fn changed_values(model: &Model, changed: &Changed) -> HashMap<&'static str, Val
         changed.can_go_previous,
         changed.can_play,
         changed.can_pause,
+        changed.can_seek,
     ];
     TRACKED_PROPERTIES
         .iter()
@@ -236,6 +236,17 @@ fn all_values(model: &Model) -> HashMap<&'static str, Value<'static>> {
 
 fn owned<'v, T: Into<Value<'v>>>(value: T) -> OwnedValue {
     OwnedValue::try_from(value.into()).expect("mpris property values never hold a file descriptor")
+}
+
+fn parse_loop_status(value: &str) -> zbus::fdo::Result<model::LoopStatus> {
+    match value {
+        "None" => Ok(model::LoopStatus::None),
+        "Track" => Ok(model::LoopStatus::Track),
+        "Playlist" => Ok(model::LoopStatus::Playlist),
+        other => Err(zbus::fdo::Error::InvalidArgs(format!(
+            "{other} is not a valid LoopStatus"
+        ))),
+    }
 }
 
 /// Builds the `a{sv}` dict MPRIS expects for `Metadata`, straight from [`model::Metadata`]: the
@@ -347,10 +358,15 @@ impl Player {
         }
     }
 
-    // `Seek`/`SetPosition` stay no-ops until part 5 (their `CanSeek` is still a hardcoded
-    // `false` below, so a well-behaved client never calls them yet).
-    async fn seek(&self, _offset: i64) {}
-    async fn set_position(&self, _track_id: ObjectPath<'_>, _position: i64) {}
+    async fn seek(&self, offset: i64) {
+        let _ = self.daemon.handle(Model::seek_request(offset)).await;
+    }
+
+    async fn set_position(&self, track_id: ObjectPath<'_>, position: i64) {
+        if let Some(request) = self.model.set_position_request(track_id.as_str(), position) {
+            let _ = self.daemon.handle(request).await;
+        }
+    }
     /// Permanently out of scope (#34 decision 2): phonia's queue has no notion of opening an
     /// arbitrary URI.
     async fn open_uri(&self, _uri: String) {}
@@ -365,6 +381,16 @@ impl Player {
         self.model.loop_status().as_str()
     }
 
+    #[zbus(property)]
+    async fn set_loop_status(&self, value: &str) -> zbus::fdo::Result<()> {
+        let loop_status = parse_loop_status(value)?;
+        let _ = self
+            .daemon
+            .handle(Model::set_loop_status_request(loop_status))
+            .await;
+        Ok(())
+    }
+
     /// No playback-rate feature exists; always normal speed.
     #[zbus(property(emits_changed_signal = "const"))]
     fn rate(&self) -> f64 {
@@ -377,6 +403,11 @@ impl Player {
     }
 
     #[zbus(property)]
+    async fn set_shuffle(&self, value: bool) {
+        let _ = self.daemon.handle(Model::set_shuffle_request(value)).await;
+    }
+
+    #[zbus(property)]
     fn metadata(&self) -> HashMap<String, OwnedValue> {
         metadata_dict(self.model.metadata())
     }
@@ -384,6 +415,13 @@ impl Player {
     #[zbus(property)]
     fn volume(&self) -> f64 {
         self.model.volume()
+    }
+
+    #[zbus(property)]
+    async fn set_volume(&self, value: f64) {
+        for request in Model::set_volume_requests(value) {
+            let _ = self.daemon.handle(request).await;
+        }
     }
 
     /// Per spec, `Position` gets no change notification; polled, or inferred from `Seeked`.
@@ -422,11 +460,9 @@ impl Player {
         self.model.can_pause()
     }
 
-    /// Hardcoded `false` until part 5 wires `Seek`/`SetPosition` up to a real `Daemon::handle`
-    /// call -- see the module doc comment.
     #[zbus(property)]
     fn can_seek(&self) -> bool {
-        false
+        self.model.can_seek()
     }
 
     /// The spec's own invariant: this player does implement MPRIS, even while every individual

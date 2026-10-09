@@ -83,7 +83,7 @@ done — it is its own product decision, not a leftover.
 | #32 | Letras sincronizadas: lyrics synced to playback in the TUI | Code complete, all 3 parts merged |
 | #39 | Carpetas de playlists: browse TIDAL's own playlist folders in the TUI | Code complete, all 3 parts merged |
 | #33 | Mixes, radio y autoplay de pistas similares | Code complete, all 6 parts merged |
-| #34 | Integración MPRIS: teclas multimedia y widgets de escritorio | In progress (see below) |
+| #34 | Integración MPRIS: teclas multimedia y widgets de escritorio | Code complete, all 5 parts merged |
 
 The rest of Phase 4 and all of Phase 5 are not started, except CI (#42) and
 rustfmt-in-CI (#50), both closed. Nothing else is planned in detail yet;
@@ -881,7 +881,7 @@ daemon must stay usable headless or on a minimal install, the same
 "fails soft, never blocks or crashes" spirit as #31's own hardware
 check.
 
-**Parts 1-4 are done.** Part 1 (config setting, PR #151) and part 2
+**#34 is done, all 5 parts merged.** Part 1 (config setting, PR #151) and part 2
 (the pure `mpris::model` policy module, PR #152) are described above.
 Part 3 (PR #153) wires that model to a real session-bus connection:
 `crates/phoniad/src/mpris/service.rs` adds zbus as a direct `phoniad`
@@ -900,16 +900,24 @@ nothing test-only ships in a release build) in
 `crates/phoniad/tests/mpris.rs`, `#[ignore = "needs dbus-daemon"]`
 like `phonia-core`'s own D-Bus tests.
 
-Part 4 wires up transport: `Play`/`Pause`/`PlayPause`/`Stop`/`Next`/
-`Previous` each map to `self.model.*_request()` (written in part 2)
-routed through `Daemon::handle`, the same path `phonia ctl` already
-uses, and `CanGoNext`/`CanGoPrevious`/`CanPlay`/`CanPause` now read the
-model instead of a constant (so they join the batched
+Part 4 (PR #154) wires up transport: `Play`/`Pause`/`PlayPause`/
+`Stop`/`Next`/`Previous` each map to `self.model.*_request()` (written
+in part 2) routed through `Daemon::handle`, the same path `phonia ctl`
+already uses, and `CanGoNext`/`CanGoPrevious`/`CanPlay`/`CanPause` now
+read the model instead of a constant (so they join the batched
 `PropertiesChanged` set too). Media keys and a lock-screen widget's
-play/pause/skip buttons work after this. `Seek`/`SetPosition`/
-`OpenUri` stay no-ops and `CanSeek` stays a hardcoded `false` -- that,
-plus the writable `Volume`/`LoopStatus`/`Shuffle` properties and the
-README feature section, is part 5, the last one, closing #34.
+play/pause/skip buttons work after this.
+
+Part 5 (PR #155, last, closes #34) finishes the job: `Seek`/
+`SetPosition` map to `Model::seek_request`/`set_position_request`
+(already written) through `Daemon::handle`, and `CanSeek` reads the
+model -- the `Seeked` signal needed no new trigger, since the engine
+already publishes `ipc::Event::Seeked` for any seek and parts 2/3
+already turn that into the signal. `Volume`/`LoopStatus`/`Shuffle`
+gain `#[zbus(property)]` setters mapping to the matching
+`Model::set_*_request` function(s); an invalid `LoopStatus` string is
+refused (`InvalidArgs`), not silently ignored. README gained an
+"MPRIS" section describing the feature for users. #34 is closed.
 
 ## Conventions this file assumes
 

@@ -36,18 +36,26 @@ struct Fixture {
 /// periods), a write blocks until the test calls `f.sinks.handles()[0].advance(...)`, which is
 /// also the only moment the audio thread notices a command like `Pause` sent meanwhile.
 async fn fixture(name: &str) -> Fixture {
+    fixture_with(
+        name,
+        OutputSpec::Exclusive {
+            device: "hw:fake,0".into(),
+        },
+        FakeSinkFactory::blocking(),
+    )
+    .await
+}
+
+/// Like [`fixture`], on an output of the test's choosing -- a `Shared` one with
+/// `FakeSinkFactory::blocking().with_volume()` is what gives `Volume` something to write to (an
+/// exclusive card has no mixer, per #31).
+async fn fixture_with(name: &str, output: OutputSpec, sinks: Arc<FakeSinkFactory>) -> Fixture {
     let (_reports, report_rx) = mpsc::unbounded_channel();
-    let sinks = FakeSinkFactory::blocking();
     let build: Build = {
         let sinks = sinks.clone();
         Arc::new(move |_| sinks.clone())
     };
-    let outputs = Outputs::new(
-        OutputSpec::Exclusive {
-            device: "hw:fake,0".into(),
-        },
-        build,
-    );
+    let outputs = Outputs::new(output, build);
     let daemon = Daemon::start(DaemonParts {
         sinks: sinks.clone(),
         outputs,
@@ -196,8 +204,8 @@ async fn metadata_and_playback_status_are_served_once_a_track_is_playing() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs dbus-daemon"]
-async fn seek_and_set_position_stay_no_ops_and_can_seek_stays_false() {
-    let f = fixture("seek-no-op").await;
+async fn seek_moves_real_playback_and_fires_the_seeked_signal() {
+    let f = fixture("seek").await;
     let mut events = f.daemon.subscribe();
     f.playing_track(&mut events).await;
 
@@ -209,26 +217,68 @@ async fn seek_and_set_position_stay_no_ops_and_can_seek_stays_false() {
     let player = player(&client, NAME).await;
 
     assert!(
-        !player.get_property::<bool>("CanSeek").await.unwrap(),
-        "CanSeek must stay false until part 5 wires Seek/SetPosition up"
-    );
-    assert!(
-        player.get_property::<bool>("CanControl").await.unwrap(),
-        "CanControl is the one capability that is always true"
+        player.get_property::<bool>("CanSeek").await.unwrap(),
+        "a track with a known duration can be sought"
     );
 
-    let before = f.daemon.snapshot().1;
+    let mut seeked = player.receive_signal("Seeked").await.unwrap();
     player
-        .call::<_, _, ()>("Seek", &(5_000_000i64,))
+        .call::<_, _, ()>("Seek", &(2_000_000i64,)) // +2s
         .await
         .unwrap();
-    let track_id = zbus::zvariant::ObjectPath::try_from("/some/track").unwrap();
-    player
-        .call::<_, _, ()>("SetPosition", &(track_id, 1_000_000i64))
+    // The audio thread only notices a command between writes; once its queue is full it is
+    // blocked inside one until this lets it return.
+    f.sinks.handles()[0].advance(4096);
+
+    let message = tokio::time::timeout(TIMEOUT, seeked.next())
+        .await
+        .expect("timed out waiting for the Seeked signal")
+        .expect("the stream ended");
+    let (position,): (i64,) = message.body().deserialize().unwrap();
+    assert!(
+        (1_900_000..=2_100_000).contains(&position),
+        "expected roughly 2s (in microseconds) in, got {position}"
+    );
+
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs dbus-daemon"]
+async fn writing_volume_loop_status_and_shuffle_reaches_the_daemon() {
+    let f = fixture_with(
+        "writable",
+        OutputSpec::Shared { sink: None },
+        FakeSinkFactory::blocking().with_volume(),
+    )
+    .await;
+    let mut events = f.daemon.subscribe();
+    f.playing_track(&mut events).await;
+
+    let bus = Bus::start();
+    let _mpris = service::start_on_bus(f.daemon.clone(), &bus.address)
         .await
         .unwrap();
-    let after = f.daemon.snapshot().1;
-    assert_eq!(before, after, "Seek/SetPosition are still no-ops in part 4");
+    let client = connect(&bus).await;
+    let player = player(&client, NAME).await;
+
+    player.set_property("Volume", 0.5f64).await.unwrap();
+    let volume = f.daemon.snapshot().1.volume.unwrap();
+    assert_eq!((volume.percent, volume.muted), (50, false));
+
+    player.set_property("LoopStatus", "Track").await.unwrap();
+    assert_eq!(f.daemon.snapshot().2.repeat, phonia_ipc::Repeat::One);
+
+    player.set_property("Shuffle", true).await.unwrap();
+    assert!(f.daemon.snapshot().2.shuffle);
+
+    assert!(
+        player
+            .set_property("LoopStatus", "not-a-real-status")
+            .await
+            .is_err(),
+        "an invalid LoopStatus is refused, not silently ignored"
+    );
 
     f.finish().await;
 }

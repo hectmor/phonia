@@ -3019,3 +3019,60 @@ through the D-Bus `Player` object and confirms each one's *real* effect — the 
 `StateChanged`/`TrackStarted` events and `Daemon::snapshot()`, not just that the call returned —
 exactly the same "assert on what the engine actually did, not that the call didn't error" bar the
 rest of `phoniad`'s own test suite holds its daemon-level tests to.
+
+## 2026-10-09 — #34 part 5 (last): seeking, writable properties — CLOSES #34
+
+Finished the transport surface: `Seek`/`SetPosition` now call `Model::seek_request`/
+`self.model.set_position_request(...)` (both written in part 2, already unit-tested there) and
+route the result through `self.daemon.handle(...)`, exactly like every other transport method.
+`CanSeek` reads `self.model.can_seek()` instead of the hardcoded `false` parts 3 and 4
+deliberately left it at, and joined `service.rs`'s `TRACKED_PROPERTIES`. `OpenUri` stays a
+permanent no-op (#34 decision 2: phonia's queue has no notion of opening an arbitrary URI).
+
+The `Seeked` signal needed **no new trigger at all** — the headline simplification of this part.
+The engine already publishes `ipc::Event::Seeked` for any seek, regardless of who asked for it,
+and `mpris::model::Model::apply` (part 2) already turns that into `Changed::seeked_us`, which
+`service.rs`'s `emit` function (part 3) already fires as the `Seeked` D-Bus signal. Wiring `Seek`/
+`SetPosition` up to produce a *real* seek was the only missing piece.
+
+`Volume`, `LoopStatus` and `Shuffle` gained `#[zbus(property)]` setters (`set_volume`,
+`set_loop_status`, `set_shuffle`), each mapping to the matching `Model::set_*_request` static
+function (also already written and unit-tested in part 2) and routing through `Daemon::handle` —
+`set_volume` dispatches every `Request` `Model::set_volume_requests` returns in order (one or two:
+a `SetVolume`, plus a `SetMute{false}` when the new value is above zero, so a slider never
+silently snaps back to 0 while a stale mute flag lingers underneath, per #34's own volume
+decision). `set_loop_status` parses the incoming string against MPRIS's own three `LoopStatus`
+values and refuses anything else with `zbus::fdo::Error::InvalidArgs`, rather than silently
+mapping an unrecognized value to `None` — a client sending garbage should see an error, not have
+it swallowed. None of the three setters mutate `self.model` directly: like every other write,
+the authoritative update still arrives through the normal event flow (the daemon's own
+`VolumeChanged`/`QueueChanged`) a short moment later, picked up by the background task from part
+3. zbus's own property-set machinery emits one unbatched `PropertiesChanged` immediately after a
+successful external `Set` call (reading whatever the getter reports at that instant, which may
+still be the pre-write value for a moment); the real, correct value arrives moments later in the
+next batched signal once the daemon's own event reaches the model. This small, momentary
+staleness was accepted rather than engineered away: the final state is always correct, and
+blocking the `Set` call on the full round trip would add complexity disproportionate to the
+actual harm of a widget's slider very briefly out of sync with itself.
+
+**Testing**: `crates/phoniad/tests/mpris.rs` replaced the old "Seek/SetPosition are no-ops" test
+with `seek_moves_real_playback_and_fires_the_seeked_signal` (drives a real `Seek` through the
+D-Bus `Player` object, and asserts on the actual `Seeked` signal's payload via
+`Proxy::receive_signal`, not just that the engine's own position moved) and added
+`writing_volume_loop_status_and_shuffle_reaches_the_daemon` (writes all three properties through
+`Proxy::set_property` and confirms each one's real effect via `Daemon::snapshot()`, plus that an
+invalid `LoopStatus` string is refused rather than ignored). The volume test needed a `Shared`
+output with `FakeSinkFactory::blocking().with_volume()` instead of the other tests' `Exclusive`
+one, since an exclusive card has no mixer to write to at all (#31) — `fixture_with` replaces the
+old fixed-output `fixture` as the base, which now just calls it with the exclusive default.
+
+**README** gained an "MPRIS" section (after "Play reporting") describing the feature for users:
+the bus name and its instance-pid fallback, that transport and the three writable properties
+route through the exact same request path `phonia ctl` itself uses, and that `Raise`/`Quit`/
+`OpenUri` are deliberately not implemented. The "Tech stack" section's `phonia-ipc` paragraph,
+which had speculatively named "an MPRIS bridge" as a future consumer of the wire protocol before
+this issue existed, now points at the "MPRIS" section instead and notes MPRIS lives inside
+`phoniad` itself, not as a separate bridge — the stale reference the 2026-10-09 "#34 approved
+plan" entry's bridge-vs-in-daemon decision had left behind in README is now fixed too.
+
+#34 is closed: all 5 parts (PRs #151-#155) are merged.
