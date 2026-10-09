@@ -83,10 +83,11 @@ done — it is its own product decision, not a leftover.
 | #32 | Letras sincronizadas: lyrics synced to playback in the TUI | Code complete, all 3 parts merged |
 | #39 | Carpetas de playlists: browse TIDAL's own playlist folders in the TUI | Code complete, all 3 parts merged |
 | #33 | Mixes, radio y autoplay de pistas similares | Code complete, all 6 parts merged |
+| #34 | Integración MPRIS: teclas multimedia y widgets de escritorio | In progress (see below) |
 
 The rest of Phase 4 and all of Phase 5 are not started, except CI (#42) and
 rustfmt-in-CI (#50), both closed. Nothing else is planned in detail yet;
-issues #34–#45 hold one-line descriptions each, to be scoped with Opus when
+issues #35–#45 hold one-line descriptions each, to be scoped with Opus when
 their turn comes.
 
 ### Phase 6 — Layout and appearance
@@ -853,6 +854,32 @@ threshold off the engine's own `Position` events, saved across a
 Continue row and favorite albums/playlists/tracks blocks. "Albums
 you'll enjoy" (TIDAL's own editorial feed) remains the deliberately
 separate, not-yet-investigated future issue it always was.
+
+**#34 (MPRIS: media keys and desktop widgets)** is next, approved as a
+5-part plan after an Opus investigation. The daemon gains an MPRIS2
+D-Bus service (`org.mpris.MediaPlayer2.phonia`, falling back to
+`...phonia.instance<pid>` if that name is taken), built on the exact
+service-provider shape #13's DAC reservation already uses (`zbus`'s
+`#[interface]`, `connection::Builder::session()`) -- zbus becomes a
+direct `phoniad` dependency for the first time (phonia-core already
+has it, so no new crate). It lives inside `phoniad` as a new
+subscriber of `Daemon::subscribe()`/`snapshot()`, the same stream IPC
+clients already get, translating `ipc::Event`s into MPRIS
+`PropertiesChanged`/`Seeked` signals -- not the separate "MPRIS bridge
+process over phonia-ipc" an earlier DECISIONS.md entry had imagined
+(see the new entry explaining why that idea was dropped). All four
+approved decisions were the recommended ones: full transport control
+plus writable Volume/LoopStatus/Shuffle (no OpenUri/Raise/Quit); on by
+default (`[daemon] mpris = true`, the same "inert until used" reasoning
+as `gapless`/`report_plays`, not `autoplay`/`replaygain`'s opt-in);
+lives in `phoniad` itself, not a separate bridge; Loading/Seeking are
+"sticky" (keep showing the last stable PlaybackStatus, since mapping
+them to Playing is wrong whenever a seek happens while paused, or a
+pause requested mid-load lands in Paused once it finishes). Startup
+never blocks on it and a missing session bus only logs a line -- the
+daemon must stay usable headless or on a minimal install, the same
+"fails soft, never blocks or crashes" spirit as #31's own hardware
+check.
 
 ## Conventions this file assumes
 

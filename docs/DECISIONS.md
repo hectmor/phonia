@@ -2768,3 +2768,103 @@ same interactions (play, add, radio) its own rows already had everywhere else in
 "Albums you'll enjoy" (TIDAL's own editorial/recommendation feed) remains the deliberately
 separate, not-yet-investigated future issue it always was, the same territory #33's "My Mixes"
 and #139 already left alone.
+
+## 2026-10-09 — #34 approved plan: MPRIS integration (media keys and desktop widgets)
+
+Planned with Opus, after a read-only investigation (then a second pass once the plan itself
+needed verifying against the real code, not just a prior summary). **Headline finding: phonia
+already implements the exact mechanism MPRIS needs, just for a different interface.**
+`crates/phonia-core/src/output/dbus.rs` (#13, DAC reservation) already acts as a D-Bus *service
+provider* — `Reserve` exposes `org.freedesktop.ReserveDevice1` via zbus's `#[interface]` macro,
+with a method and `#[zbus(property)]` getters, served via `connection::Builder::session().
+serve_at(...).build()`. MPRIS needs the identical shape (own object, own interface, properties,
+methods, on the session bus) — a direct template, not something to invent. The genuinely new
+piece is emitting `PropertiesChanged`/`Seeked` signals at runtime, which nothing in the codebase
+does today (every existing D-Bus property is set once and never changes).
+
+**This supersedes an idea two earlier DECISIONS.md entries (2026-09-27's TIDAL-browsing entry,
+and #24's cover-id-on-the-wire entry) had pictured without committing to**: a separate "MPRIS
+bridge" process, talking to `phoniad` over `phonia-ipc` like any other client, keeping the daemon
+itself free of desktop-specific concerns. That idea is explicitly **not** what #34 does. Decision
+6 below picks living inside `phoniad` instead, for a concrete reason the bridge idea didn't have
+to reckon with until now: a bridge needs its own service unit, its own reconnect/handshake logic,
+and critically, **media keys stop working the moment that separate process isn't running** —
+exactly the kind of fragile extra moving part this project has otherwise avoided (one binary,
+one daemon, one source of truth for what's playing). The cover-id-on-the-wire shape (#24) already
+anticipated `mpris:artUrl` wanting a URL, not bytes, and `phonia_ipc::image::url()` already builds
+exactly that — so nothing about the wire protocol needs to change for this.
+
+**Where it hooks in, deliberately not inside `fan_in`**: `Daemon::fan_in` (`daemon.rs`), which
+turns engine events into published `ipc::Event`s, stays untouched. The MPRIS task is just another
+subscriber — `Daemon::subscribe()` for live updates (the identical broadcast stream IPC clients
+already get) plus `Daemon::snapshot()` to seed its own state at startup — the same pattern
+`server.rs` itself already uses for a client connecting mid-stream, including the `Lagged`
+re-seed-from-snapshot handling. This keeps MPRIS purely additive: a new consumer of an existing
+stream, not a change to how the daemon publishes anything.
+
+**4 decisions, all = Opus's recommendation, approved via `AskUserQuestion`:**
+1. **PlaybackStatus while Loading or Seeking is "sticky"**: keeps showing the last stable state
+   (Playing/Paused/Stopped), except Stopped→Loading, which shows Playing immediately since
+   pressing Play is itself the user's own signal. Mapping Loading/Seeking straight to Playing
+   (the simpler alternative) is wrong in two real cases already in the engine: seeking while
+   paused, and a pause requested mid-load, which lands in `Paused` once the load finishes
+   (`pause_when_ready` in `audio_thread.rs`) — either would make MPRIS briefly lie about the
+   state. The accepted cost: a track that fails to load from Stopped shows a brief false
+   "Playing" before falling back to Stopped once the engine's own `StateChanged` settles it.
+2. **Read-write scope**: all transport (Play/Pause/PlayPause/Stop/Next/Previous/Seek/
+   SetPosition) plus writable `Volume`/`LoopStatus`/`Shuffle`, routed straight through the
+   existing `Daemon::handle`/`Request` path exactly like `phonia ctl` already does — no new
+   control-plane code, just a new caller of the same one. `OpenUri`, `Raise` and `Quit` are
+   explicitly out: phonia's queue model doesn't take arbitrary URIs and there is no window to
+   raise; `CanQuit=false` specifically because a widget's "close" must never kill the daemon the
+   TUI itself depends on, even though `Request::Shutdown` technically exists and could be wired.
+   The accepted tradeoff: every same-user D-Bus caller can now drive playback — a second door
+   next to the socket, but the same per-user trust boundary the socket already has, not a new
+   one.
+3. **On by default** (`[daemon] mpris = true`, file-only, no CLI flag — the same shape
+   `gapless`/`report_plays` already use): it is inert until something calls it and never touches
+   a sample, the project's own stated line for defaulting a feature on (reserved for
+   `autoplay`/`replaygain`'s opt-in, since those alter behavior or samples respectively). Media
+   keys "just working" is the ordinary desktop expectation. The accepted tradeoff: every user
+   gets a new D-Bus service and a lock-screen now-playing widget by default, which can matter on
+   a shared screen — noted, not dismissed, but outweighed by the "inert until used" reasoning.
+4. **Lives inside `phoniad`** (a new `mpris` module), not a separate bridge process (see above) —
+   zbus becomes a direct `phoniad` dependency for the first time (already pulled in transitively
+   via `phonia-core`, so no new crate in the workspace). Tested by splitting the pure policy
+   (`mpris::model`: status collapsing, metadata building, the `Can*` flags, volume/mute mapping,
+   call→`Request` mapping, event→changed-property diffing) into plain unit tests with no zbus at
+   all, mirroring `autoplay.rs`'s own pure/adapter split, plus `#[ignore = "needs dbus-daemon"]`
+   integration tests against a private bus for the thin zbus adapter, reusing `phonia-core`'s
+   existing `testutil::Bus` (exposed behind a new `test-support` feature so it stays test-only in
+   release builds) the same way #13's own `dbus.rs` tests already do.
+
+**Adopted as recommended, not separately asked** (implementation judgment calls within the
+approved plan, not product tradeoffs): `CanGoNext`/`CanGoPrevious` are computed from the queue's
+own play order/current/repeat alone, deliberately ignoring autoplay — autoplay appends within one
+fetch of the last track starting (`consider_autoplay`), so `CanGoNext` catches up via the very
+next `QueueChanged` rather than ever claiming a Next that would actually do nothing; `CanPlay`
+needs a non-empty queue, `CanPause` needs a loaded, non-Stopped track, `CanSeek` needs a known
+duration, `CanControl` is always true (the spec's own invariant). Muted volume reads as 0.0;
+writing any value above 0 sets the percent *and* unmutes (so a slider never silently snaps back
+to 0); writing exactly 0.0 sets percent 0 without touching mute; an output with no hardware
+volume control (`status.volume == None`, the same case #31 already names) reads 1.0 and refuses
+writes, mirroring #31's own "locked at 100%" wording. The MPRIS bus name is
+`org.mpris.MediaPlayer2.phonia`, falling back to the spec's own `...phonia.instance<pid>` form if
+a second daemon instance can't acquire the plain name (the same spirit as the socket path already
+allowing multiple instances via distinct paths); if even that fails, MPRIS is skipped with one
+logged line, never a startup failure — the same "fails soft, never blocks or crashes" rule #31's
+own hardware-mixer check already established, since the daemon must stay usable headless or on a
+minimal install with no session bus at all.
+
+**5-part plan**: part 1 the config setting alone, no behavior (`[daemon] mpris`, `Sourced::pick`,
+a parse test, README/DECISIONS updated to also record *why* the bridge idea is superseded — this
+entry is that record). Part 2 the pure `mpris::model` (status/metadata/Can-flags/volume/loop/
+shuffle mapping, call→Request mapping, event→changed-property diffing), unit-tested only, nothing
+wired up yet. Part 3 the read-only service wired in (zbus added to `phoniad`, Root + Player
+interfaces with getters, the subscribe/snapshot task, batched `PropertiesChanged`, the name with
+its instance-pid fallback, fail-soft startup behind a timeout, clean shutdown) — widgets and
+`playerctl metadata` work, but every method is a no-op and every `Can*` flag is false. Part 4
+transport control (Play/Pause/PlayPause/Stop/Next/Previous go through `Daemon::handle`, the
+`Can*` flags turn on) — media keys work. Part 5 (last, closes #34) seeking and the writable
+properties (`Seek`/`SetPosition`/`Seeked` signal, writable Volume/LoopStatus/Shuffle), plus the
+README feature section. Parts 4 and 5 may merge into one PR if four PRs are preferred over five.

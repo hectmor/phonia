@@ -183,6 +183,8 @@ pub struct Settings {
     /// The startup value of autoplay (fetching more tracks from TIDAL on a dry queue); can be
     /// changed at runtime afterward.
     pub autoplay: Sourced<bool>,
+    /// Whether the daemon registers an MPRIS2 D-Bus service. See #34.
+    pub mpris: Sourced<bool>,
 }
 
 /// Decides every setting: command line over file over default.
@@ -238,6 +240,7 @@ pub fn resolve(overrides: Overrides, file: &ConfigFile) -> Settings {
         ),
         report_plays: Sourced::pick(None, file.tidal.report_plays, true),
         autoplay: Sourced::pick(None, file.playback.autoplay, false),
+        mpris: Sourced::pick(None, file.daemon.mpris, true),
     }
 }
 
@@ -463,6 +466,7 @@ mod tests {
             daemon: Daemon {
                 socket: socket.map(PathBuf::from),
                 verbose,
+                ..Daemon::default()
             },
             ..ConfigFile::default()
         }
@@ -559,6 +563,37 @@ mod tests {
             Sourced {
                 value: false,
                 origin: Origin::File
+            }
+        );
+    }
+
+    #[test]
+    fn the_file_can_turn_off_mpris() {
+        let file = ConfigFile {
+            daemon: Daemon {
+                mpris: Some(false),
+                ..Daemon::default()
+            },
+            ..ConfigFile::default()
+        };
+        let settings = resolve(Overrides::default(), &file);
+        assert_eq!(
+            settings.mpris,
+            Sourced {
+                value: false,
+                origin: Origin::File
+            }
+        );
+    }
+
+    #[test]
+    fn mpris_defaults_on_like_gapless_and_report_plays() {
+        let settings = resolve(Overrides::default(), &ConfigFile::default());
+        assert_eq!(
+            settings.mpris,
+            Sourced {
+                value: true,
+                origin: Origin::Default
             }
         );
     }
