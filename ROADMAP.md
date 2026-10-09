@@ -106,7 +106,7 @@ the full design discussion and the decisions made.
 | Issue | What | Status |
 |---|---|---|
 | #139 | Home screen in the TUI (local data only) | Code complete (see below) |
-| #144 | Favorite artists and Recently played on Home | In progress (see below) |
+| #144 | Favorite artists and Recently played on Home | Code complete (see below) |
 
 Brand new milestone, started right after #33. A lightweight home
 screen using only data phonia already fetches (resuming, favorites,
@@ -831,6 +831,28 @@ round-trip through the filesystem, not just the pure `load`/`save`
 functions in isolation. Every other existing test fixture passes `None`
 on purpose, so running the test suite never touches a real machine's
 actual state directory.
+
+Part 6 (last) adds the Home block and **closes #144**: `State.
+recently_played` (fetched once a connection with the `recently_played`
+capability exists, whatever section is showing -- unlike the library,
+which waits for its own section -- and kept current by `Event::
+RecentlyPlayedChanged` from then on), `home::Row::Played`/`Selected::
+Played`, right after Continue and before the library's own blocks.
+Enter plays an entry, `a`/`A` add it without playing, `o` opens its
+radio for a TIDAL one (nothing for a local file, which has no id to
+seed one with). This is also where `home::Row::Header(LibraryTab)`
+finally generalizes to `Row::Header(Block)`, deferred from #144's part
+3 specifically until recently played -- the one block with no matching
+`LibraryTab` and no "See all" row -- actually needed it.
+
+**#144 is now fully done, all 6 PRs merged.** Favorite artists (a real
+fourth Library tab, straight copy of the existing favorites pattern)
+and recently played (a genuinely new mechanism: tracked via a 30s-heard
+threshold off the engine's own `Position` events, saved across a
+`phoniad` restart) both show on Home now, alongside #139's existing
+Continue row and favorite albums/playlists/tracks blocks. "Albums
+you'll enjoy" (TIDAL's own editorial feed) remains the deliberately
+separate, not-yet-investigated future issue it always was.
 
 ## Conventions this file assumes
 
