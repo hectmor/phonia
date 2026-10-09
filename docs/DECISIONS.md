@@ -2555,3 +2555,36 @@ the existing lists of each rather than new standalone tests, matching how every 
 already tested there). No `ctl` subcommand added: `Request::Albums`/`Request::Playlists` have
 none either today (only reachable through `library`/`artist`'s own browsing), so artists stays
 consistent with that, not with `album`/`artist`'s own standalone commands.
+
+**PR2 (favorite artists: the Library tab), code complete**: `LibraryTab` grows to four
+(`FavoriteTracks`, `FavoriteAlbums`, `FavoriteArtists`, `Playlists`), `LibraryState` gains
+`favorite_artists: Found<ArtistSummary>` + `artists_phase: Phase`, loaded by its own
+`artists_request()` fired at the same moment as `Request::Library` and `playlist_request()` (a
+new `Tag::LibraryArtists`) -- the same "its own separate request" shape the Playlists tab already
+has, for the same reason: `Request::Artists`/`Payload::Artists` is its own pair, not part of
+`Payload::Library`. Enter on a favorite artist opens its page nested on the library's own stack
+(`open_artist_view`, shared with Search); `a`/`A` add its top tracks whole, mirroring exactly how
+Search's own artist row already works.
+
+**A real bug found and fixed while wiring this, the same shape as #140 and #139 part 4's
+`find_view`**: `open_artist_view` pushed onto `state.search_views` directly instead of through
+`active_stack_mut(state)` -- harmless until now only because Search was its one caller (an artist
+view never existed anywhere else). Opening an artist from Library (this PR's own feature) would
+have put the view on the wrong stack, the exact failure mode #140 fixed for reading a stack, now
+hit for writing one. Fixed to use `active_stack_mut`, consistent with every other view-opening
+function in `app.rs`. **Pattern worth naming explicitly after the third occurrence**: anything
+that opens or looks up a view must go through `active_stack_mut`/derive the stack from
+`state.section()`, never reference a specific stack field (`search_views`, `library_views`,
+`home_views`) by name -- each of the three real bugs so far (#140, `find_view`, this one) was
+exactly that shortcut, taken while only one stack could possibly be the caller, breaking silently
+the moment a second or third one could be.
+
+Tests: `library.rs` unit tests (tab stepping now four-wide, the disconnect test seeds
+`finish_artists` too so an already-loaded list is not touched), `app.rs` integration tests (a
+regression test opening a favorite artist's page to confirm it lands on `library_views` not
+`search_views`, `a`/`A` adding its top tracks, `o` a no-op), `view/mod.rs` (the tab's count shows,
+its one row renders, opening it shows the right breadcrumb). The four-tab shift broke the usual
+crop of existing tests expecting three tabs or specific `[`/`]` counts to reach Playlists -- fixed
+the same mechanical way every previous section-shape change was (one more keypress, one more tab
+in the expected sequence), no behavior assertions changed. Full workspace green (347 phonia-tui
+tests, up from 344), fmt+clippy clean.

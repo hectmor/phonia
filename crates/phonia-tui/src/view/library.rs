@@ -28,6 +28,7 @@ fn draw_tabs(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
         // tree) loads separately from the other two, so it has its own phase to check.
         let ready = match tab {
             LibraryTab::Playlists => library.playlists_phase == Phase::Done,
+            LibraryTab::FavoriteArtists => library.artists_phase == Phase::Done,
             LibraryTab::FavoriteTracks | LibraryTab::FavoriteAlbums => library.phase == Phase::Done,
         };
         let label = if ready {
@@ -62,6 +63,7 @@ fn draw_list(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
     };
     let phase = match library.tab {
         LibraryTab::Playlists => &library.playlists_phase,
+        LibraryTab::FavoriteArtists => &library.artists_phase,
         LibraryTab::FavoriteTracks | LibraryTab::FavoriteAlbums => &library.phase,
     };
     let lines = match phase {
@@ -88,6 +90,12 @@ fn rows<'a>(state: &State, library: &LibraryState, theme: &Theme, height: usize)
             .iter()
             .map(fmt::album)
             .collect(),
+        LibraryTab::FavoriteArtists => library
+            .favorite_artists
+            .items
+            .iter()
+            .map(fmt::artist)
+            .collect(),
         LibraryTab::Playlists => library
             .playlists
             .items
@@ -102,6 +110,7 @@ fn rows<'a>(state: &State, library: &LibraryState, theme: &Theme, height: usize)
     let cursor = match library.tab {
         LibraryTab::FavoriteTracks => library.favorite_tracks.cursor,
         LibraryTab::FavoriteAlbums => library.favorite_albums.cursor,
+        LibraryTab::FavoriteArtists => library.favorite_artists.cursor,
         LibraryTab::Playlists => library.playlists.cursor,
     }
     .selected();
