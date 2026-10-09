@@ -2588,3 +2588,28 @@ crop of existing tests expecting three tabs or specific `[`/`]` counts to reach 
 the same mechanical way every previous section-shape change was (one more keypress, one more tab
 in the expected sequence), no behavior assertions changed. Full workspace green (347 phonia-tui
 tests, up from 344), fmt+clippy clean.
+
+**PR3 (favorite artists: the Home block), code complete**: `home::Row::Artist(&'a
+ArtistSummary)` / `Selected::Artist(ArtistSummary)`, a new block pushed right after favorite
+albums (gated on `library.artists_phase == Phase::Done`, same shape as every other block),
+`view::home`'s rendering reusing `fmt::artist`. `act_on_home_result` grew an `Artist` arm mirroring
+`Selected::Album`'s own: Enter opens the artist's page nested on **Home's** own stack
+(`home_views`, via `open_artist_view`, which already goes through `active_stack_mut` after PR2's
+fix), `a`/`A` add its top tracks whole, `o` is a no-op (handled generically by the existing
+`OpenRadio` early-return, which already treats anything but a `Track` row as nothing to open).
+
+**Deliberately did NOT do the `Row::Header(LibraryTab)` → `Row::Header(Block)` generalization
+the original plan bundled into this PR.** That refactor exists only to let a future block (recently
+played, part 6) have a header with no matching `LibraryTab` to point at — favorite artists has a
+real tab (PR2), so introducing the more general `Block` type now would be pure scaffolding for a
+need part 6 hasn't arrived at yet, with no behavior change to show for it in the meantime. Moved to
+part 6, where it becomes load-bearing instead of speculative.
+
+Tests: `home.rs` unit tests (an artists-only block, all four blocks in order, `selected()` on an
+artist row), `app.rs` integration tests (opening a favorite artist from Home lands on `home_views`
+not `library_views`/`search_views`, adding its top tracks without opening it, `o` refused), updated
+selectable-row indices in the existing Home fixtures/tests now that an artist block sits between
+favorite albums and the playlist folder (every "press `j` N times to reach row X" test shifted by
+however many new rows came before it — the usual mechanical fallout of adding a block, not a
+behavior change), `view/mod.rs` (the block's own count and "See all" show). Full workspace green
+(351 phonia-tui tests, up from 347), fmt+clippy clean.

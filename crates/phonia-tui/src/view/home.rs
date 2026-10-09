@@ -33,6 +33,7 @@ fn line_for(row: &Row, selected: bool, theme: &Theme) -> Line<'static> {
         Row::Spacer => String::new(),
         Row::Header(tab) => tab.title().to_string(),
         Row::Album(album) => fmt::album(album),
+        Row::Artist(artist) => fmt::artist(artist),
         Row::Entry(entry) => folder_entry_text(entry),
         Row::Track(track) => fmt::track(track),
         Row::SeeAll { total, .. } => format!("See all ({total}) \u{2192}"),

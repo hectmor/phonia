@@ -2944,6 +2944,24 @@ mod tests {
                 }),
             },
         );
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::LibraryArtists { generation: 0 },
+                result: Ok(phonia_ipc::Payload::Artists {
+                    from: phonia_ipc::ArtistListRef::FavoriteArtists,
+                    page: phonia_ipc::Page {
+                        items: vec![phonia_ipc::ArtistSummary {
+                            id: "780".into(),
+                            name: "Korn".into(),
+                            picture: None,
+                        }],
+                        total: 3,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
         state
     }
 
@@ -2962,6 +2980,9 @@ mod tests {
         assert!(text.contains("Favorite albums"), "{text}");
         assert!(text.contains("Issues"), "{text}");
         assert!(text.contains("See all (7)"), "{text}");
+        assert!(text.contains("Favorite artists"), "{text}");
+        assert!(text.contains("Korn"), "{text}");
+        assert!(text.contains("See all (3)"), "{text}");
         assert!(text.contains("Your playlists"), "{text}");
         assert!(text.contains("Moods"), "{text}");
         assert!(text.contains("See all (1)"), "{text}");
