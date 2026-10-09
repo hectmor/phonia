@@ -1,13 +1,13 @@
-//! #34 part 3: the MPRIS zbus adapter against a private, non-session `dbus-daemon` -- never the
-//! user's real bus -- mirroring `phonia-core`'s own `output/dbus.rs` tests. Ignored by default
-//! because they need that binary: `cargo test -p phoniad --test mpris -- --ignored`.
+//! #34 parts 3-4: the MPRIS zbus adapter against a private, non-session `dbus-daemon` -- never
+//! the user's real bus -- mirroring `phonia-core`'s own `output/dbus.rs` tests. Ignored by
+//! default because they need that binary: `cargo test -p phoniad --test mpris -- --ignored`.
 
 use futures_util::StreamExt;
 use phonia_core::config::OutputSpec;
 use phonia_core::openers::DispatchOpener;
 use phonia_core::output::fake::FakeSinkFactory;
 use phonia_core::testutil::Bus;
-use phonia_ipc::{AddAt, Event, NewTrack, Request};
+use phonia_ipc::{AddAt, Event, NewTrack, Request, State};
 use phoniad::daemon::{Daemon, DaemonParts};
 use phoniad::mpris::service;
 use phoniad::outputs::{Build, Outputs};
@@ -126,6 +126,20 @@ async fn wait_for(events: &mut broadcast::Receiver<(u64, Event)>, pred: impl Fn(
     .expect("timed out waiting for the expected event")
 }
 
+/// Waits for the next `TrackStarted` and returns its `source`.
+async fn wait_for_track_started(events: &mut broadcast::Receiver<(u64, Event)>) -> Option<String> {
+    tokio::time::timeout(TIMEOUT, async {
+        loop {
+            let (_, event) = events.recv().await.unwrap();
+            if let Event::TrackStarted { source, .. } = event {
+                return source;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for TrackStarted")
+}
+
 async fn connect(bus: &Bus) -> Connection {
     connection::Builder::address(bus.address.as_str())
         .unwrap()
@@ -182,8 +196,8 @@ async fn metadata_and_playback_status_are_served_once_a_track_is_playing() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs dbus-daemon"]
-async fn every_can_flag_is_false_and_every_method_is_a_no_op() {
-    let f = fixture("no-ops").await;
+async fn seek_and_set_position_stay_no_ops_and_can_seek_stays_false() {
+    let f = fixture("seek-no-op").await;
     let mut events = f.daemon.subscribe();
     f.playing_track(&mut events).await;
 
@@ -194,29 +208,104 @@ async fn every_can_flag_is_false_and_every_method_is_a_no_op() {
     let client = connect(&bus).await;
     let player = player(&client, NAME).await;
 
-    for flag in [
-        "CanGoNext",
-        "CanGoPrevious",
-        "CanPlay",
-        "CanPause",
-        "CanSeek",
-    ] {
-        assert!(
-            !player.get_property::<bool>(flag).await.unwrap(),
-            "{flag} must stay false until part 4 wires the matching method up"
-        );
-    }
+    assert!(
+        !player.get_property::<bool>("CanSeek").await.unwrap(),
+        "CanSeek must stay false until part 5 wires Seek/SetPosition up"
+    );
     assert!(
         player.get_property::<bool>("CanControl").await.unwrap(),
         "CanControl is the one capability that is always true"
     );
 
     let before = f.daemon.snapshot().1;
-    player.call::<_, _, ()>("Next", &()).await.unwrap();
-    player.call::<_, _, ()>("Pause", &()).await.unwrap();
-    player.call::<_, _, ()>("Stop", &()).await.unwrap();
+    player
+        .call::<_, _, ()>("Seek", &(5_000_000i64,))
+        .await
+        .unwrap();
+    let track_id = zbus::zvariant::ObjectPath::try_from("/some/track").unwrap();
+    player
+        .call::<_, _, ()>("SetPosition", &(track_id, 1_000_000i64))
+        .await
+        .unwrap();
     let after = f.daemon.snapshot().1;
-    assert_eq!(before, after, "every transport method is a no-op in part 3");
+    assert_eq!(before, after, "Seek/SetPosition are still no-ops in part 4");
+
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs dbus-daemon"]
+async fn transport_methods_route_through_daemon_handle_and_can_flags_follow_the_queue() {
+    let f = fixture("transport").await;
+    let mut events = f.daemon.subscribe();
+    let (one, two) = (f.wav("one.wav", 400_000), f.wav("two.wav", 400_000));
+    f.daemon
+        .handle(Request::QueueAdd {
+            tracks: vec![
+                NewTrack { source: one },
+                NewTrack {
+                    source: two.clone(),
+                },
+            ],
+            at: AddAt::End,
+        })
+        .await;
+    f.daemon.handle(Request::Play { item: None }).await;
+    wait_for(&mut events, |event| {
+        matches!(event, Event::TrackStarted { .. })
+    })
+    .await;
+
+    let bus = Bus::start();
+    let _mpris = service::start_on_bus(f.daemon.clone(), &bus.address)
+        .await
+        .unwrap();
+    let client = connect(&bus).await;
+    let player = player(&client, NAME).await;
+
+    assert!(
+        player.get_property::<bool>("CanGoNext").await.unwrap(),
+        "a second track is queued"
+    );
+    assert!(
+        player.get_property::<bool>("CanGoPrevious").await.unwrap(),
+        "something is already current, so Previous always does something"
+    );
+    assert!(player.get_property::<bool>("CanPlay").await.unwrap());
+    assert!(player.get_property::<bool>("CanPause").await.unwrap());
+
+    // Pause really pauses the engine, not just the model's own idea of it.
+    player.call::<_, _, ()>("Pause", &()).await.unwrap();
+    f.sinks.handles()[0].advance(4096);
+    wait_for(&mut events, |event| {
+        matches!(
+            event,
+            Event::StateChanged {
+                state: State::Paused
+            }
+        )
+    })
+    .await;
+    assert_eq!(f.daemon.snapshot().1.state, State::Paused);
+
+    // Next really advances the queue to the second track.
+    player.call::<_, _, ()>("Next", &()).await.unwrap();
+    f.sinks.handles()[0].advance(4096);
+    let started = wait_for_track_started(&mut events).await;
+    assert_eq!(started.as_deref(), Some(two.as_str()));
+
+    // Stop really stops playback.
+    player.call::<_, _, ()>("Stop", &()).await.unwrap();
+    f.sinks.handles()[0].advance(4096);
+    wait_for(&mut events, |event| {
+        matches!(
+            event,
+            Event::StateChanged {
+                state: State::Stopped
+            }
+        )
+    })
+    .await;
 
     f.finish().await;
 }

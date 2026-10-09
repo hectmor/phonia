@@ -2985,3 +2985,37 @@ binary. `service::start` (production: the session bus, swallows its own error in
 line) stays separate from the new `service::start_on_bus` (any bus address, reports the error) —
 the same `on_bus`-builder split `DbusReserver` already uses — so the tests can assert on failure
 without needing a feature gate of their own on `phoniad` itself.
+
+## 2026-10-09 — #34 part 4: transport control, closing in on #34
+
+Flipped `Player`'s six transport methods from the no-op bodies part 3 deliberately left behind to
+real calls: `Next`/`Previous`/`PlayPause`/`Stop` call `self.model.*_request()` (written in part
+2) unconditionally and route the `Request` through `self.daemon.handle(...)`, discarding the
+reply exactly like the fire-and-forget MPRIS method signature implies; `Play`/`Pause` do the same
+but only when `self.model.play_request()`/`pause_request()` return `Some` (idempotent at the
+wrong playback state, matching the spec's own "calling Play while already playing does nothing"
+wording). This needed a `daemon: Arc<Daemon>` field back on `Player` — deliberately absent in
+part 3, where it would have been genuine dead code and failed `-D warnings`.
+
+`CanGoNext`/`CanGoPrevious`/`CanPlay`/`CanPause` now read `self.model.can_*()` instead of a
+hardcoded `false`, and joined `service.rs`'s `TRACKED_PROPERTIES` so a change to any of them (a
+queue edit, autoplay appending, a track starting) is folded into the same batched
+`PropertiesChanged` signal as `PlaybackStatus`/`Metadata`/`Volume`/`LoopStatus`/`Shuffle`. `Seek`,
+`SetPosition` and `OpenUri` stay exactly as part 3 left them — no-op bodies — and `CanSeek` stays
+a hardcoded `false`, since nothing calls `Daemon::handle` for a seek yet; that is part 5, the
+last one, which closes #34.
+
+Media keys and a lock-screen widget's play/pause/previous/next buttons genuinely work after this
+PR — the first point in #34 where pressing something on a desktop actually moves phonia's own
+queue, not just reports its state.
+
+**Testing**: `crates/phoniad/tests/mpris.rs` split part 3's single "every method is a no-op"
+test into `seek_and_set_position_stay_no_ops_and_can_seek_stays_false` (unchanged in spirit, just
+narrowed to the two methods and the one `Can*` flag still out of scope) and a new
+`transport_methods_route_through_daemon_handle_and_can_flags_follow_the_queue`: queues two
+tracks, confirms `CanGoNext`/`CanGoPrevious`/`CanPlay`/`CanPause` read true from a real two-track
+queue (not just a hardcoded value happening to be true), then drives `Pause`, `Next` and `Stop`
+through the D-Bus `Player` object and confirms each one's *real* effect — the engine's own
+`StateChanged`/`TrackStarted` events and `Daemon::snapshot()`, not just that the call returned —
+exactly the same "assert on what the engine actually did, not that the call didn't error" bar the
+rest of `phoniad`'s own test suite holds its daemon-level tests to.
