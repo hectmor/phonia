@@ -2991,6 +2991,65 @@ mod tests {
         assert!(text.contains("See all (42)"), "{text}");
     }
 
+    /// Connecting with the `recently_played` capability asks for it at once, same timing as the
+    /// library; left on Home with the log already loaded.
+    fn with_recently_played_on_home() -> State {
+        use crate::app::Tag;
+        let mut state = State::default();
+        update(
+            &mut state,
+            Msg::Connected {
+                server: phonia_ipc::ServerInfo {
+                    name: "phoniad".into(),
+                    version: "0.1.0".into(),
+                    pid: 1,
+                },
+                protocol: phonia_ipc::Version {
+                    major: 1,
+                    minor: 15,
+                },
+                capabilities: vec!["recently_played".into()],
+                status: crate::app::tests_support::status(),
+                queue: crate::app::tests_support::queue(),
+            },
+        );
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::RecentlyPlayed,
+                result: Ok(phonia_ipc::Payload::RecentlyPlayed {
+                    items: vec![phonia_ipc::PlayedTrack {
+                        source: "tidal:1".into(),
+                        title: Some("Here to Stay".into()),
+                        artist: Some("Korn".into()),
+                        duration_ms: None,
+                        cover: None,
+                        played_at_ms: 1_000,
+                    }],
+                }),
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn home_shows_the_recently_played_block_right_after_continue_with_no_see_all() {
+        let text = screen(&with_recently_played_on_home(), 100, 14);
+        assert!(text.contains("Nothing to continue yet"), "{text}");
+        assert!(text.contains("Recently played"), "{text}");
+        assert!(text.contains("Korn - Here to Stay"), "{text}");
+        let lines: Vec<&str> = text.lines().collect();
+        let header = lines
+            .iter()
+            .position(|line| line.contains("Recently played"))
+            .expect("the header is on screen");
+        assert!(
+            !lines[header + 1].contains("See all"),
+            "no See all row for recently played: {:?}",
+            lines[header + 1]
+        );
+    }
+
     #[test]
     fn moving_down_on_home_reaches_the_first_album_row_and_highlights_only_it() {
         let theme = Theme::new(false);

@@ -2717,3 +2717,54 @@ kept current by `RecentlyPlayedChanged`) and, as planned from the start, is also
 Row::Header(LibraryTab)` finally generalizes to `Row::Header(Block)` — recently played has no
 matching `LibraryTab` to point at, the exact situation that generalization exists for. Closes
 #144.
+
+## 2026-10-09 — #144 part 6 (last): the Home block — CLOSES #144
+
+`Row::Header(LibraryTab)` generalized to a new `Block` enum (`RecentlyPlayed`, `FavoriteAlbums`,
+`FavoriteArtists`, `Playlists`, `FavoriteTracks`), exactly where part 3 deferred it to: recently
+played has no matching `LibraryTab` to point a header at, and no "See all" row either (it is not
+paginated by TIDAL, so there is no "rest of it" in Library to jump to) — `Block::tab()` is only
+defined for the four library-backed variants, each still producing the existing `Row::SeeAll {
+tab: LibraryTab, .. }`, unchanged in shape. `push_block` now derives the header's `Block` from the
+`LibraryTab` it already took, so none of its callers (parts 2/3's own blocks) needed to change.
+
+New `Row::Played(&'a PlayedTrack)` / `Selected::Played(PlayedTrack)`, a new block pushed right
+after Continue and before the library's own blocks (Home's final row order: Continue, Recently
+played, Favorite albums, Favorite artists, Playlist folders, Favorite tracks). `State.
+recently_played: Option<Vec<PlayedTrack>>` lives outside `LibraryState`, fetched by its own
+`maybe_load_recently_played` — deliberately **not** gated on a section the way the library's own
+fetch is: Home wants it from the moment the TUI opens (the startup section), so it fires the
+moment a connection with `CAP_RECENTLY_PLAYED` exists, whatever section happens to be showing.
+Fetched once per session (same "fetch once, then kept current by its own event" rule the library
+itself follows, just without the section gate) — `Event::RecentlyPlayedChanged` keeps it current
+afterward with no further request ever needed.
+
+**Enter/`a`/`A`/`o` on a `Played` row**: Enter plays it now (`Request::QueueAdd` + `play: true`,
+the exact shape a favorite track's own Enter already uses); `a`/`A` add it without playing. `o`
+opens its radio only when the source is a TIDAL one (`source.strip_prefix("tidal:")`) — a local
+file's source has no track id to seed a radio with, so it is a no-op, the same reasoning a local
+file's lyrics or radio already use elsewhere. Unlike `TrackSummary`, `PlayedTrack` already carries
+its full wire-shaped `source` string (no `phonia_ipc::source::tidal()` construction needed, and
+no `streamable` field to check either — if TIDAL has since pulled a track, the daemon's own
+`QueueAdd` rejection reports that the normal way, same as adding anything else that turns out to
+be gone).
+
+Tests: 5 new `home.rs` unit tests (no block at all for an empty log, no "See all" row — unlike
+every library block — recently played sits right after Continue and before the library's own
+blocks, `selected()` on a played row); 5 new `app.rs` integration tests (the fetch fires once on
+connect with the capability and never again, it is skipped entirely without the capability, the
+answer fills it and the event keeps it current, Enter/`a` on a played row, `o` opens a TIDAL
+entry's radio but not a local file's); one `view/mod.rs` render test (the block's own header shows
+with no "See all" row right after it). Full workspace green (phonia-tui 362 tests, up from 351),
+fmt+clippy clean.
+
+**#144 (favorite artists and recently played on Home) is now FULLY DONE, all 6 PRs
+(#145-#150) merged to develop.** Favorite artists mirrors the existing favorites pattern exactly,
+down to its own Library tab and Home block. Recently played is a genuinely new mechanism end to
+end: a 30s-heard threshold off the engine's own `Position` events (not a heuristic — `Position`
+itself already stalls while paused, so a plain comparison is correct, not just convenient),
+published live over the wire, saved across a `phoniad` restart, and now shown on Home with the
+same interactions (play, add, radio) its own rows already had everywhere else in the TUI.
+"Albums you'll enjoy" (TIDAL's own editorial/recommendation feed) remains the deliberately
+separate, not-yet-investigated future issue it always was, the same territory #33's "My Mixes"
+and #139 already left alone.

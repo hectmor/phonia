@@ -1,14 +1,51 @@
 //! The Home section: a pure view over data the TUI already holds elsewhere (`state.status`,
-//! `state.queue`, and `state.library`), so it keeps no data of its own -- there is nothing here to
-//! fetch that Queue or Library do not already ask for on their own. See #139.
+//! `state.queue`, `state.library`, and `state.recently_played`), so it keeps no data of its own
+//! -- there is nothing here to fetch that Queue, Library or the recently played log do not
+//! already ask for on their own. See #139 and #144.
 
 use crate::app::State;
 use crate::browse::Phase;
 use crate::library::LibraryTab;
-use phonia_ipc::{AlbumSummary, ArtistSummary, FolderEntry, ItemId, Request, TrackSummary};
+use phonia_ipc::{
+    AlbumSummary, ArtistSummary, FolderEntry, ItemId, PlayedTrack, Request, TrackSummary,
+};
 
 /// How many of a block's items show before its own "See all" row.
 const BLOCK_SIZE: usize = 6;
+
+/// A block's own title. Every library-backed block matches a real `LibraryTab`, so its "See all"
+/// row can jump there ([`Block::tab`]); recently played has no such tab -- it is not paginated by
+/// TIDAL, lives outside `LibraryState`, and is pushed by an event rather than loaded page by
+/// page -- so it is the one block with no "See all" row at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Block {
+    RecentlyPlayed,
+    FavoriteAlbums,
+    FavoriteArtists,
+    Playlists,
+    FavoriteTracks,
+}
+
+impl Block {
+    fn from_tab(tab: LibraryTab) -> Self {
+        match tab {
+            LibraryTab::FavoriteAlbums => Block::FavoriteAlbums,
+            LibraryTab::FavoriteArtists => Block::FavoriteArtists,
+            LibraryTab::Playlists => Block::Playlists,
+            LibraryTab::FavoriteTracks => Block::FavoriteTracks,
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Block::RecentlyPlayed => "Recently played",
+            Block::FavoriteAlbums => LibraryTab::FavoriteAlbums.title(),
+            Block::FavoriteArtists => LibraryTab::FavoriteArtists.title(),
+            Block::Playlists => LibraryTab::Playlists.title(),
+            Block::FavoriteTracks => LibraryTab::FavoriteTracks.title(),
+        }
+    }
+}
 
 /// What the "Continue" row offers right now, and what Enter on it does.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,12 +154,13 @@ pub enum Row<'a> {
     Continue(Continue),
     /// A blank line set before a block, so it does not run straight into whatever came before.
     Spacer,
-    /// A block's own title: the matching Library tab's, so the two agree on what to call it.
-    Header(LibraryTab),
+    /// A block's own title.
+    Header(Block),
     Album(&'a AlbumSummary),
     Artist(&'a ArtistSummary),
     Entry(&'a FolderEntry),
     Track(&'a TrackSummary),
+    Played(&'a PlayedTrack),
     /// Closes a block: jumps into Library on `tab`, showing all `total` of it, not just the
     /// [`BLOCK_SIZE`] shown here.
     SeeAll {
@@ -138,13 +176,21 @@ impl Row<'_> {
     }
 }
 
-/// Every row Home shows right now: the Continue row, always, then one block per non-empty list
-/// the library already holds (favorite albums, favorite artists, playlist folders, favorite
-/// tracks, in that order), each capped at [`BLOCK_SIZE`] with a "See all" row into the rest. A
-/// list not loaded yet, or loaded and empty, contributes no block at all -- there is nothing to
-/// show two ways (not ready, or ready and empty), so neither needs its own row.
+/// Every row Home shows right now: the Continue row, always, then recently played (#144, no "See
+/// all" -- see [`Block`]), then one block per non-empty list the library already holds (favorite
+/// albums, favorite artists, playlist folders, favorite tracks, in that order), each capped at
+/// [`BLOCK_SIZE`] with a "See all" row into the rest. A list not loaded yet, or loaded and empty,
+/// contributes no block at all -- there is nothing to show two ways (not ready, or ready and
+/// empty), so neither needs its own row.
 pub fn rows(state: &State) -> Vec<Row<'_>> {
     let mut rows = vec![Row::Continue(continuation(state))];
+    if let Some(items) = &state.recently_played
+        && !items.is_empty()
+    {
+        rows.push(Row::Spacer);
+        rows.push(Row::Header(Block::RecentlyPlayed));
+        rows.extend(items.iter().take(BLOCK_SIZE).map(Row::Played));
+    }
     let Some(library) = &state.library else {
         return rows;
     };
@@ -198,7 +244,7 @@ fn push_block<'a, T>(
         return;
     }
     rows.push(Row::Spacer);
-    rows.push(Row::Header(tab));
+    rows.push(Row::Header(Block::from_tab(tab)));
     rows.extend(items.iter().take(BLOCK_SIZE).map(row));
     rows.push(Row::SeeAll { tab, total });
 }
@@ -229,6 +275,7 @@ pub enum Selected {
     Artist(ArtistSummary),
     Entry(FolderEntry),
     Track(TrackSummary),
+    Played(PlayedTrack),
     /// Jumps into the Library section, on this tab, to see the rest of a block.
     SeeAll(LibraryTab),
 }
@@ -244,6 +291,7 @@ pub fn selected(state: &State, index: usize) -> Option<Selected> {
         Row::Artist(artist) => Some(Selected::Artist((*artist).clone())),
         Row::Entry(entry) => Some(Selected::Entry((*entry).clone())),
         Row::Track(track) => Some(Selected::Track((*track).clone())),
+        Row::Played(played) => Some(Selected::Played((*played).clone())),
         Row::SeeAll { tab, .. } => Some(Selected::SeeAll(*tab)),
         Row::Header(_) | Row::Spacer => None,
     }
@@ -448,7 +496,7 @@ mod tests {
             vec![
                 Row::Continue(Continue::Empty),
                 Row::Spacer,
-                Row::Header(LibraryTab::FavoriteAlbums),
+                Row::Header(Block::FavoriteAlbums),
                 Row::Album(&album("1")),
                 Row::Album(&album("2")),
                 Row::SeeAll {
@@ -497,20 +545,20 @@ mod tests {
             library.favorite_tracks = crate::list::Found::from_page(page(vec![track("t")], 1));
         });
         let rows = rows(&state);
-        let headers: Vec<LibraryTab> = rows
+        let headers: Vec<Block> = rows
             .iter()
             .filter_map(|row| match row {
-                Row::Header(tab) => Some(*tab),
+                Row::Header(block) => Some(*block),
                 _ => None,
             })
             .collect();
         assert_eq!(
             headers,
             vec![
-                LibraryTab::FavoriteAlbums,
-                LibraryTab::FavoriteArtists,
-                LibraryTab::Playlists,
-                LibraryTab::FavoriteTracks,
+                Block::FavoriteAlbums,
+                Block::FavoriteArtists,
+                Block::Playlists,
+                Block::FavoriteTracks,
             ]
         );
     }
@@ -529,7 +577,7 @@ mod tests {
             vec![
                 Row::Continue(Continue::Empty),
                 Row::Spacer,
-                Row::Header(LibraryTab::FavoriteArtists),
+                Row::Header(Block::FavoriteArtists),
                 Row::Artist(&artist("780", "Korn")),
                 Row::Artist(&artist("1", "Tool")),
                 Row::SeeAll {
@@ -557,11 +605,11 @@ mod tests {
         assert!(
             !rows
                 .iter()
-                .any(|row| matches!(row, Row::Header(LibraryTab::Playlists)))
+                .any(|row| matches!(row, Row::Header(Block::Playlists)))
         );
         assert!(
             rows.iter()
-                .any(|row| matches!(row, Row::Header(LibraryTab::FavoriteTracks)))
+                .any(|row| matches!(row, Row::Header(Block::FavoriteTracks)))
         );
     }
 
@@ -639,5 +687,89 @@ mod tests {
     fn selected_past_the_end_is_none() {
         let state = State::default();
         assert_eq!(selected(&state, 5), None);
+    }
+
+    fn played(source: &str, title: &str) -> PlayedTrack {
+        PlayedTrack {
+            source: source.into(),
+            title: Some(title.into()),
+            artist: None,
+            duration_ms: None,
+            cover: None,
+            played_at_ms: 1_000,
+        }
+    }
+
+    #[test]
+    fn with_nothing_recently_played_yet_there_is_no_block_for_it() {
+        let state = State {
+            recently_played: Some(vec![]),
+            ..State::default()
+        };
+        assert_eq!(rows(&state), vec![Row::Continue(Continue::Empty)]);
+    }
+
+    #[test]
+    fn a_recently_played_block_has_no_see_all_row_unlike_library_blocks() {
+        let state = State {
+            recently_played: Some(vec![
+                played("tidal:1", "First"),
+                played("file:/a.flac", "Second"),
+            ]),
+            ..State::default()
+        };
+        let rows = rows(&state);
+        assert_eq!(
+            rows,
+            vec![
+                Row::Continue(Continue::Empty),
+                Row::Spacer,
+                Row::Header(Block::RecentlyPlayed),
+                Row::Played(&played("tidal:1", "First")),
+                Row::Played(&played("file:/a.flac", "Second")),
+            ]
+        );
+        assert_eq!(
+            selectable_count(&rows),
+            3,
+            "continue, two played, no see-all"
+        );
+    }
+
+    #[test]
+    fn recently_played_comes_right_after_continue_before_the_librarys_own_blocks() {
+        let mut state = with_library(|library| {
+            library.favorite_albums = crate::list::Found::from_page(page(vec![album("1")], 1));
+        });
+        state.recently_played = Some(vec![played("tidal:1", "First")]);
+        let rows = rows(&state);
+        assert_eq!(
+            rows,
+            vec![
+                Row::Continue(Continue::Empty),
+                Row::Spacer,
+                Row::Header(Block::RecentlyPlayed),
+                Row::Played(&played("tidal:1", "First")),
+                Row::Spacer,
+                Row::Header(Block::FavoriteAlbums),
+                Row::Album(&album("1")),
+                Row::SeeAll {
+                    tab: LibraryTab::FavoriteAlbums,
+                    total: 1
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn selected_on_a_recently_played_row_is_the_entry_itself() {
+        let state = State {
+            recently_played: Some(vec![played("tidal:1", "First")]),
+            ..State::default()
+        };
+        assert_eq!(
+            selected(&state, 1),
+            Some(Selected::Played(played("tidal:1", "First")))
+        );
     }
 }

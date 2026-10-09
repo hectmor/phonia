@@ -112,6 +112,11 @@ pub struct State {
     /// What the daemon last said: kept while it is away, and stale until it is back.
     pub status: Option<Status>,
     pub queue: Option<Queue>,
+    /// The recently played log (#144): fetched once a connection with the capability exists (see
+    /// `maybe_load_recently_played`), then kept current by `Event::RecentlyPlayedChanged`. Lives
+    /// outside `LibraryState`: it needs no catalog, and is pushed by an event rather than loaded
+    /// page by page.
+    pub recently_played: Option<Vec<phonia_ipc::PlayedTrack>>,
     /// Why the last request sent (a playback key) did not work, until the next one is tried.
     pub last_error: Option<String>,
     /// Why playback itself just failed (the daemon's own `Event::Error`, e.g. a track the DAC
@@ -289,6 +294,9 @@ pub enum Tag {
     /// after a newer one was asked for (a different track, or a reconnect that retried) is
     /// dropped rather than shown under the wrong id.
     Lyrics { generation: u64 },
+    /// The request that loads the recently played log, fired once a connection with the
+    /// capability exists; see `maybe_load_recently_played`.
+    RecentlyPlayed,
 }
 
 /// What [`update`] decided.
@@ -336,6 +344,13 @@ pub fn update(state: &mut State, msg: Msg) -> Effects {
         effects.commands.push(Cmd::Request {
             tag: Tag::LibraryArtists { generation: 0 },
             request: LibraryState::artists_request(),
+        });
+    }
+    if maybe_load_recently_played(state) {
+        effects.redraw = true;
+        effects.commands.push(Cmd::Request {
+            tag: Tag::RecentlyPlayed,
+            request: Request::RecentlyPlayed,
         });
     }
     // Entering the panel, or reconnecting while already in it, is also the retry for a fetch that
@@ -422,6 +437,22 @@ fn maybe_load_library(state: &mut State) -> Option<Request> {
     let (library, request) = LibraryState::new();
     state.library = Some(library);
     Some(request)
+}
+
+/// Fetched once a connection with the capability exists, whatever section is showing (unlike the
+/// library, which waits for its own section to be shown first): Home wants it from the moment it
+/// opens, which is also the moment the TUI itself opens. Never refetched afterward in this
+/// session -- the same "once, then kept current by its own event" rule the library's own data
+/// already follows, just without a section gate.
+fn maybe_load_recently_played(state: &mut State) -> bool {
+    if state.recently_played.is_some()
+        || state.connection != Connection::Connected
+        || !state.has(phonia_ipc::CAP_RECENTLY_PLAYED)
+    {
+        return false;
+    }
+    state.recently_played = Some(Vec::new());
+    true
 }
 
 /// The request that loads the current track's lyrics, when the Lyrics panel is open and there is
@@ -560,6 +591,14 @@ fn on_response(state: &mut State, tag: Tag, result: Result<Payload, String>) -> 
                 }
                 Err(reason) => library.fail_artists(reason),
             }
+            Effects::redraw()
+        }
+        Tag::RecentlyPlayed => {
+            if let Ok(Payload::RecentlyPlayed { items }) = result {
+                state.recently_played = Some(items);
+            }
+            // A failure leaves the empty placeholder `maybe_load_recently_played` already set:
+            // there is nothing to show, and no retry until the next reconnect.
             Effects::redraw()
         }
         Tag::LibraryMore { tab, generation } => {
@@ -810,6 +849,10 @@ fn on_daemon_event(state: &mut State, event: Event) -> Effects {
         Event::QueueChanged { queue } => {
             state.queue = Some(queue);
             clamp_queue_cursor(state);
+            Effects::redraw()
+        }
+        Event::RecentlyPlayedChanged { items } => {
+            state.recently_played = Some(items);
             Effects::redraw()
         }
         Event::StateChanged { state: new_state } => {
@@ -2229,6 +2272,18 @@ fn act_on_home_result(state: &mut State, action: Action) -> Effects {
             home::Selected::Track(track) => {
                 open_track_radio(state, track.id.clone(), track.title.clone())
             }
+            // Only a TIDAL track has a radio to open; a local file's source has no id for one.
+            home::Selected::Played(played) => match played.source.strip_prefix("tidal:") {
+                Some(id) => open_track_radio(
+                    state,
+                    id.to_string(),
+                    played
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| played.source.clone()),
+                ),
+                None => Effects::default(),
+            },
             _ => Effects::default(),
         };
     }
@@ -2326,6 +2381,23 @@ fn act_on_home_result(state: &mut State, action: Action) -> Effects {
                     at,
                 },
                 false,
+            )
+        }
+        home::Selected::Played(played) => {
+            let at = if action == Action::AddToQueue {
+                phonia_ipc::AddAt::End
+            } else {
+                phonia_ipc::AddAt::Next
+            };
+            send_add(
+                state,
+                Request::QueueAdd {
+                    tracks: vec![phonia_ipc::NewTrack {
+                        source: played.source,
+                    }],
+                    at,
+                },
+                action == Action::Activate,
             )
         }
         // Handled above, before this match.
@@ -5050,6 +5122,105 @@ mod tests {
         }
     }
 
+    fn played_track(source: &str, title: &str) -> phonia_ipc::PlayedTrack {
+        phonia_ipc::PlayedTrack {
+            source: source.into(),
+            title: Some(title.into()),
+            artist: None,
+            duration_ms: None,
+            cover: None,
+            played_at_ms: 1_000,
+        }
+    }
+
+    /// Connected with the `recently_played` and `catalog` capabilities, left on Home with the
+    /// log already loaded: a TIDAL track ("tidal:1", "First") then a local file
+    /// ("file:/home/x/b.flac", "Second"), most recent first. Selectable rows: Continue (0), the
+    /// two played rows (1, 2) -- no "See all". The focus is on the main panel. `catalog` is only
+    /// there for `o`'s own test (opening a track's radio needs it); recently played itself does
+    /// not.
+    fn with_recently_played() -> State {
+        let mut state = State::default();
+        update(&mut state, connected_msg(&["recently_played", "catalog"]));
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::RecentlyPlayed,
+                result: Ok(Payload::RecentlyPlayed {
+                    items: vec![
+                        played_track("tidal:1", "First"),
+                        phonia_ipc::PlayedTrack {
+                            source: "file:/home/x/b.flac".into(),
+                            title: Some("Second".into()),
+                            artist: None,
+                            duration_ms: None,
+                            cover: None,
+                            played_at_ms: 500,
+                        },
+                    ],
+                }),
+            },
+        );
+        ch(&mut state, 'l');
+        state
+    }
+
+    #[test]
+    fn enter_on_a_recently_played_row_plays_it() {
+        let mut state = with_recently_played();
+        ch(&mut state, 'j'); // the first played row
+        let (tag, request) = tagged(press(&mut state, KeyCode::Enter));
+        assert_eq!(tag, Tag::Add { play: true });
+        assert_eq!(
+            request,
+            Request::QueueAdd {
+                tracks: vec![phonia_ipc::NewTrack {
+                    source: "tidal:1".into()
+                }],
+                at: phonia_ipc::AddAt::Next,
+            }
+        );
+    }
+
+    #[test]
+    fn a_on_a_recently_played_row_adds_it_without_playing() {
+        let mut state = with_recently_played();
+        ch(&mut state, 'j');
+        let (tag, request) = tagged(ch(&mut state, 'a'));
+        assert_eq!(tag, Tag::Add { play: false });
+        assert_eq!(
+            request,
+            Request::QueueAdd {
+                tracks: vec![phonia_ipc::NewTrack {
+                    source: "tidal:1".into()
+                }],
+                at: phonia_ipc::AddAt::End,
+            }
+        );
+    }
+
+    #[test]
+    fn o_opens_a_tidal_played_rows_radio_but_not_a_local_files() {
+        let mut state = with_recently_played();
+        ch(&mut state, 'j'); // "tidal:1"
+        let (tag, request) = tagged(ch(&mut state, 'o'));
+        assert!(matches!(tag, Tag::View { .. }));
+        assert_eq!(
+            request,
+            Request::Tracks {
+                from: phonia_ipc::CatalogRef::TrackRadio { id: "1".into() },
+                offset: 0,
+                limit: Some(crate::search::PAGE_SIZE),
+            }
+        );
+
+        ch(&mut state, 'j'); // "file:/home/x/b.flac"
+        assert!(
+            ch(&mut state, 'o').commands.is_empty(),
+            "a local file has no radio"
+        );
+    }
+
     /// Connected, with the catalog, left on Home (the default section) with its library already
     /// loaded: one favorite album ("9", "Issues"), one favorite artist ("780", "Korn"), one
     /// sub-folder at the root of "My Collection" ("f1", "Moods"), two favorite tracks ("1" "Freak
@@ -5490,6 +5661,62 @@ mod tests {
         // The moment a connection with the catalog exists, it is asked for.
         update(&mut state, connected_msg(&["catalog"]));
         assert!(state.library.is_some());
+    }
+
+    #[test]
+    fn connecting_with_the_capability_asks_for_recently_played_once() {
+        let mut state = State::default();
+        let (tag, request) = tagged(update(&mut state, connected_msg(&["recently_played"])));
+        assert_eq!(tag, Tag::RecentlyPlayed);
+        assert_eq!(request, Request::RecentlyPlayed);
+        assert_eq!(state.recently_played, Some(Vec::new()));
+
+        // Never asked again: a key or another message does not repeat it.
+        assert!(ch(&mut state, 'j').commands.is_empty());
+    }
+
+    #[test]
+    fn without_the_capability_recently_played_is_not_asked_for() {
+        let mut state = State::default();
+        let effects = update(&mut state, connected_msg(&[]));
+        assert!(effects.commands.is_empty());
+        assert_eq!(state.recently_played, None);
+    }
+
+    #[test]
+    fn the_answer_fills_recently_played_and_the_event_keeps_it_current() {
+        let mut state = State::default();
+        update(&mut state, connected_msg(&["recently_played"]));
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::RecentlyPlayed,
+                result: Ok(Payload::RecentlyPlayed {
+                    items: vec![played_track("tidal:1", "First")],
+                }),
+            },
+        );
+        assert_eq!(
+            state.recently_played,
+            Some(vec![played_track("tidal:1", "First")])
+        );
+
+        update(
+            &mut state,
+            Msg::Daemon(Event::RecentlyPlayedChanged {
+                items: vec![
+                    played_track("tidal:2", "Second"),
+                    played_track("tidal:1", "First"),
+                ],
+            }),
+        );
+        assert_eq!(
+            state.recently_played,
+            Some(vec![
+                played_track("tidal:2", "Second"),
+                played_track("tidal:1", "First")
+            ])
+        );
     }
 
     #[test]
