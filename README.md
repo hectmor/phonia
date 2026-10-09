@@ -559,6 +559,22 @@ every play is reported as a plain track, not attributed to the album or playlist
 from (a seam left for a later issue). Only `phoniad` sends these, through the same TIDAL login it
 already uses for everything else.
 
+## MPRIS: media keys and desktop widgets
+
+`[daemon] mpris` (default on) registers `org.mpris.MediaPlayer2.phonia` on the session bus, so
+GNOME/KDE media keys, lock-screen widgets and `playerctl` all see and control `phoniad` the same
+way they do any other player -- falling back to `...phonia.instance<pid>` if a second instance is
+already running, or skipping MPRIS entirely (one line on stderr, nothing else affected) if even
+that name can't be had. A missing session bus -- headless, a minimal install -- never blocks or
+delays startup.
+
+Full transport (play/pause/stop/next/previous/seek) and the writable `Volume`/`LoopStatus`/
+`Shuffle` properties all route through the exact same request path `phonia ctl` itself uses, so
+nothing behaves differently depending on who asked. `Raise`, `Quit` and `OpenUri` are
+deliberately not implemented (`CanQuit`/`CanRaise` are always false): phonia has no window to
+raise, no notion of opening an arbitrary URI, and a desktop widget's own "close" button must
+never be able to kill the daemon the TUI depends on.
+
 ## Shared mode: any output, not bit-perfect
 
 Exclusive mode is the point of phonia, but it only works on a sound card that phonia can have for
@@ -668,8 +684,9 @@ more importantly, *why* it was chosen.
   rewrite the file (this one only reads it).
 
 - **`phonia-ipc`** (a crate of this workspace) -- the wire protocol and a client for the daemon. It
-  depends only on `serde` and `tokio`, not on `phonia-core`, so a terminal UI, an MPRIS bridge or
-  an agent server can talk to the daemon without building ALSA or the decoders. The wire types are
+  depends only on `serde` and `tokio`, not on `phonia-core`, so a terminal UI or an agent server
+  can talk to the daemon without building ALSA or the decoders (MPRIS itself lives inside
+  `phoniad` -- see "MPRIS" above -- not as a separate bridge over this protocol). The wire types are
   its own (durations in milliseconds, no internal references leaking out) instead of `serde` derives
   on the engine's types, so the format can outlive refactors. The framing is a few lines over
   `tokio` rather than a codec crate.
