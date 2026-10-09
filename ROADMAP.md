@@ -881,6 +881,23 @@ daemon must stay usable headless or on a minimal install, the same
 "fails soft, never blocks or crashes" spirit as #31's own hardware
 check.
 
+**Part 1 (config setting) and part 2 (the pure `mpris::model` policy
+module) are done, merged via PR #151 and the PR that follows this
+entry.** Part 2 is `crates/phoniad/src/mpris/model.rs`: no zbus, no
+D-Bus, no async -- a plain `Model` built from `(Status, Queue)` and
+kept current by `apply(&Event) -> Changed`, mirroring `autoplay.rs`'s
+own pure/unit-tested shape. It carries the "sticky" `PlaybackStatus`
+collapse, `Metadata` building (object-path track ids, cover ids turned
+into real `art_url`s via `phonia_ipc::image`, `file:` sources turned
+into real `file://` URIs, the artist string never split since that
+would break a name like "Earth, Wind & Fire"), the `Can*` flags
+(`CanGoNext`/`Previous` computed from queue order/current/repeat
+alone, ignoring autoplay on purpose), volume mapping (no hardware
+mixer reads as 1.0 and refuses writes, muted reads as 0.0, writing
+above 0 also unmutes), and every MPRIS call's mapping onto the
+existing `Request` enum -- nothing wired to a real D-Bus connection
+yet. That is part 3.
+
 ## Conventions this file assumes
 
 - Issues are closed by the project owner by hand after their pull requests

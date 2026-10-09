@@ -4,6 +4,7 @@
 mod autoplay;
 pub mod convert;
 pub mod daemon;
+pub mod mpris;
 pub mod outputs;
 pub mod server;
 pub mod socket;
