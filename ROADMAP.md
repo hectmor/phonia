@@ -106,12 +106,18 @@ the full design discussion and the decisions made.
 | Issue | What | Status |
 |---|---|---|
 | #139 | Home screen in the TUI (local data only) | Code complete (see below) |
+| #144 | Favorite artists and Recently played on Home | In progress (see below) |
 
 Brand new milestone, started right after #33. A lightweight home
 screen using only data phonia already fetches (resuming, favorites,
 playlist folders) — a real TIDAL-style editorial/personalized home
 (mixes, new releases) is a deliberately separate, not-yet-investigated
-future issue, the same territory #33 left "My Mixes" in.
+future issue, the same territory #33 left "My Mixes" in. #144 adds two
+more blocks to that same lightweight home: favorite artists (a straight
+copy of the existing favorites pattern) and recently played (a real new
+mechanism, since nothing today stores or exposes local play history).
+"Albums you'll enjoy" (TIDAL's own editorial/recommendation feed)
+stays out of #144 too, for the same reason it stays out of #139.
 
 ## Right now
 
@@ -759,6 +765,17 @@ Tracks`/`Request::PlaylistFolder` answer uses to find the view it belongs to by 
 only `search_views` and `library_views`, so an answer to a view opened from Home was silently
 dropped, leaving it stuck on "Loading" forever. Fixed by trying `home_views` too, same as #140's
 fix taught: a hardcoded two-stack list quietly breaks the moment a third one exists.
+
+**#144 (favorite artists and recently played on Home)** adds two more blocks to that same
+lightweight home. Part 1 (merged) is favorite artists' core/wire/daemon side, a straight copy of
+the existing `favorite_tracks`/`favorite_albums` pattern: `Catalog::favorite_artists` hits
+`/users/{id}/favorites/artists` with the same `favorites_query`/`parse_favorited_items` helpers
+already used for the other two; a new `Request::Artists`/`Payload::Artists` pair (protocol 1.14,
+under the existing `CAP_CATALOG`) rather than folding into `Payload::Library`, so a problem with
+the artists endpoint can't take the favorite-tracks/favorite-albums blocks down with it (those
+three already fail or succeed together through one `tokio::join!`). No TUI change yet. Next: the
+Library "Favorite artists" tab (part 2), then Home's own block (part 3); recently played (a real
+new mechanism — nothing today stores or exposes local play history) follows in parts 4-6.
 
 ## Conventions this file assumes
 

@@ -550,6 +550,17 @@ pub enum AlbumListRef {
     Unknown,
 }
 
+/// A list of artists that can be asked for page by page (since 1.14, with favorite artists).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ArtistListRef {
+    /// The logged-in user's favorite artists.
+    FavoriteArtists,
+    /// A list a newer daemon has and this version does not know.
+    #[serde(other)]
+    Unknown,
+}
+
 /// A list of playlists that can be asked for page by page (since 1.6, with the library).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

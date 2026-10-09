@@ -441,6 +441,11 @@ impl Daemon {
                 offset,
                 limit,
             } => self.albums(from, offset, limit).await,
+            Request::Artists {
+                from,
+                offset,
+                limit,
+            } => self.artists(from, offset, limit).await,
             Request::Playlists {
                 from,
                 offset,
@@ -697,6 +702,34 @@ impl Daemon {
             Ok(page) => Reply::Ok(Payload::Albums {
                 from,
                 page: convert::page(&page, convert::album_summary),
+            }),
+            Err(failure) => catalog_failure(&failure),
+        }
+    }
+
+    /// One page of a list of artists.
+    async fn artists(&self, from: ipc::ArtistListRef, offset: u32, limit: Option<u32>) -> Reply {
+        let catalog = match self.catalog_or_refuse("list artists from") {
+            Ok(catalog) => catalog,
+            Err(reply) => return reply,
+        };
+        let limit = match list_limit(limit, DEFAULT_SEARCH_LIMIT) {
+            Ok(limit) => limit,
+            Err(reply) => return reply,
+        };
+        let page = match &from {
+            ipc::ArtistListRef::FavoriteArtists => catalog.favorite_artists(offset, limit).await,
+            ipc::ArtistListRef::Unknown => {
+                return self::error(
+                    ErrorCode::BadRequest,
+                    "this daemon does not know that list of artists",
+                );
+            }
+        };
+        match page {
+            Ok(page) => Reply::Ok(Payload::Artists {
+                from,
+                page: convert::page(&page, convert::artist_summary),
             }),
             Err(failure) => catalog_failure(&failure),
         }

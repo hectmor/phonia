@@ -2468,3 +2468,90 @@ only data phonia already fetches locally (resume/replay/start, favorite albums, 
 favorite tracks, each opening nested in Home's own stack exactly like Library's own). A real
 TIDAL-style editorial/personalized home (mixes, new releases) remains the deliberately separate,
 not-yet-investigated future issue #33 already left "My Mixes" in.
+
+## 2026-10-09 — #144 approved plan: favorite artists and recently played on Home
+
+New issue, same milestone (Fase 7). The user asked for three new Home blocks: favorite artists,
+recently played, and "albums you'll enjoy". The third is explicitly TIDAL's own editorial/
+recommendation feed (`/home/feed/static` via `tidlers`, never called anywhere in phonia, an
+unexplored heterogeneous module-based payload) — the exact same territory #139 and #33 already
+deferred as "My Mixes". The user chose to scope #144 to the first two only; "albums you'll enjoy"
+stays a separate, not-yet-investigated future issue.
+
+Planned with Opus after a read-only investigation. **Favorite artists is a straight copy of the
+existing `favorite_tracks`/`favorite_albums` pattern**: TIDAL's `/users/{id}/favorites/artists`,
+the same `favorites_query`/`parse_favorited_items` helpers in `catalog/remote.rs`, `RawArtist`
+already exists there. **Recently played has nothing to reuse**: `play_log.rs` is write-only
+telemetry to TIDAL (so a play shows up in TIDAL's own official apps), nothing is stored locally or
+queryable — a real new mechanism, hooked into `daemon.rs`'s `fan_in` (which already resolves each
+engine event against the queue snapshot at that moment, the same place `note_play_log` lives, for
+the same gapless-timing reason).
+
+**A latent bug found while investigating** (not part of #144's own ask, fixed in passing as part
+1): `open_artist_view` (app.rs) pushes onto `state.search_views` directly instead of through
+`active_stack_mut(state)` — harmless today only because Search is its one caller, but opening an
+artist from Library or Home (which #144 adds) would put the view on the wrong stack. Third time
+this "a stack named directly instead of derived from the section" shape has surfaced (#140,
+`find_view` in #139 part 4, now this) — worth recognizing as a pattern: anything that opens or
+looks up a view must go through `active_stack_mut`, never reference a specific stack field by name.
+
+**4 decisions, all = Opus's recommendation, approved via `AskUserQuestion`:**
+1. **What counts as "played"**: 30s heard (`play_log::MIN_HEARD`, already phonia's own TIDAL-
+   reporting threshold) or `Completed` if the track is shorter — not "counts at start", which
+   would let a fast skim through a radio or autoplay session push every real play out of the list.
+2. **Persistence across a `phoniad` restart**: yes, saved to `$XDG_STATE_HOME/phonia/
+   recently_played.json`, atomic temp-file-then-rename like `auth/store.rs`, loaded at
+   `Daemon::start`, a missing or corrupt file is an empty list plus a warning, never a startup
+   failure. This is the first runtime state (not auth, not config) the daemon writes to disk —
+   deliberately, since a daemon run as a login service would otherwise show an empty list every
+   morning, defeating the feature's own point. Chosen over #139's "Continue lasts only while the
+   daemon is up" precedent specifically because recently-played's value is mostly *across*
+   sessions, unlike resuming playback.
+3. **Granularity**: one row per track, deduplicated by source (replaying moves it to the top with
+   a fresh timestamp), the daemon keeps the 50 most recent, Home shows 6, local files included.
+   Album-level grouping (Spotify-style) is not honestly buildable today: the queue does not
+   remember which album or playlist a track was added from (`QueueAddFrom`'s `CatalogRef` is not
+   kept) — a separate issue if ever wanted.
+4. **Where the two blocks live**: favorite artists becomes a real fourth `LibraryTab` with a
+   working "See all" (it is exactly a TIDAL-paginated list, like the other three); recently played
+   is Home-only, with no Library tab and no "See all" — it needs no catalog, isn't paged by TIDAL,
+   lives outside `LibraryState`, and is pushed by an event rather than loaded page by page. Forcing
+   it into `LibraryTab` would add a branch to every one of that enum's per-tab functions
+   (`list_of`, `next_page`, `add_page`, `page_failed`, `tab_ready`, `list_cursors`, the Library
+   view) that would only ever say "no paging here" — all cost, no behavior. The accepted tradeoff:
+   entries past the 6 shown in Home are not reachable in the TUI yet, only on the wire.
+
+**Wire shape (adopted as recommended, not separately asked — an implementation detail, not a
+product tradeoff)**: favorite artists gets its own `Request::Artists`/`Payload::Artists` (new
+`ArtistListRef::FavoriteArtists`), sent alongside `Request::Library` rather than extending
+`Payload::Library` itself, so an artists-endpoint failure can't take the album/track blocks down
+with it (`Payload::Library`'s three pieces already fail all-or-nothing via one `tokio::join!`).
+Protocol 1.14, under the existing `CAP_CATALOG` (a list request, same precedent as #39 part 2).
+Recently played gets a new `CAP_RECENTLY_PLAYED` (a capability of its own, not gated on the
+catalog, since it needs no TIDAL call and covers local files too) plus `Request::RecentlyPlayed`/
+`Payload::RecentlyPlayed`/`Event::RecentlyPlayedChanged` (the full list each time, the same shape
+`QueueChanged` already uses for the whole queue), protocol 1.15.
+
+**6-PR split, artists first (independent, lower risk)**: PR1 core/wire/daemon for favorite
+artists (no TUI change). PR2 the Library "Favorite artists" tab (plus the `open_artist_view`
+fix, with a regression test). PR3 the Home "Favorite artists" block (`Row::Header(LibraryTab)`
+generalizes to `Row::Header(Block)` first, no behavior change, then `Row::Artist`/`Selected::
+Artist`). PR4 core/daemon recently played, in memory only (the bounded/deduplicated list, the
+`fan_in` hook, protocol 1.15). PR5 persisting it to disk. PR6 the Home "Recently played" block,
+closing #144. PR5 may move after PR6 so the visible feature lands before the persistence layer.
+
+**PR1 (favorite artists: core, wire, daemon), code complete**: `Catalog::favorite_artists` added
+to the trait, `TidalCatalog` (a copy of `favorite_albums`'s own shape: `/users/{id}/favorites/
+artists`, the same `favorites_query`/`parse_favorited_items::<RawArtist, Artist>`) and
+`FakeCatalog` (`with_favorite_artists`, a new `Call::FavoriteArtists`). New
+`dto::ArtistListRef{FavoriteArtists, Unknown}`, `Request::Artists`/`Payload::Artists` (mirrors
+`Albums`/`Playlists` exactly), protocol 1.14, under the existing `CAP_CATALOG` as planned (a list
+request, same precedent as every other one since 1.6). Daemon's `artists()` handler mirrors
+`albums()`. No TUI change yet (part 2 next: the Library tab). Tests: `remote.rs` (parse +
+query), `fake.rs` (paged + remembered), `phonia-ipc/tests/golden.rs` (round-trip request/response,
+protocol bumped in two hardcoded strings the fmt/version tests already pinned), `phoniad/tests/
+protocol.rs` (a real page back, `Unknown` is `BadRequest`, no catalog is `Unsupported` — added to
+the existing lists of each rather than new standalone tests, matching how every other list ref is
+already tested there). No `ctl` subcommand added: `Request::Albums`/`Request::Playlists` have
+none either today (only reachable through `library`/`artist`'s own browsing), so artists stays
+consistent with that, not with `album`/`artist`'s own standalone commands.

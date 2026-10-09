@@ -2412,6 +2412,11 @@ async fn requests_that_make_no_sense_are_refused_before_they_reach_tidal() {
             offset: 0,
             limit: None,
         },
+        Request::Artists {
+            from: ArtistListRef::Unknown,
+            offset: 0,
+            limit: None,
+        },
         Request::Playlists {
             from: PlaylistListRef::Unknown,
             offset: 0,
@@ -2459,6 +2464,11 @@ async fn without_a_catalog_none_of_them_can_be_answered() {
         },
         Request::Albums {
             from: AlbumListRef::ArtistAlbums { id: "780".into() },
+            offset: 0,
+            limit: None,
+        },
+        Request::Artists {
+            from: ArtistListRef::FavoriteArtists,
             offset: 0,
             limit: None,
         },
@@ -2577,7 +2587,8 @@ fn playlist_named(id: &str, title: &str) -> catalog::Playlist {
     }
 }
 
-/// Two favorite tracks, one favorite album and two of the user's own playlists.
+/// Two favorite tracks, one favorite album, one favorite artist and two of the user's own
+/// playlists.
 fn with_a_library() -> FakeCatalog {
     browsable()
         .with_favorite_tracks(tracks(2))
@@ -2586,6 +2597,11 @@ fn with_a_library() -> FakeCatalog {
             "Untouchables",
             catalog::AlbumKind::Album,
         )])
+        .with_favorite_artists(vec![catalog::Artist {
+            id: "780".into(),
+            name: "Korn".into(),
+            picture: None,
+        }])
         .with_my_playlists(vec![
             playlist_named("p-mine-1", "Road trip"),
             playlist_named("p-mine-2", "Focus"),
@@ -2655,6 +2671,28 @@ async fn favorite_tracks_and_albums_are_paged_by_their_own_catalog_ref() {
     };
     assert_eq!(from, AlbumListRef::FavoriteAlbums);
     assert_eq!(page.items[0].title, "Untouchables");
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_page_of_artists_is_the_users_favorites() {
+    let catalog = with_a_library();
+    let f = fixture_with_catalog("favorite-artists", Some(Arc::new(catalog))).await;
+    let client = f.client().await;
+
+    let Payload::Artists { from, page } = client
+        .request(Request::Artists {
+            from: ArtistListRef::FavoriteArtists,
+            offset: 0,
+            limit: None,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("not artists");
+    };
+    assert_eq!(from, ArtistListRef::FavoriteArtists);
+    assert_eq!(page.items[0].name, "Korn");
     f.finish().await;
 }
 
