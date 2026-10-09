@@ -171,6 +171,7 @@ report_plays = true     # report finished plays to TIDAL, for Recently Played (d
 [daemon]
 socket = "/run/user/1000/phonia/phoniad.sock"   # default: $XDG_RUNTIME_DIR/phonia/phoniad.sock
 verbose = false
+mpris = true            # register an MPRIS2 D-Bus service for media keys and widgets (default on, #34)
 
 [playback]
 gapless = true          # join a track to the next one of the same format with no gap

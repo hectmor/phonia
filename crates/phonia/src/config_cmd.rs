@@ -131,6 +131,11 @@ fn format_settings(
             settings.verbose.origin,
         ),
         (
+            "daemon.mpris",
+            settings.mpris.value.to_string(),
+            settings.mpris.origin,
+        ),
+        (
             "playback.gapless",
             settings.gapless.value.to_string(),
             settings.gapless.origin,
@@ -191,6 +196,7 @@ mod tests {
              \x20 tidal.report_plays          true                                (default)\n\
              \x20 daemon.socket               /run/user/1000/phonia/phoniad.sock  (default)\n\
              \x20 daemon.verbose              false                               (default)\n\
+             \x20 daemon.mpris                true                                (default)\n\
              \x20 playback.gapless            true                                (default)\n\
              \x20 playback.replaygain         off                                 (default)\n\
              \x20 playback.autoplay           false                               (default)"
@@ -224,9 +230,9 @@ mod tests {
         assert!(text.contains("lossless"), "{text}");
         assert_eq!(
             text.matches("(default)").count(),
-            12,
+            13,
             "mode, sink, reserve, release_after_pause, min_quality, session_store, \
-             report_plays, socket, verbose, gapless, replaygain and autoplay were not written"
+             report_plays, socket, verbose, mpris, gapless, replaygain and autoplay were not written"
         );
     }
 

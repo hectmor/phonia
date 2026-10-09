@@ -213,6 +213,12 @@ pub struct Tidal {
 pub struct Daemon {
     pub socket: Option<PathBuf>,
     pub verbose: Option<bool>,
+    /// Register an MPRIS2 D-Bus service (media keys, lock-screen widgets, `playerctl`...) on the
+    /// session bus. Default on: inert until something actually calls it, and never touches a
+    /// sample, the same reasoning `gapless`/`report_plays` already use (not `autoplay`/
+    /// `replaygain`'s opt-in, since those alter behavior or samples). No command-line flag. See
+    /// #34.
+    pub mpris: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -266,6 +272,7 @@ report_plays = false
 [daemon]
 socket = "/run/user/1000/phonia/phoniad.sock"
 verbose = true
+mpris = false
 
 [playback]
 gapless = false
@@ -293,7 +300,8 @@ autoplay = true
                 },
                 daemon: Daemon {
                     socket: Some("/run/user/1000/phonia/phoniad.sock".into()),
-                    verbose: Some(true)
+                    verbose: Some(true),
+                    mpris: Some(false),
                 },
                 playback: Playback {
                     gapless: Some(false),
