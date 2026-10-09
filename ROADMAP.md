@@ -881,9 +881,9 @@ daemon must stay usable headless or on a minimal install, the same
 "fails soft, never blocks or crashes" spirit as #31's own hardware
 check.
 
-**Parts 1-3 are done.** Part 1 (config setting, PR #151) and part 2
+**Parts 1-4 are done.** Part 1 (config setting, PR #151) and part 2
 (the pure `mpris::model` policy module, PR #152) are described above.
-Part 3 wires that model to a real session-bus connection:
+Part 3 (PR #153) wires that model to a real session-bus connection:
 `crates/phoniad/src/mpris/service.rs` adds zbus as a direct `phoniad`
 dependency, registers `org.mpris.MediaPlayer2.phonia` (falling back to
 `...phonia.instance<pid>`, else skipping with one logged line) and
@@ -893,15 +893,23 @@ server's own lock (`InterfaceRef::get_mut`), subscribes to
 `Daemon::subscribe()`, and batches every property a single
 `ipc::Event` actually changes into one `PropertiesChanged` signal,
 resyncing from a fresh `Daemon::snapshot()` on a lagged subscriber.
-Deliberately not wired up yet: every transport method is a no-op and
-every `Can*` property is a hardcoded `false` -- a client must never be
-invited to press a button that does nothing. That is part 4.
 Integration-tested against a private bus (`phonia-core`'s own
 `testutil::Bus`, now reachable from `phoniad`'s tests through a new
 `test-support` Cargo feature, a `[dev-dependencies]`-only path so
 nothing test-only ships in a release build) in
 `crates/phoniad/tests/mpris.rs`, `#[ignore = "needs dbus-daemon"]`
 like `phonia-core`'s own D-Bus tests.
+
+Part 4 wires up transport: `Play`/`Pause`/`PlayPause`/`Stop`/`Next`/
+`Previous` each map to `self.model.*_request()` (written in part 2)
+routed through `Daemon::handle`, the same path `phonia ctl` already
+uses, and `CanGoNext`/`CanGoPrevious`/`CanPlay`/`CanPause` now read the
+model instead of a constant (so they join the batched
+`PropertiesChanged` set too). Media keys and a lock-screen widget's
+play/pause/skip buttons work after this. `Seek`/`SetPosition`/
+`OpenUri` stay no-ops and `CanSeek` stays a hardcoded `false` -- that,
+plus the writable `Volume`/`LoopStatus`/`Shuffle` properties and the
+README feature section, is part 5, the last one, closing #34.
 
 ## Conventions this file assumes
 

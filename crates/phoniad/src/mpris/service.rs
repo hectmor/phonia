@@ -3,13 +3,13 @@
 //! subscribe to (`Daemon::subscribe`/`snapshot`) -- `Daemon::fan_in` itself is untouched, this is
 //! purely an additive consumer, like `server.rs` is.
 //!
-//! Part 3's scope only: every transport method (`Play`, `Pause`, ...) is a no-op, and every
-//! `Can*` property reads `false`, on purpose -- a client must never be invited to press a button
-//! that does nothing. Part 4 fills the methods in with `self.model.*_request()` (already written
-//! in [`super::model`]) routed through `Daemon::handle`, at which point the matching `Can*`
-//! getters below start reading the model instead of a constant. Part 5 adds the writable
-//! properties and the `Seeked` signal's trigger from a real `Seek`/`SetPosition` call (the signal
-//! itself, and reading `Volume`/`LoopStatus`/`Shuffle`, already works from here on).
+//! Transport (`Play`/`Pause`/`PlayPause`/`Stop`/`Next`/`Previous`) is wired up: each method maps
+//! to `self.model.*_request()` (written in [`super::model`]) and routes it through
+//! `Daemon::handle`, exactly like `phonia ctl` already does -- no new control-plane code, just a
+//! new caller of the same one. `CanGoNext`/`CanGoPrevious`/`CanPlay`/`CanPause` read the model
+//! now too. `Seek`/`SetPosition`/`OpenUri` stay no-ops and `CanSeek` stays a hardcoded `false`
+//! until part 5, which also adds the writable `Volume`/`LoopStatus`/`Shuffle` properties and the
+//! `Seeked` signal's real trigger (the signal plumbing itself already works).
 
 use super::model::{self, Changed, Model};
 use crate::daemon::Daemon;
@@ -70,7 +70,13 @@ async fn try_start(daemon: Arc<Daemon>, bus_address: Option<&str>) -> Result<Han
     .context("no session bus")?
     .serve_at(OBJECT_PATH, Root)
     .context("registering the MPRIS root object")?
-    .serve_at(OBJECT_PATH, Player { model })
+    .serve_at(
+        OBJECT_PATH,
+        Player {
+            model,
+            daemon: daemon.clone(),
+        },
+    )
     .context("registering the MPRIS player object")?;
     let connection = tokio::time::timeout(CONNECT_TIMEOUT, builder.build())
         .await
@@ -171,14 +177,19 @@ async fn emit(
 }
 
 /// The MPRIS properties this service tracks and batches into one `PropertiesChanged` signal.
-/// `Can*` is deliberately absent: in part 3 those getters are a hardcoded `false`, so the model
-/// changing its own opinion of them is not something a client is told about yet.
-const TRACKED_PROPERTIES: [&str; 5] = [
+/// `CanSeek` is deliberately absent: until part 5 wires `Seek`/`SetPosition` up, that getter is
+/// a hardcoded `false`, so the model changing its own opinion of it is not something a client is
+/// told about yet.
+const TRACKED_PROPERTIES: [&str; 9] = [
     "PlaybackStatus",
     "Metadata",
     "Volume",
     "LoopStatus",
     "Shuffle",
+    "CanGoNext",
+    "CanGoPrevious",
+    "CanPlay",
+    "CanPause",
 ];
 
 fn property_value(model: &Model, name: &str) -> Value<'static> {
@@ -188,6 +199,10 @@ fn property_value(model: &Model, name: &str) -> Value<'static> {
         "Shuffle" => Value::from(model.shuffle()),
         "Volume" => Value::from(model.volume()),
         "Metadata" => Value::from(metadata_dict(model.metadata())),
+        "CanGoNext" => Value::from(model.can_go_next()),
+        "CanGoPrevious" => Value::from(model.can_go_previous()),
+        "CanPlay" => Value::from(model.can_play()),
+        "CanPause" => Value::from(model.can_pause()),
         other => unreachable!("{other} is not one of mpris::service's TRACKED_PROPERTIES"),
     }
 }
@@ -199,6 +214,10 @@ fn changed_values(model: &Model, changed: &Changed) -> HashMap<&'static str, Val
         changed.volume,
         changed.loop_status,
         changed.shuffle,
+        changed.can_go_next,
+        changed.can_go_previous,
+        changed.can_play,
+        changed.can_pause,
     ];
     TRACKED_PROPERTIES
         .iter()
@@ -292,21 +311,44 @@ impl Root {
 /// `org.mpris.MediaPlayer2.Player`. Holds the one [`Model`] the whole service shares; the
 /// object server's own lock around every interface instance is what makes mutating it from the
 /// background event task (via `InterfaceRef::get_mut`) safe against a concurrent property read.
+/// `daemon` is only needed now that transport methods actually call `Daemon::handle`.
 struct Player {
     model: Model,
+    daemon: Arc<Daemon>,
 }
 
 #[interface(name = "org.mpris.MediaPlayer2.Player")]
 impl Player {
-    // Every method below is a no-op in part 3: every `Can*` getter reads `false`, so a
-    // well-behaved client never calls them yet. Part 4/5 fill these in with
-    // `self.model.*_request()` (already written) routed through a `Daemon::handle` call.
-    async fn next(&self) {}
-    async fn previous(&self) {}
-    async fn pause(&self) {}
-    async fn play_pause(&self) {}
-    async fn stop(&self) {}
-    async fn play(&self) {}
+    async fn next(&self) {
+        let _ = self.daemon.handle(self.model.next_request()).await;
+    }
+
+    async fn previous(&self) {
+        let _ = self.daemon.handle(self.model.previous_request()).await;
+    }
+
+    async fn pause(&self) {
+        if let Some(request) = self.model.pause_request() {
+            let _ = self.daemon.handle(request).await;
+        }
+    }
+
+    async fn play_pause(&self) {
+        let _ = self.daemon.handle(self.model.play_pause_request()).await;
+    }
+
+    async fn stop(&self) {
+        let _ = self.daemon.handle(self.model.stop_request()).await;
+    }
+
+    async fn play(&self) {
+        if let Some(request) = self.model.play_request() {
+            let _ = self.daemon.handle(request).await;
+        }
+    }
+
+    // `Seek`/`SetPosition` stay no-ops until part 5 (their `CanSeek` is still a hardcoded
+    // `false` below, so a well-behaved client never calls them yet).
     async fn seek(&self, _offset: i64) {}
     async fn set_position(&self, _track_id: ObjectPath<'_>, _position: i64) {}
     /// Permanently out of scope (#34 decision 2): phonia's queue has no notion of opening an
@@ -360,28 +402,28 @@ impl Player {
         1.0
     }
 
-    /// Hardcoded `false` until part 4 wires `Next` up to a real `Daemon::handle` call -- see the
-    /// module doc comment.
     #[zbus(property)]
     fn can_go_next(&self) -> bool {
-        false
+        self.model.can_go_next()
     }
 
     #[zbus(property)]
     fn can_go_previous(&self) -> bool {
-        false
+        self.model.can_go_previous()
     }
 
     #[zbus(property)]
     fn can_play(&self) -> bool {
-        false
+        self.model.can_play()
     }
 
     #[zbus(property)]
     fn can_pause(&self) -> bool {
-        false
+        self.model.can_pause()
     }
 
+    /// Hardcoded `false` until part 5 wires `Seek`/`SetPosition` up to a real `Daemon::handle`
+    /// call -- see the module doc comment.
     #[zbus(property)]
     fn can_seek(&self) -> bool {
         false
