@@ -61,6 +61,10 @@ pub enum Call {
         offset: u32,
         limit: u32,
     },
+    FavoriteArtists {
+        offset: u32,
+        limit: u32,
+    },
     MyPlaylists {
         offset: u32,
         limit: u32,
@@ -94,6 +98,7 @@ struct State {
     artists: HashMap<String, ArtistData>,
     favorite_tracks: Vec<Track>,
     favorite_albums: Vec<Album>,
+    favorite_artists: Vec<Artist>,
     my_playlists: Vec<Playlist>,
     /// Keyed by folder id; `None` is the root of "My Collection".
     folders: HashMap<Option<String>, Vec<FolderEntry>>,
@@ -180,6 +185,12 @@ impl FakeCatalog {
     /// The user's favorite albums, for `favorite_albums`.
     pub fn with_favorite_albums(self, albums: Vec<Album>) -> Self {
         self.state.lock().unwrap().favorite_albums = albums;
+        self
+    }
+
+    /// The user's favorite artists, for `favorite_artists`.
+    pub fn with_favorite_artists(self, artists: Vec<Artist>) -> Self {
+        self.state.lock().unwrap().favorite_artists = artists;
         self
     }
 
@@ -463,6 +474,17 @@ impl Catalog for FakeCatalog {
         })
     }
 
+    fn favorite_artists(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Artist>, CatalogError>> {
+        let call = Call::FavoriteArtists { offset, limit };
+        self.answer(call, move |state| {
+            Ok(page_of(&state.favorite_artists, offset, limit))
+        })
+    }
+
     fn my_playlists(
         &self,
         offset: u32,
@@ -641,9 +663,15 @@ mod tests {
 
     #[tokio::test]
     async fn the_library_comes_back_paged_and_is_remembered() {
+        let korn = Artist {
+            id: "780".into(),
+            name: "Korn".into(),
+            picture: None,
+        };
         let catalog = FakeCatalog::new()
             .with_favorite_tracks((1..=3).map(track).collect())
             .with_favorite_albums(vec![album_of("a1")])
+            .with_favorite_artists(vec![korn])
             .with_my_playlists(vec![playlist_of("p1"), playlist_of("p2")]);
 
         let tracks = catalog.favorite_tracks(0, 2).await.unwrap();
@@ -651,6 +679,9 @@ mod tests {
 
         let albums = catalog.favorite_albums(0, 10).await.unwrap();
         assert_eq!(albums.items[0].id, "a1");
+
+        let artists = catalog.favorite_artists(0, 10).await.unwrap();
+        assert_eq!(artists.items[0].id, "780");
 
         let playlists = catalog.my_playlists(0, 10).await.unwrap();
         assert_eq!(

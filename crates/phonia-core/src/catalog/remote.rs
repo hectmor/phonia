@@ -396,6 +396,24 @@ impl Catalog for TidalCatalog {
         })
     }
 
+    fn favorite_artists(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Artist>, CatalogError>> {
+        let catalog = self.clone();
+        Box::pin(async move {
+            let user_id = catalog.user_id().await?;
+            let body = catalog
+                .get(
+                    &format!("/users/{user_id}/favorites/artists"),
+                    favorites_query(offset, limit),
+                )
+                .await?;
+            parse_favorited_items::<RawArtist, Artist>(&body)
+        })
+    }
+
     fn my_playlists(
         &self,
         offset: u32,
@@ -1533,6 +1551,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(albums.items[0].title, "Nine");
+
+        let artists = parse_favorited_items::<RawArtist, Artist>(
+            r#"{"items":[{"created":"2024-01-01T00:00:00.000+0000",
+                "item":{"id":780,"name":"Korn"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(artists.items[0].name, "Korn");
     }
 
     #[test]
@@ -1965,6 +1990,14 @@ mod tests {
             playlists.items.len(),
             playlists.total,
             playlists.items.iter().map(|p| &p.title).collect::<Vec<_>>()
+        );
+
+        let artists = catalog.favorite_artists(0, 10).await.unwrap();
+        println!(
+            "favorite artists: {} of {}: {:?}",
+            artists.items.len(),
+            artists.total,
+            artists.items.iter().map(|a| &a.name).collect::<Vec<_>>()
         );
     }
 

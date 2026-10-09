@@ -1,10 +1,10 @@
 //! The messages: what a client may ask, and what the daemon answers and announces.
 
 use crate::dto::{
-    AlbumListRef, AlbumSummary, ArtistSummary, CatalogKind, CatalogRef, EndReason, FolderEntry,
-    ItemId, Lyrics, OutputInfo, Page, PlaylistListRef, PlaylistSummary, Quality, Queue,
-    ReleaseReason, Repeat, ReplayGain, Route, SinkReport, Spec, State, Status, StreamQuality,
-    TrackSummary,
+    AlbumListRef, AlbumSummary, ArtistListRef, ArtistSummary, CatalogKind, CatalogRef, EndReason,
+    FolderEntry, ItemId, Lyrics, OutputInfo, Page, PlaylistListRef, PlaylistSummary, Quality,
+    Queue, ReleaseReason, Repeat, ReplayGain, Route, SinkReport, Spec, State, Status,
+    StreamQuality, TrackSummary,
 };
 use serde::{Deserialize, Serialize};
 
@@ -41,7 +41,7 @@ pub const CAP_AUTOPLAY: &str = "autoplay";
 /// The protocol version this crate speaks.
 pub const PROTOCOL: Version = Version {
     major: 1,
-    minor: 13,
+    minor: 14,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,6 +209,14 @@ pub enum Request {
     /// One page of a list of albums (since 1.6). Answered with [`Payload::Albums`].
     Albums {
         from: AlbumListRef,
+        #[serde(default)]
+        offset: u32,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    /// One page of a list of artists (since 1.14). Answered with [`Payload::Artists`].
+    Artists {
+        from: ArtistListRef,
         #[serde(default)]
         offset: u32,
         #[serde(default)]
@@ -395,6 +403,11 @@ pub enum Payload {
     Albums {
         from: AlbumListRef,
         page: Page<AlbumSummary>,
+    },
+    /// A page of artists, and the list it is of (since 1.14).
+    Artists {
+        from: ArtistListRef,
+        page: Page<ArtistSummary>,
     },
     /// A page of playlists, and the list it is of (since 1.6).
     Playlists {

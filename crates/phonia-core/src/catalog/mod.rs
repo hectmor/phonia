@@ -309,6 +309,14 @@ pub trait Catalog: Send + Sync {
         limit: u32,
     ) -> BoxFuture<'static, Result<Page<Album>, CatalogError>>;
 
+    /// The artists the logged-in user has favorited, newest first. At most [`MAX_ITEMS_LIMIT`]
+    /// per page.
+    fn favorite_artists(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Artist>, CatalogError>>;
+
     /// The playlists the logged-in user created themselves — not the ones they only follow. At
     /// most [`MAX_ITEMS_LIMIT`] per page.
     fn my_playlists(

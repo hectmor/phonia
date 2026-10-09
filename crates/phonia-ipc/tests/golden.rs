@@ -296,7 +296,7 @@ fn the_server_banner() {
                 CAP_AUTOPLAY.into(),
             ],
         }),
-        r#"{"type":"hello","protocol":{"major":1,"minor":13},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","catalog","lyrics","autoplay"]}"#,
+        r#"{"type":"hello","protocol":{"major":1,"minor":14},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","catalog","lyrics","autoplay"]}"#,
     );
 }
 
@@ -1140,7 +1140,7 @@ fn versions_are_compatible_across_minors_but_not_majors() {
     assert!(v(1, 0).compatible_with(v(1, 7)));
     assert!(v(1, 7).compatible_with(v(1, 0)));
     assert!(!v(1, 0).compatible_with(v(2, 0)));
-    assert_eq!(PROTOCOL, v(1, 13));
+    assert_eq!(PROTOCOL, v(1, 14));
 }
 
 #[test]
@@ -1228,6 +1228,49 @@ fn the_track_radio_request_since_1_12() {
             limit: Some(50),
         },
         r#"{"id":1,"request":{"type":"tracks","from":{"type":"track_radio","id":"33723914"},"offset":0,"limit":50}}"#,
+    );
+}
+
+#[test]
+fn the_favorite_artists_list_request_and_response_since_1_14() {
+    request(
+        1,
+        Request::Artists {
+            from: ArtistListRef::FavoriteArtists,
+            offset: 0,
+            limit: Some(50),
+        },
+        r#"{"id":1,"request":{"type":"artists","from":{"type":"favorite_artists"},"offset":0,"limit":50}}"#,
+    );
+    response(
+        2,
+        Reply::Ok(Payload::Artists {
+            from: ArtistListRef::FavoriteArtists,
+            page: Page {
+                items: vec![ArtistSummary {
+                    id: "780".into(),
+                    name: "Korn".into(),
+                    picture: None,
+                }],
+                total: 1,
+                offset: 0,
+            },
+        }),
+        r#"{"type":"response","id":2,"ok":{"type":"artists","from":{"type":"favorite_artists"},"page":{"items":[{"id":"780","name":"Korn","picture":null}],"total":1,"offset":0}}}"#,
+    );
+    // A list a newer client knows and this one does not falls back to `Unknown`, the same as
+    // every other `*ListRef`.
+    let minimal: ClientMessage = serde_json::from_str(
+        r#"{"id":3,"request":{"type":"artists","from":{"type":"something_new"}}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        minimal.request,
+        Request::Artists {
+            from: ArtistListRef::Unknown,
+            offset: 0,
+            limit: None
+        }
     );
 }
 
