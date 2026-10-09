@@ -801,6 +801,21 @@ when recently played (which has no matching `LibraryTab`) actually needs
 it; adding that abstraction now, for a block that still maps onto a real
 tab, would be scaffolding for a need that is not there yet.
 
+Part 4 starts recently played's own core/daemon side, in memory only
+(no TUI yet): a new `phonia-core/src/recent.rs` with a bounded,
+deduplicated `RecentlyPlayed` log and a `Tracker` turning engine events
+into entries -- simpler than `play_log::SessionTracker` on purpose,
+since it only has to answer "heard 30s yet" (`engine::Event::Position`
+already stalls while paused, so a plain position check is enough; a
+seek forward past the threshold counts, accepted as fine for a local
+list). Hooked into `phoniad`'s `fan_in` beside `note_play_log`, for the
+same reason: resolving the source has to happen against the exact
+queue snapshot at that moment, since a gapless join can move the queue
+on first. New `Request::RecentlyPlayed`/`Payload::RecentlyPlayed`/
+`Event::RecentlyPlayedChanged` and `CAP_RECENTLY_PLAYED` (protocol
+1.15, not gated on `catalog`), plus `phonia ctl recent` so the feature
+is usable before the TUI catches up in part 6.
+
 ## Conventions this file assumes
 
 - Issues are closed by the project owner by hand after their pull requests

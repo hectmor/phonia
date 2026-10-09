@@ -284,6 +284,18 @@ autoplay = false        # fetch more tracks from TIDAL when the queue runs dry? 
   it plays on; a local file has no radio of its own, so it falls back to the last TIDAL track
   that played. `Repeat::One`/`Repeat::All` never trigger it. `O` in the TUI flips it on or off,
   shown next to shuffle/repeat in the bar whenever it is on.
+- **Favorite artists** (the request `artists` of protocol 1.14, under the existing `catalog`
+  capability): the logged-in user's favorite artists, newest favorited first, the same
+  `/users/{id}/favorites/artists` shape favorite tracks and albums already use. No standalone
+  `ctl` command (favorite albums and tracks have none either, beyond `library`); shown as a
+  fourth tab in the TUI's Library section and a block on Home (#144), Enter opening the artist's
+  page, `a`/`A` adding its top tracks whole.
+- **Recently played** (#144; the request `recently_played` of protocol 1.15, its own
+  `recently_played` capability -- not gated on `catalog`, since it needs no TIDAL call and covers
+  local files too): a log the daemon keeps itself, most recent first, deduplicated by source (
+  playing something again moves it to the front with a fresh time rather than listing it twice),
+  capped at 50. A track counts as played once actually heard for 30s (TIDAL's own rule for its
+  own Recently Played), or, if shorter, once it plays to the end. `phonia ctl recent` prints it.
 - `phonia config path` prints which file is used, and `phonia config show` prints every setting
   with where its value comes from (the file or the default). `--config <file>` (or the
   `PHONIA_CONFIG` environment variable) selects another file, also for `phoniad`.

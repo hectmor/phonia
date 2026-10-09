@@ -19,6 +19,7 @@ use phonia_core::output::SinkFactory;
 use phonia_core::output::alsa::SinkReport;
 use phonia_core::play_log::{PlayLog, PlaybackSession, SessionTracker};
 use phonia_core::queue::{ItemId, Queue, QueueSnapshot, QueueTrack};
+use phonia_core::recent::{PlayedTrack, Tracker as RecentTracker};
 use phonia_ipc as ipc;
 use phonia_ipc::{AddAt, ErrorCode, NewTrack, Payload, ProtocolError, Reply, Request};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -152,6 +153,10 @@ pub struct Daemon {
     /// (`consider_autoplay`, `run_autoplay`, and the cancel on `Stop`/`QueueClear`), so a plain
     /// lock is enough.
     autoplay: Mutex<autoplay::Autoplay>,
+    /// The recently played log and the tracker that fills it; only ever touched from `fan_in`
+    /// and `Request::RecentlyPlayed`, so a plain lock is enough (same reasoning as `play_log`'s
+    /// own tracker above).
+    recent: Mutex<RecentTracker>,
 }
 
 impl Daemon {
@@ -194,6 +199,7 @@ impl Daemon {
             last_report: Mutex::new(None),
             lyrics_cache: Mutex::new(LyricsCache::new()),
             autoplay: Mutex::new(autoplay::Autoplay::default()),
+            recent: Mutex::new(RecentTracker::new()),
         });
 
         // The volume can be changed from the desktop's mixer too; the daemon follows and announces it.
@@ -232,6 +238,7 @@ impl Daemon {
                         }
                         let queue = self.controller.snapshot();
                         self.note_play_log(&event, &queue);
+                        self.note_recently_played(&event, &queue);
                         self.publish(|_| convert::event(&event, &queue));
                         match &event {
                             engine::Event::TrackStarted { meta, .. } => {
@@ -313,6 +320,40 @@ impl Daemon {
         }
     }
 
+    /// Feeds an engine event to the recently played tracker, publishing `RecentlyPlayedChanged`
+    /// whenever a track actually gets recorded (not on every position tick). Resolving the
+    /// source has to happen here, against this exact snapshot, for the same reason
+    /// `note_play_log` already does: a gapless join can move the queue on before a `TrackEnded`
+    /// for the track it followed is even converted.
+    fn note_recently_played(&self, event: &engine::Event, queue: &QueueSnapshot) {
+        let now = now_ms().max(0) as u64;
+        let mut recent = self.recent.lock().unwrap();
+        let changed = match event {
+            engine::Event::TrackStarted { meta, .. } => {
+                let (_, source) = convert::entry_of(&meta.track, queue);
+                recent.started(source.map(|source| PlayedTrack {
+                    source,
+                    title: meta.title.clone(),
+                    artist: meta.artist.clone(),
+                    duration_ms: meta.duration.map(convert::ms),
+                    cover: meta.cover.clone(),
+                    played_at_ms: now,
+                }));
+                false
+            }
+            engine::Event::Position { position, .. } => recent.position(convert::ms(*position)),
+            engine::Event::TrackEnded { reason, .. } => recent.ended(*reason),
+            _ => false,
+        };
+        let items = changed.then(|| recent.recent().items().to_vec());
+        drop(recent);
+        if let Some(items) = items {
+            self.publish(|_| ipc::Event::RecentlyPlayedChanged {
+                items: items.iter().map(convert::played_track).collect(),
+            });
+        }
+    }
+
     /// Numbers an event and sends it to every subscriber.
     fn publish(&self, make: impl FnOnce(u64) -> ipc::Event) {
         let _order = self.publish_lock.lock().unwrap();
@@ -387,6 +428,7 @@ impl Daemon {
             ipc::CAP_VOLUME.to_string(),
             ipc::CAP_GAPLESS.to_string(),
             ipc::CAP_QUALITY.to_string(),
+            ipc::CAP_RECENTLY_PLAYED.to_string(),
         ];
         // Only a daemon with a login to browse with can search, fetch lyrics, or autoplay
         // (which fetches more tracks from TIDAL to append).
@@ -452,6 +494,12 @@ impl Daemon {
                 limit,
             } => self.playlists(from, offset, limit).await,
             Request::Library { limit } => self.library(limit).await,
+            Request::RecentlyPlayed => {
+                let items = self.recent.lock().unwrap().recent().items().to_vec();
+                Reply::Ok(Payload::RecentlyPlayed {
+                    items: items.iter().map(convert::played_track).collect(),
+                })
+            }
             Request::PlaylistFolder {
                 folder,
                 offset,

@@ -96,6 +96,9 @@ pub enum CtlCommand {
         #[arg(long)]
         limit: Option<u32>,
     },
+    /// Shows the recently played log (#144): what has actually played, most recent first,
+    /// whichever daemon it came from -- TIDAL tracks and local files alike. Needs no TIDAL login.
+    Recent,
     /// Shows a track's lyrics: synced to the timestamp if TIDAL has them, plain text otherwise.
     /// Without an id, the track playing now (it must be a TIDAL one).
     Lyrics {
@@ -315,6 +318,7 @@ pub async fn run(args: CtlArgs, config_flag: Option<&Path>) -> Result<()> {
         CtlCommand::Album { id, limit } => album(&client, json, id, limit).await,
         CtlCommand::Artist { id, limit } => artist(&client, json, id, limit).await,
         CtlCommand::Library { limit } => library(&client, json, limit).await,
+        CtlCommand::Recent => recent(&client, json).await,
         CtlCommand::Lyrics { id } => lyrics(&client, json, id).await,
         CtlCommand::Folder { id } => folder(&client, json, id).await,
         CtlCommand::Radio { id, limit } => radio(&client, json, id, limit).await,
@@ -622,6 +626,11 @@ async fn library(client: &Client, json: bool, limit: Option<u32>) -> Result<()> 
     print_payload(json, &payload, || format_library(&payload))
 }
 
+async fn recent(client: &Client, json: bool) -> Result<()> {
+    let payload = client.request(Request::RecentlyPlayed).await?;
+    print_payload(json, &payload, || format_recent(&payload))
+}
+
 async fn lyrics(client: &Client, json: bool, id: Option<String>) -> Result<()> {
     require_catalog(client, "lyrics")?;
     if !client
@@ -837,6 +846,26 @@ fn format_library(payload: &Payload) -> String {
             playlist.id
         )
     });
+    text
+}
+
+/// The recently played log, most recent first, numbered from the start.
+fn format_recent(payload: &Payload) -> String {
+    let Payload::RecentlyPlayed { items } = payload else {
+        return "unexpected answer".to_string();
+    };
+    if items.is_empty() {
+        return "Recently played: none yet.".to_string();
+    }
+    let mut text = format!("Recently played ({}):", items.len());
+    for (index, item) in items.iter().enumerate() {
+        let name = phonia_ipc::fmt::track_name(
+            item.title.as_deref(),
+            item.artist.as_deref(),
+            Some(&item.source),
+        );
+        text.push_str(&format!("\n {:>3}. {name}   {}", index + 1, item.source));
+    }
     text
 }
 
@@ -1424,6 +1453,9 @@ fn format_event(event: &Event) -> String {
         Event::Seeked { position_ms } => format!("seeked to {}", phonia_ipc::fmt::ms(*position_ms)),
         Event::SeekRejected { reason } => format!("seek rejected: {reason}"),
         Event::QueueChanged { queue } => format!("queue changed ({} entries)", queue.items.len()),
+        Event::RecentlyPlayedChanged { items } => {
+            format!("recently played changed ({} entries)", items.len())
+        }
         Event::QueueExhausted => "end of the queue".to_string(),
         Event::SinkReport(report) => format!(
             "output {}: {} {}",
@@ -2457,6 +2489,28 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("Your playlists (0 of 0):\n  none"), "{text}");
+    }
+
+    #[test]
+    fn recently_played_lists_each_entry_numbered_and_says_when_there_is_none() {
+        let text = format_recent(&Payload::RecentlyPlayed { items: vec![] });
+        assert_eq!(text, "Recently played: none yet.");
+
+        let payload = Payload::RecentlyPlayed {
+            items: vec![phonia_ipc::PlayedTrack {
+                source: "tidal:33723914".into(),
+                title: Some("Here to Stay".into()),
+                artist: Some("Korn".into()),
+                duration_ms: Some(271_000),
+                cover: None,
+                played_at_ms: 1_700_000_000_000,
+            }],
+        };
+        let text = format_recent(&payload);
+        assert_eq!(
+            text,
+            "Recently played (1):\n   1. Korn - Here to Stay   tidal:33723914"
+        );
     }
 
     #[test]

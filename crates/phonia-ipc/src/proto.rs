@@ -2,8 +2,8 @@
 
 use crate::dto::{
     AlbumListRef, AlbumSummary, ArtistListRef, ArtistSummary, CatalogKind, CatalogRef, EndReason,
-    FolderEntry, ItemId, Lyrics, OutputInfo, Page, PlaylistListRef, PlaylistSummary, Quality,
-    Queue, ReleaseReason, Repeat, ReplayGain, Route, SinkReport, Spec, State, Status,
+    FolderEntry, ItemId, Lyrics, OutputInfo, Page, PlayedTrack, PlaylistListRef, PlaylistSummary,
+    Quality, Queue, ReleaseReason, Repeat, ReplayGain, Route, SinkReport, Spec, State, Status,
     StreamQuality, TrackSummary,
 };
 use serde::{Deserialize, Serialize};
@@ -38,10 +38,15 @@ pub const CAP_LYRICS: &str = "lyrics";
 /// advertised alongside [`CAP_CATALOG`], since the behavior needs the catalog to fetch from.
 pub const CAP_AUTOPLAY: &str = "autoplay";
 
+/// Capability: the daemon keeps a local log of recently played tracks and announces it changing
+/// (protocol 1.15). Not gated on [`CAP_CATALOG`]: it needs no TIDAL call, and covers local files
+/// too.
+pub const CAP_RECENTLY_PLAYED: &str = "recently_played";
+
 /// The protocol version this crate speaks.
 pub const PROTOCOL: Version = Version {
     major: 1,
-    minor: 14,
+    minor: 15,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,6 +242,9 @@ pub enum Request {
         #[serde(default)]
         limit: Option<u32>,
     },
+    /// The recently played log, whole (since 1.15, #144): there is no paging, since it is always
+    /// capped at a small size on the daemon's own side. Answered with [`Payload::RecentlyPlayed`].
+    RecentlyPlayed,
     /// A track's lyrics, synced or plain (since 1.10). Answered with [`Payload::Lyrics`], which
     /// repeats `id` so a client can discard a stale answer after the track has moved on.
     Lyrics {
@@ -420,6 +428,10 @@ pub enum Payload {
         favorite_albums: Page<AlbumSummary>,
         my_playlists: Page<PlaylistSummary>,
     },
+    /// The recently played log, most recent first, whole (since 1.15, #144).
+    RecentlyPlayed {
+        items: Vec<PlayedTrack>,
+    },
     /// A track's lyrics, or `None` when TIDAL has none for it at all (since 1.10). `id` is the
     /// track the request asked about, so a client can discard this if it no longer matches the
     /// track playing by the time the answer arrives.
@@ -505,6 +517,11 @@ pub enum Event {
     },
     QueueChanged {
         queue: Queue,
+    },
+    /// The recently played log changed, whole, the same shape `QueueChanged` already uses for
+    /// the whole queue (since 1.15, #144).
+    RecentlyPlayedChanged {
+        items: Vec<PlayedTrack>,
     },
     QueueExhausted,
     /// The daemon paused and gave the audio device back; the track and position are kept.
