@@ -342,8 +342,8 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut current = String::new();
     for word in text.split_whitespace() {
-        let fits = current.is_empty()
-            || current.chars().count() + 1 + word.chars().count() <= width;
+        let fits =
+            current.is_empty() || current.chars().count() + 1 + word.chars().count() <= width;
         if !fits {
             lines.push(std::mem::take(&mut current));
         }
