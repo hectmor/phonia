@@ -1667,11 +1667,13 @@ fn act_on_result(state: &mut State, action: Action) -> Effects {
         }
     }
     let play = action == Action::Activate;
-    // Playing goes after the track playing and starts the first added; `a` goes to the end.
-    let at = if action == Action::AddToQueue {
-        phonia_ipc::AddAt::End
-    } else {
+    // Enter and `a` both go to the end of the queue; only `A` goes right after the track playing.
+    // Activate only ever reaches here for a track (Album/Playlist/Artist return above), so this
+    // is the same end-of-queue placement #160 gave an opened album's or playlist's own tracks.
+    let at = if action == Action::AddNext {
         phonia_ipc::AddAt::Next
+    } else {
+        phonia_ipc::AddAt::End
     };
     let request = match selected {
         Selected::Track(track) => {
@@ -4018,7 +4020,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_a_track_adds_it_after_the_one_playing_and_asks_to_play_it() {
+    fn enter_on_a_track_adds_it_to_the_end_and_asks_to_play_it() {
         let mut state = with_results(vec![track_row(11), track_row(12)], 2);
         ch(&mut state, 'j');
         let (tag, request) = tagged(press(&mut state, KeyCode::Enter));
@@ -4029,7 +4031,7 @@ mod tests {
                 tracks: vec![phonia_ipc::NewTrack {
                     source: "tidal:12".into()
                 }],
-                at: phonia_ipc::AddAt::Next
+                at: phonia_ipc::AddAt::End
             }
         );
     }

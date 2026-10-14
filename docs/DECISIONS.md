@@ -3119,10 +3119,9 @@ earlier pass read this as "stop playing too, like `a` does," and was corrected b
 they saw it live: queuing without playing made the row freshly marked current by #159 never
 actually light up, since nothing had changed from what was already playing.)
 
-Two related defaults were confirmed to stay exactly as they are, rather than assumed, since this
-issue could easily have been read as asking for either: `Enter` on a *track in the search results*
-still plays it immediately (unchanged), and `Enter` on an *album or playlist* (not yet opened)
-still opens it to browse, rather than queuing it (the #20 decision stands).
+One related default was confirmed to stay exactly as it is, rather than assumed, since this issue
+could easily have been read as asking for it too: `Enter` on an *album or playlist* (not yet
+opened) still opens it to browse, rather than queuing it (the #20 decision stands).
 
 The implementation is unchanged from before this issue except for one field: `send_add_from`'s
 `Request::QueueAddFrom` now asks for `AddAt::End` instead of `AddAt::Next`. `play_at` (the
@@ -3130,8 +3129,20 @@ position, among the tracks TIDAL will actually stream, of the one under the curs
 `count_streamable_before`) still rides along on the `Tag::AddFrom` wire tag, and `on_added` still
 turns it into a `Request::Play` once the daemon answers with the ids that made it in.
 
-README's search/browse paragraph is updated to describe the end-of-queue placement, including the
-one remaining exception restated for clarity: a favorite track inside Library still plays just
-that one track, without queuing the rest of its (unordered, possibly huge) list.
+**Follow-up, same session:** `Enter` on a track in the search results' own *Tracks* tab
+(`act_on_result`, a separate function from the opened-view one above) got the same end-of-queue
+treatment, still playing the track — the user asked for this explicitly once they'd seen the
+opened-album behaviour land, to keep the two consistent. `act_on_result`'s shared `at` computation
+only ever reaches `Action::Activate` for a track (Album/Playlist/Artist all return earlier, from
+the "Enter opens it" block), so widening `at`'s `Activate` branch from `Next` to `End` could not
+affect anything else: `a`/`A` on an album, playlist or artist row keep exactly the `End`/`Next`
+they already had. A playlist opened and browsed (not a search *result* row, but the tracks inside
+it once open) already shared `act_on_track_row` with an opened album, so it needed no separate
+change — "tracks and playlist" in the user's own words was this pair: the results list, and an
+opened playlist, both now ending up in the same place.
+
+README's search/browse paragraph is updated to describe the end-of-queue placement throughout,
+including the one remaining exception restated for clarity: a favorite track inside Library still
+plays just that one track, without queuing the rest of its (unordered, possibly huge) list.
 
 PR #162, 1 part, closes #160.

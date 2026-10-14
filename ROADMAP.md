@@ -931,15 +931,14 @@ own current entry; the same marker also reached `browse::track_rows`
 (an opened album, playlist or artist's top tracks). See
 `docs/DECISIONS.md` for the rendering quirk this surfaced along the way.
 
-**#160 is in progress.** `Enter` on a track inside an opened album,
-playlist or artist's top tracks now adds the whole of it to the end of
-the queue, the same place `a` on the album row itself already adds it,
-instead of queuing it right after the track playing — it still starts
-playback at the track clicked, unchanged. `Enter` on a track still
-playing immediately from the search results, and `Enter` on an album or
-playlist not yet opened still opening it to browse, were both confirmed
-with the project owner as staying exactly as they are. See
-`docs/DECISIONS.md` for the full reasoning.
+**#160 is in progress.** `Enter` on a track, wherever it is (the search
+results' own Tracks tab, or inside an opened album, playlist or
+artist's top tracks), now adds it (or the whole list it is part of) to
+the end of the queue, the same place `a` already adds it, instead of
+right after the track playing — it still starts playback at the track
+clicked, unchanged. `Enter` on an album or playlist not yet opened
+still opens it to browse, confirmed with the project owner as staying
+exactly as it is. See `docs/DECISIONS.md` for the full reasoning.
 
 ## Conventions this file assumes
 
