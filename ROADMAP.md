@@ -96,7 +96,7 @@ their turn comes.
 |---|---|---|
 | #124 | Layout and appearance modifying for better user experience | Closed (both parts merged) |
 | #159 | Highlight the track playing in search, and the album it belongs to | Closed (PR #161 merged) |
-| #160 | Enter inside an opened album queues it at the end, not next-and-playing | In progress |
+| #160 | Enter inside an opened album queues it at the end of the queue | In progress |
 
 Brand new milestone, started right after #120. The owner's concrete ask
 (from a screenshot of TIDAL's own web player): a visually bigger, bolder
@@ -933,14 +933,13 @@ own current entry; the same marker also reached `browse::track_rows`
 
 **#160 is in progress.** `Enter` on a track inside an opened album,
 playlist or artist's top tracks now adds the whole of it to the end of
-the queue, the same as `a` on the album row itself, instead of queuing
-it next and starting playback right away. `Enter` on a track still
+the queue, the same place `a` on the album row itself already adds it,
+instead of queuing it right after the track playing — it still starts
+playback at the track clicked, unchanged. `Enter` on a track still
 playing immediately from the search results, and `Enter` on an album or
 playlist not yet opened still opening it to browse, were both confirmed
 with the project owner as staying exactly as they are. See
-`docs/DECISIONS.md` for the full reasoning, including the dead code
-(`send_add_from`, `count_streamable_before`, the `Tag::AddFrom` wire
-tag) this removed.
+`docs/DECISIONS.md` for the full reasoning.
 
 ## Conventions this file assumes
 

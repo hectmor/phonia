@@ -3108,28 +3108,30 @@ besides.
 
 PR #161, 3 commits (the track, the opened-list track, the album), closes #159.
 
-## 2026-10-14 — #160: Enter inside an opened album queues it at the end, not next-and-playing
+## 2026-10-14 — #160: Enter inside an opened album queues it at the end, still playing the track clicked
 
-Today, `Enter` on a track inside an opened album, playlist or artist's top-tracks view queues the
-whole of it right after the track playing (`AddAt::Next`) and immediately starts playback at the
-track under the cursor (`play_at`, counted among the tracks TIDAL will actually stream). The user
-asked for this to behave like `a` on the album row itself instead: add the whole thing to the
-**end** of the queue, without touching what is already playing.
+Before this issue, `Enter` on a track inside an opened album, playlist or artist's top-tracks view
+queued the whole of it right after the track playing (`AddAt::Next`) and started playback at the
+track under the cursor. The user asked for the *position* to change, not the *playing*: queue the
+whole thing at the **end** of the queue instead — the same place `a` on the album row itself
+already adds it — while still starting playback at the track clicked, exactly as before. (An
+earlier pass read this as "stop playing too, like `a` does," and was corrected by the user once
+they saw it live: queuing without playing made the row freshly marked current by #159 never
+actually light up, since nothing had changed from what was already playing.)
 
-Two defaults were kept exactly as they are, confirmed explicitly rather than assumed, since this
+Two related defaults were confirmed to stay exactly as they are, rather than assumed, since this
 issue could easily have been read as asking for either: `Enter` on a *track in the search results*
 still plays it immediately (unchanged), and `Enter` on an *album or playlist* (not yet opened)
 still opens it to browse, rather than queuing it (the #20 decision stands).
 
-The change removes more than it adds: `play_at`'s whole reason to exist — `send_add_from`,
-`count_streamable_before`, and the `Tag::AddFrom` wire tag `on_added` special-cased for it — go
-away, since `Action::Activate` here is now just `send_add` with `QueueAddFrom { at: End }` and
-`play: false`, the exact call an album row's own `a` key already makes. `Row::Track`'s `index`
-field goes with it: nothing downstream needs a track's position once there is no `play_at` to
-compute from it.
+The implementation is unchanged from before this issue except for one field: `send_add_from`'s
+`Request::QueueAddFrom` now asks for `AddAt::End` instead of `AddAt::Next`. `play_at` (the
+position, among the tracks TIDAL will actually stream, of the one under the cursor — computed by
+`count_streamable_before`) still rides along on the `Tag::AddFrom` wire tag, and `on_added` still
+turns it into a `Request::Play` once the daemon answers with the ids that made it in.
 
-README's search/browse paragraph is updated to describe the new behaviour, including the one
-remaining exception restated for clarity: a favorite track inside Library still plays immediately
-on `Enter` rather than queuing its (unordered, possibly huge) list, same as before.
+README's search/browse paragraph is updated to describe the end-of-queue placement, including the
+one remaining exception restated for clarity: a favorite track inside Library still plays just
+that one track, without queuing the rest of its (unordered, possibly huge) list.
 
 PR #162, 1 part, closes #160.
