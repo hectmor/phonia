@@ -2364,6 +2364,26 @@ mod tests {
     }
 
     #[test]
+    fn the_track_playing_is_marked_in_an_opened_album() {
+        use phonia_ipc::Track;
+        let mut state = open_album_view();
+        state.status = Some(crate::app::tests_support::status());
+        state.status.as_mut().unwrap().track = Some(Track {
+            item_id: None,
+            source: Some("tidal:2".into()),
+            title: Some("Trash".into()),
+            artist: None,
+            duration_ms: None,
+            quality: None,
+            cover: None,
+            replay_gain: None,
+        });
+        let text = screen(&state, 100, 14);
+        assert!(text.contains(">  2. Trash"), "{text}");
+        assert!(text.contains("   1. Dead"), "{text}");
+    }
+
+    #[test]
     fn a_narrow_terminal_does_not_break_the_album_view() {
         let state = open_album_view();
         for (w, h) in [(0, 0), (1, 1), (16, 4), (20, 5), (40, 8)] {
