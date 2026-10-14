@@ -1314,6 +1314,7 @@ fn apply(state: &mut State, action: Action) -> Effects {
         Action::RemoveEntry | Action::MoveEntryDown | Action::MoveEntryUp | Action::ClearQueue => {
             return edit_queue(state, action);
         }
+        Action::OpenArtist => return open_queue_artist(state),
         Action::AddToQueue | Action::AddNext => {
             return match state.section() {
                 Section::Search if state.search_views.is_empty() => act_on_result(state, action),
@@ -2010,6 +2011,35 @@ fn next_serial(state: &mut State) -> u64 {
     let serial = state.next_serial;
     state.next_serial += 1;
     serial
+}
+
+/// `ga` on the queue: the selected entry's artist page. The queue has no view stack of its own,
+/// so it opens on the Library's, and the Library section comes to the front to show it.
+fn open_queue_artist(state: &mut State) -> Effects {
+    if !in_queue(state) {
+        return Effects::default();
+    }
+    let Some(item) = state
+        .queue
+        .as_ref()
+        .and_then(|queue| queue.items.get(state.queue_cursor.selected()))
+    else {
+        return Effects::default();
+    };
+    let Some(id) = item.artist_id.clone() else {
+        state.last_error = Some("this track has no artist page to open".to_string());
+        return Effects::redraw();
+    };
+    let name = item.artist.clone().unwrap_or_default();
+    if !require_browsable(state, "artists") {
+        return Effects::redraw();
+    }
+    let index = Section::ALL
+        .iter()
+        .position(|section| *section == Section::Library)
+        .unwrap_or(0);
+    state.sidebar.select(index, Section::ALL.len());
+    open_artist_view(state, id, name, None)
 }
 
 fn open_artist_view(
@@ -3360,6 +3390,7 @@ mod tests {
                 artist: None,
                 duration_ms: None,
                 cover: None,
+                artist_id: None,
             })
             .collect();
         let mut queue = queue();
@@ -3369,6 +3400,33 @@ mod tests {
         ch(&mut state, '2');
         ch(&mut state, 'l');
         state
+    }
+
+    #[test]
+    fn ga_in_the_queue_opens_the_selected_tracks_artist() {
+        let mut state = in_the_queue(2);
+        state.server.as_mut().unwrap().capabilities.push("catalog".into());
+        state.queue.as_mut().unwrap().items[1].artist_id = Some("77".to_string());
+        ch(&mut state, 'j');
+        let effects = ch(&mut state, 'g');
+        assert!(effects.commands.is_empty());
+        let effects = ch(&mut state, 'a');
+        assert_eq!(state.section(), Section::Library);
+        assert!(!state.library_views.is_empty());
+        assert!(effects.commands.iter().any(|cmd| matches!(
+            cmd,
+            Cmd::Request { request: Request::Artist { id, .. }, .. } if id == "77"
+        )));
+    }
+
+    #[test]
+    fn ga_on_a_queue_entry_without_an_artist_opens_nothing() {
+        let mut state = in_the_queue(2);
+        ch(&mut state, 'g');
+        let effects = ch(&mut state, 'a');
+        assert_eq!(state.section(), Section::Queue);
+        assert!(state.library_views.is_empty());
+        assert!(effects.commands.is_empty());
     }
 
     fn id(n: u64) -> phonia_ipc::ItemId {

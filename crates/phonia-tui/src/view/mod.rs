@@ -821,6 +821,7 @@ mod tests {
                             artist: None,
                             duration_ms: Some(65_000),
                             cover: None,
+                            artist_id: None,
                         },
                         QueueItem {
                             id: ItemId(2),
@@ -829,6 +830,7 @@ mod tests {
                             artist: None,
                             duration_ms: None,
                             cover: None,
+                            artist_id: None,
                         },
                     ],
                     order: vec![ItemId(2), ItemId(1)],
@@ -1378,6 +1380,7 @@ mod tests {
                 artist: None,
                 duration_ms: None,
                 cover: None,
+                artist_id: None,
             })
             .collect();
         update(

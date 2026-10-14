@@ -44,6 +44,7 @@ type Accepted = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
 );
 
 /// How many results of each kind a search returns when the client does not say.
@@ -1079,10 +1080,11 @@ impl Daemon {
                     info.duration,
                     info.cover,
                     info.album_id,
+                    info.artist_id,
                     None,
                 )),
                 Outcome::Unresolved(source, reason) => {
-                    accepted.push((source, None, None, None, None, None, Some(reason)))
+                    accepted.push((source, None, None, None, None, None, None, Some(reason)))
                 }
                 Outcome::Rejected(source, reason) => {
                     rejected.push(ipc::Rejected { source, reason })
@@ -1111,7 +1113,7 @@ impl Daemon {
             AddAt::Next => queue.play_next(tracks),
             AddAt::Index { index } => queue.insert(index, tracks),
         };
-        for (id, (_, _, _, _, _, _, reason)) in ids.iter().zip(&accepted) {
+        for (id, (_, _, _, _, _, _, _, reason)) in ids.iter().zip(&accepted) {
             if let Some(reason) = reason {
                 unresolved_reasons.push(ipc::Unresolved {
                     id: ipc::ItemId(id.0),
@@ -1298,6 +1300,7 @@ fn accepted_from_catalog(track: &tidal_catalog::Track) -> Result<Accepted, ipc::
     });
     let cover = track.album.as_ref().and_then(|album| album.cover.clone());
     let album_id = track.album.as_ref().map(|album| album.id.clone());
+    let artist_id = track.artists.first().map(|artist| artist.id.clone());
     Ok((
         source,
         Some(track.title.clone()),
@@ -1305,13 +1308,14 @@ fn accepted_from_catalog(track: &tidal_catalog::Track) -> Result<Accepted, ipc::
         track.duration,
         cover,
         album_id,
+        artist_id,
         None,
     ))
 }
 
 /// `accepted` as a queue entry.
 fn queue_track(accepted: &Accepted) -> QueueTrack {
-    let (source, title, artist, duration, cover, album_id, _) = accepted;
+    let (source, title, artist, duration, cover, album_id, artist_id, _) = accepted;
     QueueTrack {
         source: phonia_core::engine::TrackRef(source.to_wire()),
         title: title.clone(),
@@ -1319,6 +1323,7 @@ fn queue_track(accepted: &Accepted) -> QueueTrack {
         duration: *duration,
         cover: cover.clone(),
         album_id: album_id.clone(),
+        artist_id: artist_id.clone(),
     }
 }
 
@@ -1441,6 +1446,7 @@ mod play_log_tests {
                 duration: None,
                 cover: None,
                 album_id: None,
+                artist_id: None,
             },
         };
         QueueSnapshot {

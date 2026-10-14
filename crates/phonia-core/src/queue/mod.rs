@@ -60,6 +60,9 @@ pub struct QueueTrack {
     /// The track's album's id; `None` for a local file, or a TIDAL track with no album. Used by
     /// [`Inner::album_context`] to decide `replaygain::Mode::Auto`.
     pub album_id: Option<String>,
+    /// The id of the track's first credited artist; `None` for a local file, or a TIDAL track
+    /// with no artist credited.
+    pub artist_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

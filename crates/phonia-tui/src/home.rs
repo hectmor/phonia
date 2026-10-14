@@ -321,6 +321,7 @@ mod tests {
             artist: None,
             duration_ms: None,
             cover: None,
+            artist_id: None,
         }
     }
 

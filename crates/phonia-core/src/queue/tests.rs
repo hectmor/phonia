@@ -13,12 +13,14 @@ fn track(name: &str) -> QueueTrack {
         duration: None,
         cover: None,
         album_id: None,
+        artist_id: None,
     }
 }
 
 fn track_in_album(name: &str, album: &str) -> QueueTrack {
     QueueTrack {
         album_id: Some(album.to_string()),
+        artist_id: None,
         ..track(name)
     }
 }
@@ -701,6 +703,7 @@ fn opening_a_track_fills_in_only_what_was_missing() {
         duration: None,
         cover: None,
         album_id: None,
+        artist_id: None,
     }]);
     let before = inner.snapshot().version;
 
