@@ -1,0 +1,929 @@
+//! Configuration: the settings file, and how a setting is decided from the command line, the
+//! file and the built-in defaults.
+//!
+//! Precedence is `flag > file > default`. Nothing here reads the environment or parses a command
+//! line: the binaries hand in what they were given, so every rule is a plain function that a test
+//! can call.
+
+mod file;
+
+pub use file::{
+    ConfigFile, Daemon, Output, OutputMode, Playback, Quality, ReleaseAfterPause, SessionStoreKind,
+    Tidal, parse,
+};
+
+use anyhow::{Context, Result, anyhow, bail};
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
+
+pub const CONFIG_FILE: &str = "config.toml";
+/// The environment variable that names a config file to use instead of the default one.
+pub const CONFIG_ENV: &str = "PHONIA_CONFIG";
+
+/// The directory phonia keeps its files in (the session, the config): `<config dir>/phonia`.
+/// Not created here.
+pub fn dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|dir| dir.join("phonia"))
+}
+
+/// Where the config file to read comes from, which decides what a missing file means.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigSource {
+    /// Named by `--config` or `PHONIA_CONFIG`: it has to exist.
+    Explicit(PathBuf),
+    /// The usual place: absent is fine, it just means "all defaults".
+    Default(PathBuf),
+}
+
+impl ConfigSource {
+    pub fn path(&self) -> &Path {
+        match self {
+            ConfigSource::Explicit(path) | ConfigSource::Default(path) => path,
+        }
+    }
+}
+
+/// Picks the config file: the `--config` flag, else the environment variable, else the default
+/// place. Pure; [`discover_from_env`] supplies the real environment.
+pub fn discover(
+    flag: Option<&Path>,
+    env: Option<&OsStr>,
+    dir: Option<&Path>,
+) -> Option<ConfigSource> {
+    if let Some(path) = flag {
+        return Some(ConfigSource::Explicit(path.to_path_buf()));
+    }
+    if let Some(path) = env.filter(|value| !value.is_empty()) {
+        return Some(ConfigSource::Explicit(PathBuf::from(path)));
+    }
+    dir.map(|dir| ConfigSource::Default(dir.join(CONFIG_FILE)))
+}
+
+pub fn discover_from_env(flag: Option<&Path>) -> Option<ConfigSource> {
+    let env = std::env::var_os(CONFIG_ENV);
+    discover(flag, env.as_deref(), dir().as_deref())
+}
+
+/// A config file that was read, and where from.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Loaded {
+    pub file: ConfigFile,
+    /// The file that was read; `None` when there was none (all defaults).
+    pub path: Option<PathBuf>,
+}
+
+/// Reads the config file. A default file that isn't there is not an error; one that was asked for
+/// by name and isn't there is, and so is a file that can't be read or understood (the message
+/// names the file, and the key and line).
+pub fn load(source: Option<&ConfigSource>) -> Result<Loaded> {
+    let Some(source) = source else {
+        return Ok(Loaded::default());
+    };
+    let path = source.path();
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && matches!(source, ConfigSource::Default(_)) =>
+        {
+            return Ok(Loaded::default());
+        }
+        Err(error) => {
+            return Err(anyhow!(error))
+                .with_context(|| format!("reading the config file {}", path.display()));
+        }
+    };
+    let file = parse(&text).with_context(|| format!("in the config file {}", path.display()))?;
+    Ok(Loaded {
+        file,
+        path: Some(path.to_path_buf()),
+    })
+}
+
+/// Where a setting's value came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    Flag,
+    File,
+    Default,
+}
+
+impl std::fmt::Display for Origin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Origin::Flag => "command line",
+            Origin::File => "config file",
+            Origin::Default => "default",
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sourced<T> {
+    pub value: T,
+    pub origin: Origin,
+}
+
+impl<T> Sourced<T> {
+    /// The flag if given, else the file's value, else the default.
+    pub fn pick(flag: Option<T>, file: Option<T>, default: T) -> Self {
+        match (flag, file) {
+            (Some(value), _) => Sourced {
+                value,
+                origin: Origin::Flag,
+            },
+            (None, Some(value)) => Sourced {
+                value,
+                origin: Origin::File,
+            },
+            (None, None) => Sourced {
+                value: default,
+                origin: Origin::Default,
+            },
+        }
+    }
+}
+
+/// What the command line said. `None` means the flag was not given.
+#[derive(Debug, Clone, Default)]
+pub struct Overrides {
+    pub device: Option<String>,
+    /// `shared` or `exclusive`, when the command line says (`--output`).
+    pub mode: Option<OutputMode>,
+    /// The output in shared mode, when the command line names one.
+    pub sink: Option<String>,
+    pub max_quality: Option<Quality>,
+    pub min_quality: Option<Quality>,
+    pub socket: Option<PathBuf>,
+    pub verbose: Option<bool>,
+}
+
+/// The settings in force, each with where it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Settings {
+    /// `None` when neither the command line nor the file names a device.
+    pub device: Sourced<Option<String>>,
+    pub mode: Sourced<OutputMode>,
+    /// The output in shared mode.
+    pub sink: Sourced<String>,
+    pub reserve: Sourced<bool>,
+    pub release_after_pause: Sourced<ReleaseAfterPause>,
+    pub max_quality: Sourced<Quality>,
+    pub min_quality: Sourced<Quality>,
+    pub session_store: Sourced<SessionStoreKind>,
+    /// `None` means "the default socket path", which only the binaries know.
+    pub socket: Sourced<Option<PathBuf>>,
+    pub verbose: Sourced<bool>,
+    /// Whether tracks of the same format are joined without a gap.
+    pub gapless: Sourced<bool>,
+    /// How ReplayGain is chosen.
+    pub replaygain: Sourced<crate::replaygain::Mode>,
+    /// Whether finished plays are reported to TIDAL, for Recently Played.
+    pub report_plays: Sourced<bool>,
+    /// The startup value of autoplay (fetching more tracks from TIDAL on a dry queue); can be
+    /// changed at runtime afterward.
+    pub autoplay: Sourced<bool>,
+    /// Whether the daemon registers an MPRIS2 D-Bus service. See #34.
+    pub mpris: Sourced<bool>,
+}
+
+/// Decides every setting: command line over file over default.
+pub fn resolve(overrides: Overrides, file: &ConfigFile) -> Settings {
+    let device_flag = overrides.device.is_some();
+    Settings {
+        device: Sourced::pick(
+            overrides.device.map(Some),
+            file.output.device.clone().map(Some),
+            None,
+        ),
+        // Naming a card on the command line is asking for exclusive mode, whatever the file says.
+        mode: Sourced::pick(
+            device_flag
+                .then_some(OutputMode::Exclusive)
+                .or(overrides.mode),
+            file.output.mode,
+            OutputMode::default(),
+        ),
+        sink: Sourced::pick(
+            overrides.sink,
+            file.output.sink.clone(),
+            "default".to_string(),
+        ),
+        reserve: Sourced::pick(None, file.output.reserve, true),
+        release_after_pause: Sourced::pick(
+            None,
+            file.output.release_after_pause,
+            ReleaseAfterPause::default(),
+        ),
+        max_quality: Sourced::pick(
+            overrides.max_quality,
+            file.tidal.max_quality,
+            Quality::default(),
+        ),
+        min_quality: Sourced::pick(
+            overrides.min_quality,
+            file.tidal.min_quality,
+            Quality::Lossless,
+        ),
+        session_store: Sourced::pick(None, file.tidal.session_store, SessionStoreKind::default()),
+        socket: Sourced::pick(
+            overrides.socket.map(Some),
+            file.daemon.socket.clone().map(Some),
+            None,
+        ),
+        verbose: Sourced::pick(overrides.verbose, file.daemon.verbose, false),
+        gapless: Sourced::pick(None, file.playback.gapless, true),
+        replaygain: Sourced::pick(
+            None,
+            file.playback.replaygain,
+            crate::replaygain::Mode::default(),
+        ),
+        report_plays: Sourced::pick(None, file.tidal.report_plays, true),
+        autoplay: Sourced::pick(None, file.playback.autoplay, false),
+        mpris: Sourced::pick(None, file.daemon.mpris, true),
+    }
+}
+
+/// Where the sound goes, as the settings decide.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutputSpec {
+    /// A sound card of phonia's own.
+    Exclusive { device: String },
+    /// An output of the sound server: `None` is the desktop's default.
+    Shared { sink: Option<String> },
+}
+
+impl OutputSpec {
+    /// The id clients name it by: `exclusive:<device>`, `shared:default` or `shared:<output>`.
+    pub fn id(&self) -> String {
+        match self {
+            OutputSpec::Exclusive { device } => format!("exclusive:{device}"),
+            OutputSpec::Shared { sink: None } => "shared:default".to_string(),
+            OutputSpec::Shared { sink: Some(sink) } => format!("shared:{sink}"),
+        }
+    }
+
+    /// The output an id (see [`OutputSpec::id`]) names.
+    pub fn from_id(id: &str) -> Result<OutputSpec> {
+        if let Some(device) = id
+            .strip_prefix("exclusive:")
+            .filter(|device| !device.is_empty())
+        {
+            return Ok(OutputSpec::Exclusive {
+                device: device.to_string(),
+            });
+        }
+        if let Some(sink) = id.strip_prefix("shared:").filter(|sink| !sink.is_empty()) {
+            return Ok(OutputSpec::Shared {
+                sink: (sink != "default").then(|| sink.to_string()),
+            });
+        }
+        bail!(
+            "{id:?} is not an output id: they look like exclusive:hw:DS2,0, shared:default or shared:<output name>"
+        )
+    }
+
+    /// For messages.
+    pub fn describe(&self) -> String {
+        match self {
+            OutputSpec::Exclusive { device } => format!("device {device}"),
+            OutputSpec::Shared { sink: None } => "shared, the desktop's default output".to_string(),
+            OutputSpec::Shared { sink: Some(sink) } => format!("shared, output {sink}"),
+        }
+    }
+}
+
+impl Overrides {
+    /// What `--output <id>` says: a card is the device, and an output of the sound server is shared
+    /// mode with that sink.
+    pub fn with_output_id(mut self, id: &str) -> Result<Self> {
+        match OutputSpec::from_id(id)? {
+            OutputSpec::Exclusive { device } => self.device = Some(device),
+            OutputSpec::Shared { sink } => {
+                self.mode = Some(OutputMode::Shared);
+                self.sink = Some(sink.unwrap_or_else(|| "default".to_string()));
+            }
+        }
+        Ok(self)
+    }
+}
+
+impl Settings {
+    /// Where to play: the card in exclusive mode (which must be named), the sound server's output
+    /// in shared mode.
+    pub fn output(&self) -> Result<OutputSpec> {
+        Ok(match self.mode.value {
+            OutputMode::Exclusive => OutputSpec::Exclusive {
+                device: self.require_device()?.to_string(),
+            },
+            OutputMode::Shared => OutputSpec::Shared {
+                sink: (self.sink.value != "default").then(|| self.sink.value.clone()),
+            },
+        })
+    }
+
+    /// The device to play on, or an explanation of how to name one.
+    pub fn require_device(&self) -> Result<&str> {
+        match self.device.value.as_deref() {
+            Some(device) => Ok(device),
+            None => bail!(
+                "no audio device configured. Run `phonia devices` to see the sound cards, then put \
+                 `device = \"hw:...\"` under [output] in the config file, or pass --device"
+            ),
+        }
+    }
+
+    /// Fails, saying which two settings disagree, if the best tier asked for is below the worst
+    /// one accepted: nothing could ever play.
+    pub fn check_quality(&self) -> Result<()> {
+        let (max, min) = (self.max_quality.value, self.min_quality.value);
+        if max < min {
+            bail!(
+                "tidal.max_quality ({max}) is below tidal.min_quality ({min}), so no track could \
+                 play: raise the first or lower the second"
+            );
+        }
+        Ok(())
+    }
+
+    /// The socket to use: the configured one, or `default()` (the daemon's usual path).
+    pub fn socket_path(&self, default: impl FnOnce() -> PathBuf) -> PathBuf {
+        self.socket.value.clone().unwrap_or_else(default)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("phonia-config-test-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // ---- which file ------------------------------------------------------------------------
+
+    #[test]
+    fn the_flag_beats_the_environment_beats_the_default_place() {
+        let dir = Path::new("/home/u/.config/phonia");
+        let flag = Path::new("/tmp/flag.toml");
+        let env = OsStr::new("/tmp/env.toml");
+
+        assert_eq!(
+            discover(Some(flag), Some(env), Some(dir)),
+            Some(ConfigSource::Explicit("/tmp/flag.toml".into()))
+        );
+        assert_eq!(
+            discover(None, Some(env), Some(dir)),
+            Some(ConfigSource::Explicit("/tmp/env.toml".into()))
+        );
+        assert_eq!(
+            discover(None, None, Some(dir)),
+            Some(ConfigSource::Default(
+                "/home/u/.config/phonia/config.toml".into()
+            ))
+        );
+        assert_eq!(
+            discover(None, Some(OsStr::new("")), Some(dir)),
+            Some(ConfigSource::Default(
+                "/home/u/.config/phonia/config.toml".into()
+            )),
+            "an empty variable is unset"
+        );
+        assert_eq!(
+            discover(None, None, None),
+            None,
+            "no config directory and nothing named: no file"
+        );
+    }
+
+    // ---- reading it ------------------------------------------------------------------------
+
+    #[test]
+    fn no_file_at_all_means_the_defaults() {
+        assert_eq!(load(None).unwrap(), Loaded::default());
+    }
+
+    #[test]
+    fn a_missing_default_file_is_fine() {
+        let source = ConfigSource::Default(temp_dir("missing-default").join("config.toml"));
+        assert_eq!(load(Some(&source)).unwrap(), Loaded::default());
+    }
+
+    #[test]
+    fn a_missing_file_that_was_asked_for_is_an_error_naming_it() {
+        let path = temp_dir("missing-explicit").join("nope.toml");
+        let error = format!(
+            "{:#}",
+            load(Some(&ConfigSource::Explicit(path.clone()))).unwrap_err()
+        );
+        assert!(error.contains("nope.toml"), "{error}");
+    }
+
+    #[test]
+    fn a_file_is_read_and_remembered() {
+        let path = temp_dir("read").join("config.toml");
+        std::fs::write(&path, "[output]\ndevice = \"hw:DS2,0\"\n").unwrap();
+        let loaded = load(Some(&ConfigSource::Default(path.clone()))).unwrap();
+        assert_eq!(loaded.file.output.device.as_deref(), Some("hw:DS2,0"));
+        assert_eq!(loaded.path, Some(path));
+    }
+
+    #[test]
+    fn a_broken_file_is_an_error_with_the_file_the_key_and_the_line() {
+        let path = temp_dir("broken").join("config.toml");
+        std::fs::write(&path, "[output]\n\ndevise = \"hw:1,0\"\n").unwrap();
+        let error = format!(
+            "{:#}",
+            load(Some(&ConfigSource::Default(path))).unwrap_err()
+        );
+        assert!(
+            error.contains("config.toml") && error.contains("devise") && error.contains("line 3"),
+            "{error}"
+        );
+    }
+
+    // ---- deciding the settings -------------------------------------------------------------
+
+    fn file(
+        device: Option<&str>,
+        quality: Option<Quality>,
+        socket: Option<&str>,
+        verbose: Option<bool>,
+    ) -> ConfigFile {
+        ConfigFile {
+            output: Output {
+                device: device.map(str::to_string),
+                ..Output::default()
+            },
+            tidal: Tidal {
+                max_quality: quality,
+                ..Tidal::default()
+            },
+            daemon: Daemon {
+                socket: socket.map(PathBuf::from),
+                verbose,
+                ..Daemon::default()
+            },
+            ..ConfigFile::default()
+        }
+    }
+
+    #[test]
+    fn with_nothing_said_everything_is_the_default() {
+        let settings = resolve(Overrides::default(), &ConfigFile::default());
+        assert_eq!(
+            settings.device,
+            Sourced {
+                value: None,
+                origin: Origin::Default
+            }
+        );
+        assert_eq!(
+            settings.mode,
+            Sourced {
+                value: OutputMode::Exclusive,
+                origin: Origin::Default
+            }
+        );
+        assert_eq!(
+            settings.sink,
+            Sourced {
+                value: "default".to_string(),
+                origin: Origin::Default
+            }
+        );
+        assert_eq!(
+            settings.reserve,
+            Sourced {
+                value: true,
+                origin: Origin::Default
+            }
+        );
+        assert_eq!(
+            settings.release_after_pause,
+            Sourced {
+                value: ReleaseAfterPause::After(std::time::Duration::from_secs(10)),
+                origin: Origin::Default
+            }
+        );
+        assert_eq!(
+            settings.max_quality,
+            Sourced {
+                value: Quality::Hires,
+                origin: Origin::Default
+            }
+        );
+        assert_eq!(
+            settings.session_store,
+            Sourced {
+                value: SessionStoreKind::Keyring,
+                origin: Origin::Default
+            }
+        );
+        assert_eq!(
+            settings.socket,
+            Sourced {
+                value: None,
+                origin: Origin::Default
+            }
+        );
+        assert_eq!(
+            settings.verbose,
+            Sourced {
+                value: false,
+                origin: Origin::Default
+            }
+        );
+        assert_eq!(
+            settings.report_plays,
+            Sourced {
+                value: true,
+                origin: Origin::Default
+            },
+            "on by default, like the official apps"
+        );
+    }
+
+    #[test]
+    fn the_file_can_turn_off_reporting_plays_to_tidal() {
+        let file = ConfigFile {
+            tidal: Tidal {
+                report_plays: Some(false),
+                ..Tidal::default()
+            },
+            ..ConfigFile::default()
+        };
+        let settings = resolve(Overrides::default(), &file);
+        assert_eq!(
+            settings.report_plays,
+            Sourced {
+                value: false,
+                origin: Origin::File
+            }
+        );
+    }
+
+    #[test]
+    fn the_file_can_turn_off_mpris() {
+        let file = ConfigFile {
+            daemon: Daemon {
+                mpris: Some(false),
+                ..Daemon::default()
+            },
+            ..ConfigFile::default()
+        };
+        let settings = resolve(Overrides::default(), &file);
+        assert_eq!(
+            settings.mpris,
+            Sourced {
+                value: false,
+                origin: Origin::File
+            }
+        );
+    }
+
+    #[test]
+    fn mpris_defaults_on_like_gapless_and_report_plays() {
+        let settings = resolve(Overrides::default(), &ConfigFile::default());
+        assert_eq!(
+            settings.mpris,
+            Sourced {
+                value: true,
+                origin: Origin::Default
+            }
+        );
+    }
+
+    #[test]
+    fn the_file_beats_the_default() {
+        let settings = resolve(
+            Overrides::default(),
+            &file(
+                Some("hw:DS2,0"),
+                Some(Quality::Lossless),
+                Some("/s"),
+                Some(true),
+            ),
+        );
+        assert_eq!(
+            settings.device,
+            Sourced {
+                value: Some("hw:DS2,0".into()),
+                origin: Origin::File
+            }
+        );
+        assert_eq!(
+            settings.max_quality,
+            Sourced {
+                value: Quality::Lossless,
+                origin: Origin::File
+            }
+        );
+        assert_eq!(
+            settings.socket,
+            Sourced {
+                value: Some("/s".into()),
+                origin: Origin::File
+            }
+        );
+        assert_eq!(
+            settings.verbose,
+            Sourced {
+                value: true,
+                origin: Origin::File
+            }
+        );
+    }
+
+    #[test]
+    fn the_command_line_beats_the_file() {
+        let overrides = Overrides {
+            device: Some("hw:9,0".into()),
+            max_quality: Some(Quality::Hires),
+            socket: Some("/flag".into()),
+            verbose: Some(false),
+            ..Overrides::default()
+        };
+        let settings = resolve(
+            overrides,
+            &file(
+                Some("hw:DS2,0"),
+                Some(Quality::Lossless),
+                Some("/file"),
+                Some(true),
+            ),
+        );
+        assert_eq!(
+            settings.device,
+            Sourced {
+                value: Some("hw:9,0".into()),
+                origin: Origin::Flag
+            }
+        );
+        assert_eq!(
+            settings.max_quality,
+            Sourced {
+                value: Quality::Hires,
+                origin: Origin::Flag
+            }
+        );
+        assert_eq!(
+            settings.socket,
+            Sourced {
+                value: Some("/flag".into()),
+                origin: Origin::Flag
+            }
+        );
+        assert_eq!(
+            settings.verbose,
+            Sourced {
+                value: false,
+                origin: Origin::Flag
+            },
+            "an explicit false beats a true in the file"
+        );
+    }
+
+    #[test]
+    fn a_setting_equal_to_its_default_still_reports_where_it_was_written() {
+        let settings = resolve(
+            Overrides::default(),
+            &file(None, Some(Quality::Hires), None, Some(false)),
+        );
+        assert_eq!(
+            settings.max_quality.origin,
+            Origin::File,
+            "written in the file, though it is the default value"
+        );
+        assert_eq!(settings.verbose.origin, Origin::File);
+    }
+
+    #[test]
+    fn a_device_is_required_and_the_message_says_how_to_set_one() {
+        let error = resolve(Overrides::default(), &ConfigFile::default())
+            .require_device()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("phonia devices")
+                && error.contains("[output]")
+                && error.contains("--device"),
+            "{error}"
+        );
+
+        let named = resolve(
+            Overrides {
+                device: Some("hw:DS2,0".into()),
+                ..Overrides::default()
+            },
+            &ConfigFile::default(),
+        );
+        assert_eq!(named.require_device().unwrap(), "hw:DS2,0");
+    }
+
+    #[test]
+    fn the_socket_falls_back_to_whatever_the_caller_calls_the_default() {
+        let unset = resolve(Overrides::default(), &ConfigFile::default());
+        assert_eq!(
+            unset.socket_path(|| PathBuf::from("/usual.sock")),
+            PathBuf::from("/usual.sock")
+        );
+
+        let set = resolve(
+            Overrides::default(),
+            &file(None, None, Some("/mine.sock"), None),
+        );
+        assert_eq!(
+            set.socket_path(|| unreachable!("the default must not be asked for")),
+            PathBuf::from("/mine.sock")
+        );
+    }
+
+    #[test]
+    fn origins_read_naturally() {
+        assert_eq!(Origin::Flag.to_string(), "command line");
+        assert_eq!(Origin::File.to_string(), "config file");
+        assert_eq!(Origin::Default.to_string(), "default");
+    }
+
+    #[test]
+    fn a_best_tier_below_the_worst_accepted_is_an_error() {
+        let mut file = ConfigFile::default();
+        assert!(resolve(Overrides::default(), &file).check_quality().is_ok());
+
+        file.tidal.max_quality = Some(Quality::High);
+        let error = resolve(Overrides::default(), &file)
+            .check_quality()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("high") && error.contains("lossless"),
+            "{error}"
+        );
+
+        file.tidal.min_quality = Some(Quality::Low);
+        assert!(resolve(Overrides::default(), &file).check_quality().is_ok());
+    }
+
+    #[test]
+    fn exclusive_mode_needs_a_device_and_shared_mode_does_not() {
+        let mut file = ConfigFile::default();
+        assert!(resolve(Overrides::default(), &file).output().is_err());
+
+        file.output.device = Some("hw:DS2,0".into());
+        assert_eq!(
+            resolve(Overrides::default(), &file).output().unwrap(),
+            OutputSpec::Exclusive {
+                device: "hw:DS2,0".into()
+            }
+        );
+
+        let shared = ConfigFile {
+            output: Output {
+                mode: Some(OutputMode::Shared),
+                ..Output::default()
+            },
+            ..ConfigFile::default()
+        };
+        assert_eq!(
+            resolve(Overrides::default(), &shared).output().unwrap(),
+            OutputSpec::Shared { sink: None }
+        );
+    }
+
+    #[test]
+    fn shared_mode_names_its_output_or_uses_the_default() {
+        let mut file = ConfigFile {
+            output: Output {
+                mode: Some(OutputMode::Shared),
+                sink: Some("bluez_output.AA".into()),
+                ..Output::default()
+            },
+            ..ConfigFile::default()
+        };
+        assert_eq!(
+            resolve(Overrides::default(), &file).output().unwrap(),
+            OutputSpec::Shared {
+                sink: Some("bluez_output.AA".into())
+            }
+        );
+        file.output.sink = Some("default".into());
+        assert_eq!(
+            resolve(Overrides::default(), &file).output().unwrap(),
+            OutputSpec::Shared { sink: None }
+        );
+    }
+
+    #[test]
+    fn naming_a_card_on_the_command_line_means_exclusive_mode_even_if_the_file_says_shared() {
+        let file = ConfigFile {
+            output: Output {
+                mode: Some(OutputMode::Shared),
+                ..Output::default()
+            },
+            ..ConfigFile::default()
+        };
+        let settings = resolve(
+            Overrides {
+                device: Some("hw:1,0".into()),
+                ..Overrides::default()
+            },
+            &file,
+        );
+        assert_eq!(
+            settings.mode,
+            Sourced {
+                value: OutputMode::Exclusive,
+                origin: Origin::Flag
+            }
+        );
+        assert_eq!(
+            settings.output().unwrap(),
+            OutputSpec::Exclusive {
+                device: "hw:1,0".into()
+            }
+        );
+    }
+
+    #[test]
+    fn output_ids_round_trip() {
+        for spec in [
+            OutputSpec::Exclusive {
+                device: "hw:DS2,0".into(),
+            },
+            OutputSpec::Shared { sink: None },
+            OutputSpec::Shared {
+                sink: Some("bluez_output.AA:BB.1".into()),
+            },
+        ] {
+            assert_eq!(OutputSpec::from_id(&spec.id()).unwrap(), spec);
+        }
+        assert_eq!(
+            OutputSpec::from_id("shared:default").unwrap(),
+            OutputSpec::Shared { sink: None }
+        );
+    }
+
+    #[test]
+    fn a_bad_output_id_says_what_they_look_like() {
+        for bad in ["", "hw:1,0", "exclusive:", "shared:", "cloud:x"] {
+            let error = OutputSpec::from_id(bad).unwrap_err().to_string();
+            assert!(
+                error.contains("exclusive:") && error.contains("shared:"),
+                "{bad}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn output_on_the_command_line_beats_the_file() {
+        let file = ConfigFile {
+            output: Output {
+                device: Some("hw:DS2,0".into()),
+                ..Output::default()
+            },
+            ..ConfigFile::default()
+        };
+
+        let shared = Overrides::default()
+            .with_output_id("shared:bluez_output.AA")
+            .unwrap();
+        let settings = resolve(shared, &file);
+        assert_eq!(
+            settings.output().unwrap(),
+            OutputSpec::Shared {
+                sink: Some("bluez_output.AA".into())
+            }
+        );
+        assert_eq!(
+            (settings.mode.origin, settings.sink.origin),
+            (Origin::Flag, Origin::Flag)
+        );
+
+        let default = resolve(
+            Overrides::default()
+                .with_output_id("shared:default")
+                .unwrap(),
+            &file,
+        );
+        assert_eq!(default.output().unwrap(), OutputSpec::Shared { sink: None });
+
+        let card = resolve(
+            Overrides::default()
+                .with_output_id("exclusive:hw:1,0")
+                .unwrap(),
+            &ConfigFile::default(),
+        );
+        assert_eq!(
+            card.output().unwrap(),
+            OutputSpec::Exclusive {
+                device: "hw:1,0".into()
+            }
+        );
+        assert!(Overrides::default().with_output_id("nonsense").is_err());
+    }
+}

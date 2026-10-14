@@ -1,0 +1,19 @@
+[package]
+name = "phoniad"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+phonia-core.workspace = true
+phonia-ipc.workspace = true
+serde_json.workspace = true
+tidlers.workspace = true
+tokio.workspace = true
+zbus.workspace = true
+
+[dev-dependencies]
+phonia-core = { workspace = true, features = ["test-support"] }

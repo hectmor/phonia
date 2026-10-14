@@ -1,0 +1,30 @@
+[package]
+name = "phonia-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+alsa.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+bytes.workspace = true
+dirs.workspace = true
+futures-executor.workspace = true
+futures-util.workspace = true
+libc.workspace = true
+quick-xml.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+symphonia.workspace = true
+tidlers.workspace = true
+tokio.workspace = true
+pulseaudio.workspace = true
+toml.workspace = true
+uuid.workspace = true
+zbus.workspace = true
+
+[features]
+test-support = []
