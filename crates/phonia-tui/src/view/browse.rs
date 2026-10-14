@@ -174,7 +174,6 @@ fn draw_artist(
     frame: &mut Frame,
     area: Rect,
 ) {
-    let header = artist_header_lines(view, theme);
     // Same rule as an album's or a playlist's header (see `draw_track_list`): reserved only when
     // a picture could actually show here, never on whether it has arrived yet. The tabs stay full
     // width, under the picture and the text alike.
@@ -183,10 +182,16 @@ fn draw_artist(
         let url = covers::picture_url(view.picture.as_deref(), cells, picker.font_size())?;
         Some((url, cells))
     });
+    // The bio can run longer than the terminal is wide, so it wraps onto as many lines as it
+    // takes, next to the cover when there is one.
+    let header_width = area
+        .width
+        .saturating_sub(reserved.as_ref().map_or(0, |(_, cells)| cells.width));
+    let header = artist_header_lines(view, theme, header_width);
     let (cover_area, header_area, tabs_area, list_area) = match reserved {
         Some((url, cells)) => {
             let [top, tabs_area, list_area] = Layout::vertical([
-                Constraint::Length(cells.height),
+                Constraint::Length(cells.height.max(header.len() as u16)),
                 Constraint::Length(1),
                 Constraint::Min(0),
             ])
@@ -314,14 +319,42 @@ pub(crate) fn folder_entry_text(entry: &FolderEntry) -> String {
     }
 }
 
-/// The artist's name, a line of its bio when there is one, and a blank line to set the tabs apart.
-fn artist_header_lines(view: &ArtistView, theme: &Theme) -> Vec<Line<'static>> {
+/// The artist's name, its bio's first paragraph word-wrapped to `width`, and a blank line to set
+/// the tabs apart.
+fn artist_header_lines(view: &ArtistView, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     let mut lines = vec![Line::styled(view.name.clone(), theme.accent)];
     if let Some(bio) = &view.bio {
         let first_line = bio.lines().next().unwrap_or(bio);
-        lines.push(Line::styled(first_line.to_string(), theme.dim));
+        for wrapped in wrap(first_line, usize::from(width)) {
+            lines.push(Line::styled(wrapped, theme.dim));
+        }
     }
     lines.push(Line::raw(""));
+    lines
+}
+
+/// `text` broken into pieces that each fit within `width` characters, breaking only at spaces (a
+/// single word longer than `width` is left whole rather than split mid-word).
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let fits =
+            current.is_empty() || current.chars().count() + 1 + word.chars().count() <= width;
+        if !fits {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
     lines
 }
 
@@ -343,4 +376,19 @@ fn tabs_line<'a>(view: &ArtistView, theme: &Theme) -> Line<'a> {
         spans.push(Span::raw("   "));
     }
     Line::from(spans)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrap;
+
+    #[test]
+    fn wrap_breaks_at_spaces_to_fit_the_width_and_leaves_a_long_word_whole() {
+        assert_eq!(
+            wrap("a nu metal band from Bakersfield", 10),
+            vec!["a nu metal", "band from", "Bakersfield"]
+        );
+        assert_eq!(wrap("short", 10), vec!["short"]);
+        assert_eq!(wrap("", 10), Vec::<String>::new());
+    }
 }
