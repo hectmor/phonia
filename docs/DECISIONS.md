@@ -3132,4 +3132,4 @@ README's search/browse paragraph is updated to describe the new behaviour, inclu
 remaining exception restated for clarity: a favorite track inside Library still plays immediately
 on `Enter` rather than queuing its (unordered, possibly huge) list, same as before.
 
-PR #TBD, 1 part, closes #160.
+PR #162, 1 part, closes #160.
