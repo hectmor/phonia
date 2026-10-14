@@ -3169,3 +3169,59 @@ carries the picture) is in flight. A row with no artist id (a local file, or an 
 asked for it here.
 
 PR #163, 1 part, closes #156.
+
+## 2026-10-14 — #164: `ga` on any track row, not only a queue entry
+
+#156 gave the queue the artist's id because a queue entry had nothing else to open a page with.
+A *row* needs no such thing: search results, favorite tracks, Home's blocks and the tracks inside
+an open album, playlist, radio or artist page are all `TrackSummary`, which has carried `artists`
+with their ids since 1.6. So `ga` there is a interface-only change — no request, no DTO, no
+daemon.
+
+The routing is `Action::OpenRadio`'s own section match, copied: that is *less* code than listing
+the sections to exclude, so the library and Home came along rather than being argued about. The
+queue keeps `open_queue_artist` (it has no view stack of its own; see #156). A row with no artist
+credited does nothing; `ga` on an album, playlist or artist row does nothing either — Enter
+already opens those.
+
+**Bug this uncovered, fixed in the same PR:** `act_on_track_row` tested `!track.streamable` before
+looking at the action at all, so *any* key on a track TIDAL will not stream here answered "is not
+available where you are" — `ga` would not open the artist, and `o` had not opened a radio since
+#133 either. Only `Activate`, `AddToQueue` and `AddNext` need a streamable track: browsing away
+from one is always fine.
+
+PR #165, 1 part, closes #164.
+
+## 2026-10-14 — #166: `gr` opens the album of the track under the cursor
+
+`ga`'s sibling for albums, in exactly the places #164 gave `ga`, plus the queue. A track row
+already carries `album` (an `AlbumRef`: id, title and cover), so those rows cost nothing new. The
+queue did not: `QueueItem` kept the album's *cover* but not its id, so it gets `album_id`
+(`#[serde(default)]`, protocol 1.17) the way #156 added `artist_id` — `QueueTrack::album_id`
+already existed for ReplayGain's album context, and the daemon fills it where it fills `artist_id`,
+when the entry is accepted, so an entry that has not played yet has it too. An older daemon sends
+no field and `gr` says so in `last_error`, like #156's missing artist.
+
+Opened from a track, only the album's id, title and cover are known, where `open_track_list` is
+handed the whole `AlbumSummary` of the row that was activated. Rather than live with a header
+missing the year, the track count and the quality tier, `open_album_view` asks `Request::Album`
+(1.6, until now unused by the interface): one answer carries the album's details *and* its first
+page of tracks, so `on_view_response` replaces the placeholder header with the real summary and
+the view ends up identical to the same album opened with Enter. `view.of` stays
+`CatalogRef::Album`, so paging further pages keeps going through `Request::Tracks` as before. The
+placeholder deliberately leaves `artists` empty instead of copying the track's own: on a
+compilation that would credit the wrong artist. From the queue, where not even the title is known,
+"Album" names the view for the moment the answer takes.
+
+Inside the album already open, `gr` does nothing: it would only open the album the cursor is
+already in. `gr` on an album row does nothing either, for #164's reason — Enter opens it.
+
+**Bug fixed on the way**, the root cause shared by `o`, `ga` and `gr`: `act_in_view`'s
+`Row::Album` arm matched every action that was not Enter and fell into `send_add`, so `o` or `ga`
+on an album row of an artist page silently queued the whole album right after the track playing.
+Only `a`/`A` reach it now.
+
+Still out, for want of an album id: Home's recently played rows (`PlayedTrack` has none) and the
+track playing, from the Lyrics section.
+
+PR #167, 1 part, closes #166.
