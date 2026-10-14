@@ -3405,7 +3405,12 @@ mod tests {
     #[test]
     fn ga_in_the_queue_opens_the_selected_tracks_artist() {
         let mut state = in_the_queue(2);
-        state.server.as_mut().unwrap().capabilities.push("catalog".into());
+        state
+            .server
+            .as_mut()
+            .unwrap()
+            .capabilities
+            .push("catalog".into());
         state.queue.as_mut().unwrap().items[1].artist_id = Some("77".to_string());
         ch(&mut state, 'j');
         let effects = ch(&mut state, 'g');
