@@ -2244,7 +2244,14 @@ fn act_on_track_row(
     track: phonia_ipc::TrackSummary,
     index: usize,
 ) -> Effects {
-    if !track.streamable {
+    // Only playing or queueing needs the track to be streamable: browsing away from it (its
+    // artist with `ga`, its radio with `o`) is fine for a track TIDAL won't stream here.
+    if !track.streamable
+        && matches!(
+            action,
+            Action::Activate | Action::AddToQueue | Action::AddNext
+        )
+    {
         state.last_error = Some(format!("{} is not available where you are", track.title));
         return Effects::redraw();
     }
@@ -4712,6 +4719,18 @@ mod tests {
             state.search_views.top(),
             Some(browse::View::Artist(_))
         ));
+    }
+
+    #[test]
+    fn ga_opens_the_artist_of_a_track_tidal_will_not_stream_here() {
+        // Browsing away from a track is not playing it: an unavailable track still has an artist.
+        let (mut state, _) = in_an_open_album(false);
+        ch(&mut state, 'j'); // "Trash", the unstreamable one
+        ch(&mut state, 'g');
+        let (tag, request) = tagged(ch(&mut state, 'a'));
+        assert!(matches!(tag, Tag::View { .. }));
+        assert!(matches!(request, Request::Artist { ref id, .. } if id == "77"));
+        assert_eq!(state.last_error, None);
     }
 
     #[test]
