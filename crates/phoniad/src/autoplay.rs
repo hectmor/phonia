@@ -142,6 +142,7 @@ mod tests {
             duration: None,
             cover: None,
             album_id: None,
+            artist_id: None,
         }
     }
 

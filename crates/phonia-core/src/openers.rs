@@ -89,6 +89,9 @@ pub struct SourceInfo {
     /// tell whether a track sits next to another of the same album in play order (see
     /// `replaygain::Mode::Auto`).
     pub album_id: Option<String>,
+    /// The id of the track's first credited artist; `None` for a local file, or a TIDAL track
+    /// with no artist credited.
+    pub artist_id: Option<String>,
 }
 
 /// Why a source could not be described.
@@ -138,6 +141,7 @@ impl FileOpener {
                 duration: decoder.duration(),
                 cover: None,
                 album_id: None,
+                artist_id: None,
             })
         })
         .await
@@ -303,6 +307,7 @@ impl TidalOpener {
                     artist: Some(artist),
                     duration: Some(Duration::from_secs(track.duration)),
                     album_id: track.album.as_ref().map(|album| album.id.to_string()),
+                    artist_id: track.artists.first().map(|artist| artist.id.to_string()),
                     cover: track.album.and_then(|album| album.cover),
                 })
             }

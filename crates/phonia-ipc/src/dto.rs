@@ -261,6 +261,10 @@ pub struct QueueItem {
     /// local file or a TIDAL track with no album (since 1.6).
     #[serde(default)]
     pub cover: Option<String>,
+    /// The id of the track's first credited artist, to open its page; absent for a local file, a
+    /// TIDAL track with no artist credited, or an older daemon (since 1.16).
+    #[serde(default)]
+    pub artist_id: Option<String>,
 }
 
 /// One entry of the recently played log (since 1.15, #144): kept by the daemon in memory (and,

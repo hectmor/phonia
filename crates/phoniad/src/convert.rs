@@ -80,6 +80,7 @@ pub fn queue_dto(queue: &QueueSnapshot) -> ipc::Queue {
                 artist: item.track.artist.clone(),
                 duration_ms: item.track.duration.map(ms),
                 cover: item.track.cover.clone(),
+                artist_id: item.track.artist_id.clone(),
             })
             .collect(),
         order: queue.order.iter().map(|id| ipc::ItemId(id.0)).collect(),
@@ -451,6 +452,7 @@ mod tests {
                         duration: secs.map(Duration::from_secs),
                         cover: cover.map(str::to_string),
                         album_id: None,
+                        artist_id: None,
                     },
                 }
             };
@@ -470,8 +472,12 @@ mod tests {
 
     #[test]
     fn the_queue_maps_field_by_field() {
-        let dto = queue_dto(&snapshot());
+        let mut snapshot = snapshot();
+        snapshot.items[1].track.artist_id = Some("artist-1".to_string());
+        let dto = queue_dto(&snapshot);
         assert_eq!(dto.version, 3);
+        assert_eq!(dto.items[0].artist_id, None);
+        assert_eq!(dto.items[1].artist_id.as_deref(), Some("artist-1"));
         assert_eq!(dto.items[0].id, ipc::ItemId(7));
         assert_eq!(dto.items[0].source, "file:/m/a.flac");
         assert_eq!(dto.items[0].duration_ms, Some(215_000));

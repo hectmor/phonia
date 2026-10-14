@@ -3146,3 +3146,26 @@ including the one remaining exception restated for clarity: a favorite track ins
 plays just that one track, without queuing the rest of its (unordered, possibly huge) list.
 
 PR #162, 1 part, closes #160.
+
+## 2026-10-14 — #156: `ga` on a queue entry opens its artist, in the Library section
+
+The queue only kept the artist's *name*: `QueueTrack` (like `QueueItem` on the wire) flattened
+`catalog::Track::artists` to a display string, so the interface had no id to open a page with.
+It already kept `album_id` for ReplayGain's album context, so the artist's id now rides along the
+same way — `QueueTrack::artist_id`, filled from `track.artists.first()` where `album_id` is filled,
+and `QueueItem::artist_id` (`#[serde(default)]`, protocol 1.16). No new request and no per-track
+lookup: a 1.15 daemon simply sends no field and `ga` then does nothing. Searching TIDAL for the
+artist's *name* instead was rejected — shared names would open the wrong artist.
+
+This also answers the question #33 part 3 left open ("a new Queue-section stack? jump over to
+Search/Library and open it there?") for the artist case: **jump to Library.** `active_stack_mut`
+still knows no stack for `Section::Library`'s sibling, the Queue, so `open_queue_artist` switches
+the sidebar to Library and pushes the artist view onto `library_views` — reusing `open_artist_view`
+whole, with the row's artist string as the header name while the `Request::Artist` answer (which
+carries the picture) is in flight. A row with no artist id (a local file, or an older daemon) sets
+`last_error` and switches nothing; `require_browsable` still gates the catalog capability.
+
+`o` (OpenRadio) on a queue entry is still deliberately a no-op: it has the same gap, but nothing
+asked for it here.
+
+PR #163, 1 part, closes #156.

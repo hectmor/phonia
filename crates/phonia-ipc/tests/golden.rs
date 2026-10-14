@@ -73,6 +73,7 @@ fn queue() -> Queue {
                 artist: None,
                 duration_ms: Some(215_000),
                 cover: None,
+                artist_id: None,
             },
             QueueItem {
                 id: ItemId(8),
@@ -81,6 +82,7 @@ fn queue() -> Queue {
                 artist: Some("Dire Straits".into()),
                 duration_ms: None,
                 cover: Some("abc123-def4".into()),
+                artist_id: Some("780".into()),
             },
         ],
         order: vec![ItemId(8), ItemId(7)],
@@ -91,7 +93,7 @@ fn queue() -> Queue {
     }
 }
 
-const QUEUE_JSON: &str = r#"{"version":5,"items":[{"id":7,"source":"file:/music/a.flac","title":"a.flac","artist":null,"duration_ms":215000,"cover":null},{"id":8,"source":"tidal:233059491","title":null,"artist":"Dire Straits","duration_ms":null,"cover":"abc123-def4"}],"order":[8,7],"current":7,"shuffle":true,"repeat":"all","autoplay":true}"#;
+const QUEUE_JSON: &str = r#"{"version":5,"items":[{"id":7,"source":"file:/music/a.flac","title":"a.flac","artist":null,"duration_ms":215000,"cover":null,"artist_id":null},{"id":8,"source":"tidal:233059491","title":null,"artist":"Dire Straits","duration_ms":null,"cover":"abc123-def4","artist_id":"780"}],"order":[8,7],"current":7,"shuffle":true,"repeat":"all","autoplay":true}"#;
 
 // ---- requests ------------------------------------------------------------------------------
 
@@ -297,7 +299,7 @@ fn the_server_banner() {
                 CAP_AUTOPLAY.into(),
             ],
         }),
-        r#"{"type":"hello","protocol":{"major":1,"minor":15},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","recently_played","catalog","lyrics","autoplay"]}"#,
+        r#"{"type":"hello","protocol":{"major":1,"minor":16},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","recently_played","catalog","lyrics","autoplay"]}"#,
     );
 }
 
@@ -1141,7 +1143,7 @@ fn versions_are_compatible_across_minors_but_not_majors() {
     assert!(v(1, 0).compatible_with(v(1, 7)));
     assert!(v(1, 7).compatible_with(v(1, 0)));
     assert!(!v(1, 0).compatible_with(v(2, 0)));
-    assert_eq!(PROTOCOL, v(1, 15));
+    assert_eq!(PROTOCOL, v(1, 16));
 }
 
 #[test]
