@@ -99,6 +99,16 @@ fn now_playing_tidal_id(state: &State) -> Option<&str> {
         .and_then(lyrics::tidal_id)
 }
 
+/// The cover id of the album the track playing now belongs to, when there is one: a track carries
+/// no album id of its own, only its album's cover id, which still ties it back to the album.
+fn now_playing_album_cover(state: &State) -> Option<&str> {
+    state
+        .status
+        .as_ref()
+        .and_then(|status| status.track.as_ref())
+        .and_then(|track| track.cover.as_deref())
+}
+
 /// The album's or the playlist's own line, plus its copyright when there is one, and a blank line
 /// to set the tracks apart.
 fn header_lines(header: &Header, theme: &Theme) -> Vec<Line<'static>> {
@@ -156,11 +166,14 @@ fn track_rows<'a>(
         .collect()
 }
 
-/// An artist's albums or its EPs and singles, numbered from where the page starts.
+/// An artist's albums or its EPs and singles, numbered from where the page starts, the one the
+/// track playing belongs to (by its cover id, since a track has no album id of its own) marked the
+/// same way the queue marks its current entry.
 fn album_rows<'a>(
     albums: &[AlbumSummary],
     cursor: usize,
     focused: bool,
+    now_playing_cover: Option<&str>,
     height: usize,
     theme: &Theme,
 ) -> Vec<Line<'a>> {
@@ -174,8 +187,18 @@ fn album_rows<'a>(
         .skip(start)
         .take(height.max(1))
         .map(|(index, album)| {
-            let text = format!("{:>3}. {}", index + 1, fmt::album(album));
-            row_line(text, index == cursor, focused, false, theme)
+            let current =
+                now_playing_cover.is_some_and(|cover| album.cover.as_deref() == Some(cover));
+            let marker = if current { ">" } else { " " };
+            let text = format!("{marker}{:>3}. {}", index + 1, fmt::album(album));
+            let style = if focused && index == cursor {
+                theme.selected
+            } else if current {
+                theme.accent
+            } else {
+                theme.text
+            };
+            Line::styled(text, style)
         })
         .collect()
 }
@@ -262,6 +285,7 @@ fn draw_artist(
                 &view.albums.items,
                 view.albums.cursor.selected(),
                 focused,
+                now_playing_album_cover(state),
                 usize::from(list_area.height),
                 theme,
             ),
@@ -269,6 +293,7 @@ fn draw_artist(
                 &view.singles.items,
                 view.singles.cursor.selected(),
                 focused,
+                now_playing_album_cover(state),
                 usize::from(list_area.height),
                 theme,
             ),

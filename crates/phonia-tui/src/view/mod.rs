@@ -1732,6 +1732,27 @@ mod tests {
     }
 
     #[test]
+    fn the_album_playing_is_marked_in_the_search_results() {
+        use phonia_ipc::Track;
+        let mut state = with_results();
+        state.search.albums.items[0].cover = Some("cover-9".into());
+        state.status = Some(crate::app::tests_support::status());
+        state.status.as_mut().unwrap().track = Some(Track {
+            item_id: None,
+            source: Some("tidal:1".into()),
+            title: Some("Falling Away from Me".into()),
+            artist: Some("Korn".into()),
+            duration_ms: None,
+            quality: None,
+            cover: Some("cover-9".into()),
+            replay_gain: None,
+        });
+        press(&mut state, ']'); // Albums
+        let text = screen(&state, 120, 14);
+        assert!(text.contains(">   1. Korn - Issues"), "{text}");
+    }
+
+    #[test]
     fn the_results_are_listed_with_the_counts_in_the_tabs() {
         let state = with_results();
         let text = screen(&state, 120, 14);
