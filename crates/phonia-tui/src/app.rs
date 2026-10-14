@@ -272,10 +272,6 @@ pub enum Tag {
     SearchMore { tab: Tab, generation: u64 },
     /// Tracks added to the queue from a result; if `play`, the first of them starts playing.
     Add { play: bool },
-    /// An album or a playlist, whole, added from within its own view; `play_at`, when given, is
-    /// which of the tracks added (by position among the ones that were, skipping the ones TIDAL
-    /// would not stream) to start playing.
-    AddFrom { play_at: Option<usize> },
     /// The view pushed with this number: its tracks, or the next page of them.
     View { serial: u64 },
     /// The request that loads the library's favorite tracks and favorite albums.
@@ -546,7 +542,6 @@ fn on_response(state: &mut State, tag: Tag, result: Result<Payload, String>) -> 
             Effects::redraw()
         }
         Tag::Add { play } => on_added(state, result, play.then_some(0)),
-        Tag::AddFrom { play_at } => on_added(state, result, play_at),
         Tag::View { serial } => on_view_response(state, serial, result),
         Tag::Library { generation } => {
             let Some(library) = &mut state.library else {
@@ -2085,7 +2080,6 @@ enum Row {
     Track {
         of: phonia_ipc::CatalogRef,
         track: phonia_ipc::TrackSummary,
-        index: usize,
     },
     Album(phonia_ipc::AlbumSummary),
 }
@@ -2102,7 +2096,6 @@ fn browsed_row(state: &mut State) -> Option<Row> {
                 .map(|track| Row::Track {
                     of: view.of.clone(),
                     track,
-                    index,
                 })
         }
         browse::View::Artist(artist) if artist.phase == browse::Phase::Done => {
@@ -2113,7 +2106,6 @@ fn browsed_row(state: &mut State) -> Option<Row> {
                     found.items.get(index).cloned().map(|track| Row::Track {
                         of: phonia_ipc::CatalogRef::ArtistTopTracks { id },
                         track,
-                        index,
                     })
                 }
                 browse::ListRef::Albums(found) => {
@@ -2127,8 +2119,9 @@ fn browsed_row(state: &mut State) -> Option<Row> {
 }
 
 /// Enter, `a` and `A` on the row under the cursor of an open view: a track behaves as it does
-/// inside an album (Enter continues playing from it, `a`/`A` add just it); an album (from an
-/// artist's page) opens with Enter, or is added whole with `a`/`A`.
+/// inside an album (Enter adds the whole album, playlist or artist's top tracks to the end of the
+/// queue, without playing; `a`/`A` add just it); an album (from an artist's page) opens with
+/// Enter, or is added whole with `a`/`A`.
 fn act_in_view(state: &mut State, action: Action) -> Effects {
     if let Some(browse::View::Folder(folder)) = active_stack_mut(state).and_then(Stack::top_mut)
         && folder.phase == browse::Phase::Done
@@ -2144,7 +2137,7 @@ fn act_in_view(state: &mut State, action: Action) -> Effects {
         return act_on_folder_entry(state, action, entry);
     }
     match browsed_row(state) {
-        Some(Row::Track { of, track, index }) => act_on_track_row(state, action, of, track, index),
+        Some(Row::Track { of, track }) => act_on_track_row(state, action, of, track),
         Some(Row::Album(album)) if action == Action::Activate => open_track_list(
             state,
             phonia_ipc::CatalogRef::Album {
@@ -2168,40 +2161,28 @@ fn act_in_view(state: &mut State, action: Action) -> Effects {
     }
 }
 
-/// Enter on a track being browsed (an album, a playlist, or an artist's top tracks) queues the
-/// rest of the list right after the track playing and starts at this one, skipping, in the count,
-/// any track before it that TIDAL will not stream (so `play_at` still lands on the right one).
-/// `a`/`A` add just this track.
+/// Enter on a track being browsed (an album, a playlist, or an artist's top tracks) adds the whole
+/// of it to the end of the queue, without playing -- the same as `a` on the album row itself. `a`/
+/// `A` here still add just this one track.
 fn act_on_track_row(
     state: &mut State,
     action: Action,
     of: phonia_ipc::CatalogRef,
     track: phonia_ipc::TrackSummary,
-    index: usize,
 ) -> Effects {
     if !track.streamable {
         state.last_error = Some(format!("{} is not available where you are", track.title));
         return Effects::redraw();
     }
     match action {
-        Action::Activate => {
-            // How many tracks before this one in the same list could stream: the daemon leaves
-            // the others out when it adds the list, so this is this track's place among the ids
-            // that come back. Reads the stack of whichever section actually opened this view
-            // (Search or Library each have their own), not a fixed one -- a track inside a view
-            // opened from Library must not be measured against Search's own stack, which may be
-            // empty, or hold something unrelated.
-            let play_at = match active_stack_mut(state).and_then(|stack| stack.top()) {
-                Some(browse::View::TrackList(view)) => {
-                    count_streamable_before(&view.tracks.items, index)
-                }
-                Some(browse::View::Artist(artist)) => {
-                    count_streamable_before(&artist.top_tracks.items, index)
-                }
-                _ => return Effects::default(),
-            };
-            send_add_from(state, of, Some(play_at))
-        }
+        Action::Activate => send_add(
+            state,
+            Request::QueueAddFrom {
+                from: of,
+                at: phonia_ipc::AddAt::End,
+            },
+            false,
+        ),
         Action::AddToQueue | Action::AddNext => {
             let source = match phonia_ipc::source::tidal(&track.id) {
                 Ok(source) => source,
@@ -2222,34 +2203,6 @@ fn act_on_track_row(
         }
         Action::OpenRadio => open_track_radio(state, track.id.clone(), track.title.clone()),
         _ => Effects::default(),
-    }
-}
-
-/// How many of the tracks before `index` in a loaded list TIDAL will stream: where the track at
-/// `index` lands among the ids the daemon answers with, since the rest are left out.
-fn count_streamable_before(tracks: &[phonia_ipc::TrackSummary], index: usize) -> usize {
-    tracks[..index]
-        .iter()
-        .filter(|track| track.streamable)
-        .count()
-}
-
-/// Queues `of` (an album, a playlist, or an artist's top tracks), whole, right after the track
-/// playing, and asks to play the one at `play_at` among the tracks that made it in, if any.
-fn send_add_from(state: &mut State, of: phonia_ipc::CatalogRef, play_at: Option<usize>) -> Effects {
-    if !require_browsable(state, "albums, playlists or artists") {
-        return Effects::redraw();
-    }
-    state.last_error = None;
-    Effects {
-        redraw: true,
-        commands: vec![Cmd::Request {
-            tag: Tag::AddFrom { play_at },
-            request: Request::QueueAddFrom {
-                from: of,
-                at: phonia_ipc::AddAt::Next,
-            },
-        }],
     }
 }
 
@@ -4522,7 +4475,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_a_track_in_the_album_queues_the_rest_and_plays_the_right_one() {
+    fn enter_on_a_track_in_the_album_queues_the_whole_album_at_the_end_without_playing() {
         let (mut state, _) = in_an_open_album(false); // the 2nd track ("Trash") cannot be streamed
         ch(&mut state, 'j');
         ch(&mut state, 'j'); // the cursor is on the 3rd loaded track ("4U")
@@ -4533,12 +4486,10 @@ mod tests {
                 from: phonia_ipc::CatalogRef::Album {
                     id: "33723912".into()
                 },
-                at: phonia_ipc::AddAt::Next
+                at: phonia_ipc::AddAt::End
             }
         );
-        // Of the two tracks before this one, only the 1st ("Dead") could stream: play_at is 1,
-        // not 2, since the unstreamable one never reaches the queue.
-        assert_eq!(tag, Tag::AddFrom { play_at: Some(1) });
+        assert_eq!(tag, Tag::Add { play: false });
 
         let added = Payload::Added {
             ids: vec![phonia_ipc::ItemId(10), phonia_ipc::ItemId(11)],
@@ -4554,10 +4505,8 @@ mod tests {
         );
         assert_eq!(
             effects.commands,
-            vec![Cmd::Send(Request::Play {
-                item: Some(phonia_ipc::ItemId(11))
-            })],
-            "the id at position 1 (0-based), not position 2"
+            vec![],
+            "nothing plays: the same as 'a' on the album row itself"
         );
     }
 
@@ -4903,7 +4852,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_a_top_track_queues_the_rest_and_plays_the_right_one() {
+    fn enter_on_a_top_track_queues_the_whole_top_tracks_list_at_the_end_without_playing() {
         let (mut state, _) = in_an_open_artist();
         ch(&mut state, 'j'); // "Blind", not streamable
         ch(&mut state, 'j'); // "Coming Undone"
@@ -4912,11 +4861,10 @@ mod tests {
             request,
             Request::QueueAddFrom {
                 from: phonia_ipc::CatalogRef::ArtistTopTracks { id: "780".into() },
-                at: phonia_ipc::AddAt::Next
+                at: phonia_ipc::AddAt::End
             }
         );
-        // "Blind" (not streamable) never reaches the queue, so "Coming Undone" is at position 1.
-        assert_eq!(tag, Tag::AddFrom { play_at: Some(1) });
+        assert_eq!(tag, Tag::Add { play: false });
     }
 
     #[test]
@@ -5318,10 +5266,10 @@ mod tests {
     }
 
     /// Same regression #140 fixed for the library, now covered for Home too: a track inside a
-    /// view opened from Home must be measured against Home's own stack, not Search's or
-    /// Library's.
+    /// view opened from Home must read Home's own stack for the album it belongs to, not
+    /// Search's or Library's.
     #[test]
-    fn enter_on_a_track_inside_an_album_opened_from_home_plays_from_it() {
+    fn enter_on_a_track_inside_an_album_opened_from_home_queues_it_at_the_end() {
         let mut state = with_home_library();
         ch(&mut state, 'j'); // the album
         let (tag, _) = tagged(press(&mut state, KeyCode::Enter));
@@ -5349,10 +5297,10 @@ mod tests {
             request,
             Request::QueueAddFrom {
                 from: phonia_ipc::CatalogRef::Album { id: "9".into() },
-                at: phonia_ipc::AddAt::Next,
+                at: phonia_ipc::AddAt::End,
             }
         );
-        assert_eq!(tag, Tag::AddFrom { play_at: Some(1) });
+        assert_eq!(tag, Tag::Add { play: false });
     }
 
     #[test]
@@ -5893,7 +5841,7 @@ mod tests {
     /// library got its own stack), so it silently did nothing whenever no search view happened
     /// to be open. The fix reads whichever stack actually holds the opened view.
     #[test]
-    fn enter_on_a_track_inside_an_album_opened_from_the_library_plays_from_it() {
+    fn enter_on_a_track_inside_an_album_opened_from_the_library_queues_it_at_the_end() {
         let mut state = with_library();
         ch(&mut state, ']'); // favorite albums
         let (tag, _) = tagged(press(&mut state, KeyCode::Enter));
@@ -5925,20 +5873,16 @@ mod tests {
             request,
             Request::QueueAddFrom {
                 from: phonia_ipc::CatalogRef::Album { id: "9".into() },
-                at: phonia_ipc::AddAt::Next,
+                at: phonia_ipc::AddAt::End,
             }
         );
-        assert_eq!(
-            tag,
-            Tag::AddFrom { play_at: Some(1) },
-            "both tracks stream: the 2nd is at position 1"
-        );
+        assert_eq!(tag, Tag::Add { play: false });
     }
 
     /// Same regression, through a radio opened from the library (a different entry point:
     /// `open_track_radio`, not `act_on_library_result`'s album branch) onto the same stack.
     #[test]
-    fn enter_on_a_track_inside_a_radio_opened_from_the_library_plays_from_it() {
+    fn enter_on_a_track_inside_a_radio_opened_from_the_library_queues_it_at_the_end() {
         let mut state = with_library();
         // Still on Favorite tracks (the default tab): "o" opens track 1's own radio.
         let (tag, _) = tagged(ch(&mut state, 'o'));
@@ -5966,10 +5910,10 @@ mod tests {
             request,
             Request::QueueAddFrom {
                 from: phonia_ipc::CatalogRef::TrackRadio { id: "1".into() },
-                at: phonia_ipc::AddAt::Next,
+                at: phonia_ipc::AddAt::End,
             }
         );
-        assert_eq!(tag, Tag::AddFrom { play_at: Some(1) });
+        assert_eq!(tag, Tag::Add { play: false });
     }
 
     #[test]

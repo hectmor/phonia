@@ -3076,3 +3076,60 @@ this issue existed, now points at the "MPRIS" section instead and notes MPRIS li
 plan" entry's bridge-vs-in-daemon decision had left behind in README is now fixed too.
 
 #34 is closed: all 5 parts (PRs #151-#155) are merged.
+
+## 2026-10-14 — #159: mark the track playing among search results, and the album it belongs to
+
+Search's Tracks tab showed no sign of which track, if any, was the one already playing — a user
+complaint pointed out that nothing distinguished it from the rest of the list. The fix reuses the
+queue's own convention rather than inventing a new one: a `>` prefix and the accent colour on the
+row, exactly as `queue_lines` already marks the current entry. The comparison is by TIDAL id,
+decoded from `status.track.source` (`tidal:<id>`) with the existing `lyrics::tidal_id` helper.
+
+Along the way, two more gaps surfaced from the same complaint, worked in the same PR (#161) rather
+than split further, since each is a few lines reusing the same marker:
+
+- **A track inside an opened album, playlist or artist's top tracks** (`browse::track_rows`) had
+  the same gap — fixed the same way.
+- **The album itself, in the search Albums tab**, now also marks the one the track playing belongs
+  to. A `Track` carries no album id of its own, only its album's cover id (`Track.cover`), which an
+  `AlbumSummary` also exposes — matching on that avoids a protocol change entirely. This stays
+  purely additive: an album with no cover, or a local file with no cover id, simply never matches,
+  which is the correct, honest answer (bit-perfectness and bitrate reporting are untouched by this
+  change, since nothing here affects what is heard, only what the list highlights).
+
+Rendering surfaced an unrelated finding worth recording: a terminal **colour-only** highlight
+(accent fg + bold, no marker character) was found to sometimes not redraw correctly through
+crossterm's own diffing after a cursor moved off the row, confirmed live against a real `phoniad`
+and TIDAL session, independent of phonia's own logic (the computed `Style` was verified correct
+both via an `eprintln!` trace and a `TestBackend` round-trip). The `>` marker character was added
+for exactly this reason, not only as a nicety: being text rather than only colour, it survives
+whatever that rendering quirk turns out to be, and matches the queue's own existing convention
+besides.
+
+PR #161, 3 commits (the track, the opened-list track, the album), closes #159.
+
+## 2026-10-14 — #160: Enter inside an opened album queues it at the end, not next-and-playing
+
+Today, `Enter` on a track inside an opened album, playlist or artist's top-tracks view queues the
+whole of it right after the track playing (`AddAt::Next`) and immediately starts playback at the
+track under the cursor (`play_at`, counted among the tracks TIDAL will actually stream). The user
+asked for this to behave like `a` on the album row itself instead: add the whole thing to the
+**end** of the queue, without touching what is already playing.
+
+Two defaults were kept exactly as they are, confirmed explicitly rather than assumed, since this
+issue could easily have been read as asking for either: `Enter` on a *track in the search results*
+still plays it immediately (unchanged), and `Enter` on an *album or playlist* (not yet opened)
+still opens it to browse, rather than queuing it (the #20 decision stands).
+
+The change removes more than it adds: `play_at`'s whole reason to exist — `send_add_from`,
+`count_streamable_before`, and the `Tag::AddFrom` wire tag `on_added` special-cased for it — go
+away, since `Action::Activate` here is now just `send_add` with `QueueAddFrom { at: End }` and
+`play: false`, the exact call an album row's own `a` key already makes. `Row::Track`'s `index`
+field goes with it: nothing downstream needs a track's position once there is no `play_at` to
+compute from it.
+
+README's search/browse paragraph is updated to describe the new behaviour, including the one
+remaining exception restated for clarity: a favorite track inside Library still plays immediately
+on `Enter` rather than queuing its (unordered, possibly huge) list, same as before.
+
+PR #TBD, 1 part, closes #160.

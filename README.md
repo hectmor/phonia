@@ -65,8 +65,12 @@ chain works with real hardware (a Fosi Audio DS2 during development).
   and `j` are letters (`Enter` searches, `Esc` stops typing keeping the text, and the line edits
   with `Left`/`Right`, `Home`/`End`, `Backspace`/`Delete`, `Ctrl-w` and `Ctrl-u`). Results come in
   four lists, tracks, albums, artists and playlists, each with its count, that `[` and `]` step
-  through, with `j`/`k` to move in the one shown; a track or an album shows its best quality. It
-  needs a daemon that has a TIDAL login, and says so where the results would be when it has not.
+  through, with `j`/`k` to move in the one shown; a track or an album shows its best quality. The
+  track playing, if it is among the results, and the album it belongs to (matched by the album's
+  own cover id, since a track carries no album id of its own) are marked the same way the queue
+  marks its own current entry (#159); the same marker shows on a track inside an opened album, a
+  playlist or an artist's top tracks. It needs a daemon that has a TIDAL login, and says so where
+  the results would be when it has not.
   On a track, `Enter` plays it (right after the one playing, and starts it); `a` adds it to the
   end of the queue and `A` right after the track playing, and the bar says how many tracks went
   in. On an album, a playlist or an artist, `Enter` opens it. An album or a playlist shows its
@@ -74,23 +78,24 @@ chain works with real hardware (a Fosi Audio DS2 during development).
   TIDAL will not stream dimmed; `a`/`A` there still add the whole thing. An artist's page shows
   its name, the start of its bio, and three tabs, its top tracks, its albums, and its EPs and
   singles (`[`/`]` switch between them), each with its own count; `a`/`A` on the artist itself add
-  its top tracks whole. Inside any of these, `Enter` on a track queues the rest of that list right
-  after the track playing and starts at that one (skipping, in the count, any track that could not
-  be added); `a`/`A` add just that track. `Enter` on an album from an artist's page opens it in
-  turn, on top (the title becomes a full breadcrumb, `Search › Korn › Issues`); `a`/`A` there add
-  it whole. `h`, `Left`, `Backspace` or starting a new search closes the view on top, back to what
-  opened it. Every list, results and an open view alike, loads more by itself as the cursor nears
-  the end of what came, 50 at a time. The **library** section needs no query: the moment it is
-  first shown it asks the daemon for it once, and says why not where the lists would be if there is
-  no connection yet or the daemon has no TIDAL login. It has four tabs (`[`/`]` switch between
-  them, each with its own count): favorite tracks, favorite albums, favorite artists (#144), and
-  the playlists made by the account logged in (not ones only followed). A favorite album, artist
-  or playlist opens the same way one from a search result does (`Library › Issues`), with the
-  same `Enter`/`a`/`A` and closing behaviour; a favorite track is the one exception to how a
-  track inside an opened list behaves elsewhere: `Enter` plays just that one track rather than
-  queuing the rest of the list from there, since a list of favorites has no natural order and can
-  run into the thousands. **`--covers auto|halfblocks|off`** (default `auto`) controls its covers
-  (#24): an opened album's or playlist's header, an opened artist's own page, and the **Queue**
+  its top tracks whole. Inside any of these, `Enter` on a track queues the whole of it (the album,
+  the playlist, or the artist's top tracks) at the end of the queue, without playing -- the same as
+  `a` on the album row itself; `a`/`A` add just that track. `Enter` on an album from an artist's
+  page opens it in turn, on top (the title becomes a full breadcrumb, `Search › Korn › Issues`);
+  `a`/`A` there add it whole. `h`, `Left`, `Backspace` or starting a new search closes the view on
+  top, back to what opened it. Every list, results and an open view alike, loads more by itself as
+  the cursor nears the end of what came, 50 at a time. The **library** section needs no query: the
+  moment it is first shown it asks the daemon for it once, and says why not where the lists would
+  be if there is no connection yet or the daemon has no TIDAL login. It has four tabs (`[`/`]`
+  switch between them, each with its own count): favorite tracks, favorite albums, favorite artists
+  (#144), and the playlists made by the account logged in (not ones only followed). A favorite
+  album, artist or playlist opens the same way one from a search result does (`Library › Issues`),
+  with the same `Enter`/`a`/`A` and closing behaviour; a favorite track is the one exception to how
+  a track inside an opened list behaves elsewhere: `Enter` plays just that one track rather than
+  adding the whole list to the end of the queue without playing, since a list of favorites has no
+  natural order and can run into the thousands. **`--covers auto|halfblocks|off`** (default `auto`)
+  controls its covers (#24): an opened album's or playlist's header, an opened artist's own page,
+  and the **Queue**
   section's own currently playing track show their cover or picture beside their text (the
   artist's tabs stay full width, under both), at whatever size fits (a third of the panel's
   height, square in pixels, never shown at all if the panel is too small or the item has none),
