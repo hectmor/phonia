@@ -46,7 +46,7 @@ pub const CAP_RECENTLY_PLAYED: &str = "recently_played";
 /// The protocol version this crate speaks.
 pub const PROTOCOL: Version = Version {
     major: 1,
-    minor: 16,
+    minor: 17,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

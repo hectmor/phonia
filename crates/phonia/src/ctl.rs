@@ -1565,6 +1565,7 @@ mod tests {
             artist: None,
             duration_ms: ms,
             cover: None,
+            album_id: None,
             artist_id: None,
         };
         Queue {
