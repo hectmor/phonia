@@ -128,6 +128,9 @@ fn rows<'a>(state: &State, theme: &Theme, height: usize) -> Vec<Line<'a>> {
                     .get(index)
                     .is_some_and(|track| track.id == id)
             });
+            // Same marker as the queue's own current entry (see `queue_lines`), so the track
+            // playing stands out even on a row the cursor also happens to be on.
+            let marker = if current { ">" } else { " " };
             let style = if focused && index == cursor {
                 theme.selected
             } else if current {
@@ -135,7 +138,7 @@ fn rows<'a>(state: &State, theme: &Theme, height: usize) -> Vec<Line<'a>> {
             } else {
                 theme.text
             };
-            Line::styled(format!("{:>4}. {text}", index + 1), style)
+            Line::styled(format!("{marker}{:>4}. {text}", index + 1), style)
         })
         .collect()
 }

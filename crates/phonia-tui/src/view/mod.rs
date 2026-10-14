@@ -1633,6 +1633,46 @@ mod tests {
     }
 
     #[test]
+    fn the_highlight_still_shows_after_the_cursor_moves_off_the_playing_track() {
+        use phonia_ipc::Track;
+        let mut state = with_results();
+        state.status = Some(crate::app::tests_support::status());
+        state.status.as_mut().unwrap().track = Some(Track {
+            item_id: None,
+            source: Some("tidal:1".into()),
+            title: Some("Falling Away from Me".into()),
+            artist: Some("Korn".into()),
+            duration_ms: None,
+            quality: None,
+            cover: None,
+            replay_gain: None,
+        });
+
+        let theme = Theme::new(true);
+        let mut terminal = Terminal::new(TestBackend::new(120, 14)).unwrap();
+        terminal
+            .draw(|frame| draw(&state, &theme, &Covers::disabled(), frame))
+            .unwrap();
+        press(&mut state, 'l');
+        press(&mut state, 'j');
+        terminal
+            .draw(|frame| draw(&state, &theme, &Covers::disabled(), frame))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let (x, y) = (0..14)
+            .find_map(|y| {
+                let row: String = (0..120).map(|x| buffer[(x, y)].symbol()).collect();
+                row.find("1. Korn - Falling").map(|x| (x as u16, y))
+            })
+            .unwrap();
+        assert_eq!(
+            buffer[(x, y)].style().fg,
+            theme.accent.fg,
+            "still highlighted once the cursor has moved off it"
+        );
+    }
+
+    #[test]
     fn the_track_playing_is_highlighted_among_the_search_results() {
         use phonia_ipc::Track;
         let mut state = with_results();
@@ -1672,6 +1712,22 @@ mod tests {
             row_fg("1. Korn - Falling"),
             theme.accent.fg,
             "a different track, not highlighted"
+        );
+        let text = (0..14)
+            .map(|y| {
+                (0..120)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains(">   2. Korn - Dead"),
+            "the same marker the queue uses for its current entry: {text}"
+        );
+        assert!(
+            text.contains("    1. Korn - Falling"),
+            "no marker on a track that is not playing: {text}"
         );
     }
 
