@@ -1314,7 +1314,20 @@ fn apply(state: &mut State, action: Action) -> Effects {
         Action::RemoveEntry | Action::MoveEntryDown | Action::MoveEntryUp | Action::ClearQueue => {
             return edit_queue(state, action);
         }
-        Action::OpenArtist => return open_queue_artist(state),
+        Action::OpenArtist => {
+            return match state.section() {
+                Section::Search if state.search_views.is_empty() => act_on_result(state, action),
+                Section::Search => act_in_view(state, action),
+                Section::Library if state.library_views.is_empty() => {
+                    act_on_library_result(state, action)
+                }
+                Section::Library => act_in_view(state, action),
+                Section::Home if state.home_views.is_empty() => act_on_home_result(state, action),
+                Section::Home => act_in_view(state, action),
+                Section::Queue => open_queue_artist(state),
+                Section::Lyrics => Effects::default(),
+            };
+        }
         Action::AddToQueue | Action::AddNext => {
             return match state.section() {
                 Section::Search if state.search_views.is_empty() => act_on_result(state, action),
@@ -1625,6 +1638,17 @@ fn act_on_result(state: &mut State, action: Action) -> Effects {
     let Some(selected) = state.search.selected() else {
         return Effects::default();
     };
+    if action == Action::OpenArtist {
+        return match selected {
+            Selected::Track(track) => match track.artists.first() {
+                Some(artist) => {
+                    open_artist_view(state, artist.id.clone(), artist.name.clone(), None)
+                }
+                None => Effects::default(),
+            },
+            _ => Effects::default(),
+        };
+    }
     if action == Action::OpenRadio {
         return match selected {
             Selected::Track(track) => {
@@ -1743,6 +1767,17 @@ fn act_on_library_result(state: &mut State, action: Action) -> Effects {
     let Some(selected) = library.selected() else {
         return Effects::default();
     };
+    if action == Action::OpenArtist {
+        return match selected {
+            library::Selected::Track(track) => match track.artists.first() {
+                Some(artist) => {
+                    open_artist_view(state, artist.id.clone(), artist.name.clone(), None)
+                }
+                None => Effects::default(),
+            },
+            _ => Effects::default(),
+        };
+    }
     if action == Action::OpenRadio {
         return match selected {
             library::Selected::Track(track) => {
@@ -2249,6 +2284,10 @@ fn act_on_track_row(
             send_add(state, request, false)
         }
         Action::OpenRadio => open_track_radio(state, track.id.clone(), track.title.clone()),
+        Action::OpenArtist => match track.artists.first() {
+            Some(artist) => open_artist_view(state, artist.id.clone(), artist.name.clone(), None),
+            None => Effects::default(),
+        },
         _ => Effects::default(),
     }
 }
@@ -2295,6 +2334,17 @@ fn act_on_home_result(state: &mut State, action: Action) -> Effects {
     let Some(selected) = home::selected(state, state.home_cursor.selected()) else {
         return Effects::default();
     };
+    if action == Action::OpenArtist {
+        return match selected {
+            home::Selected::Track(track) => match track.artists.first() {
+                Some(artist) => {
+                    open_artist_view(state, artist.id.clone(), artist.name.clone(), None)
+                }
+                None => Effects::default(),
+            },
+            _ => Effects::default(),
+        };
+    }
     if action == Action::OpenRadio {
         return match selected {
             home::Selected::Track(track) => {
@@ -3998,7 +4048,10 @@ mod tests {
             id: id.to_string(),
             title: format!("Song {id}"),
             version: None,
-            artists: vec![],
+            artists: vec![phonia_ipc::ArtistRef {
+                id: "77".into(),
+                name: "Korn".into(),
+            }],
             album: None,
             duration_ms: None,
             explicit: false,
@@ -4120,6 +4173,22 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn ga_opens_a_search_tracks_artist_and_does_nothing_on_an_album() {
+        let mut state = with_results(vec![track_row(11)], 1);
+        ch(&mut state, 'g');
+        let (tag, request) = tagged(ch(&mut state, 'a'));
+        assert!(matches!(tag, Tag::View { .. }));
+        assert!(matches!(request, Request::Artist { ref id, .. } if id == "77"));
+        assert!(!state.search_views.is_empty());
+
+        let mut state = with_results(vec![track_row(11)], 1);
+        ch(&mut state, ']'); // albums
+        ch(&mut state, 'g');
+        assert!(ch(&mut state, 'a').commands.is_empty());
+        assert!(state.search_views.is_empty(), "nothing was opened either");
     }
 
     #[test]
@@ -4629,6 +4698,20 @@ mod tests {
         let effects = press(&mut state, KeyCode::Enter);
         assert!(effects.commands.is_empty());
         assert!(state.last_error.as_deref().unwrap().contains("Trash"));
+    }
+
+    #[test]
+    fn ga_opens_the_artist_of_a_track_inside_an_open_album() {
+        let (mut state, _) = in_an_open_album(true);
+        ch(&mut state, 'j');
+        ch(&mut state, 'g');
+        let (tag, request) = tagged(ch(&mut state, 'a'));
+        assert!(matches!(tag, Tag::View { .. }));
+        assert!(matches!(request, Request::Artist { ref id, .. } if id == "77"));
+        assert!(matches!(
+            state.search_views.top(),
+            Some(browse::View::Artist(_))
+        ));
     }
 
     #[test]
@@ -5887,6 +5970,16 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn ga_on_a_favorite_track_opens_its_artist() {
+        let mut state = with_library();
+        ch(&mut state, 'g');
+        let (tag, request) = tagged(ch(&mut state, 'a'));
+        assert!(matches!(tag, Tag::View { .. }));
+        assert!(matches!(request, Request::Artist { ref id, .. } if id == "77"));
+        assert!(!state.library_views.is_empty());
     }
 
     #[test]

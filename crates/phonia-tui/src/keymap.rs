@@ -375,8 +375,8 @@ pub const BINDINGS: &[Binding] = &[
         &[c('g'), c('a')],
         "ga",
         Action::OpenArtist,
-        "go to the artist of the selected track",
-        Group::Queue,
+        "open the artist of the track under the cursor",
+        Group::Search,
     ),
     bind(
         &[Key::plain(KeyCode::Backspace)],
