@@ -2,6 +2,7 @@
 
 use super::first_visible;
 use crate::app::{Focus, State};
+use crate::lyrics;
 use crate::search::{Phase, Tab};
 use crate::theme::Theme;
 use phonia_ipc::fmt;
@@ -103,18 +104,49 @@ fn rows<'a>(state: &State, theme: &Theme, height: usize) -> Vec<Line<'a>> {
     }
     .selected();
     let focused = state.focus == Focus::Main && !search.editing;
+    // Artists and playlists have nothing in `status.track` to compare against, so only Tracks (by
+    // TIDAL id) and Albums (by the album's own cover id, which a track carries too) ever mark a
+    // row current.
+    let playing = state
+        .status
+        .as_ref()
+        .and_then(|status| status.track.as_ref());
+    let now_playing_track = playing.and_then(lyrics::tidal_id);
+    let now_playing_album_cover = playing.and_then(|track| track.cover.as_deref());
     texts
         .into_iter()
         .enumerate()
         .skip(first_visible(cursor, height))
         .take(height.max(1))
         .map(|(index, text)| {
+            let current = match search.tab {
+                Tab::Tracks => now_playing_track.is_some_and(|id| {
+                    search
+                        .tracks
+                        .items
+                        .get(index)
+                        .is_some_and(|track| track.id == id)
+                }),
+                Tab::Albums => now_playing_album_cover.is_some_and(|cover| {
+                    search
+                        .albums
+                        .items
+                        .get(index)
+                        .is_some_and(|album| album.cover.as_deref() == Some(cover))
+                }),
+                Tab::Artists | Tab::Playlists => false,
+            };
+            // Same marker as the queue's own current entry (see `queue_lines`), so the track or
+            // album playing stands out even on a row the cursor also happens to be on.
+            let marker = if current { ">" } else { " " };
             let style = if focused && index == cursor {
                 theme.selected
+            } else if current {
+                theme.accent
             } else {
                 theme.text
             };
-            Line::styled(format!("{:>4}. {text}", index + 1), style)
+            Line::styled(format!("{marker}{:>4}. {text}", index + 1), style)
         })
         .collect()
 }

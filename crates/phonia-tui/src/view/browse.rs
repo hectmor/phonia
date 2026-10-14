@@ -4,6 +4,7 @@ use super::first_visible;
 use crate::app::{Focus, State};
 use crate::browse::{ArtistTab, ArtistView, FolderView, Header, Phase, Stack, TrackListView, View};
 use crate::covers::{self, Covers};
+use crate::lyrics;
 use crate::theme::Theme;
 use phonia_ipc::{AlbumSummary, FolderEntry, TrackSummary, fmt};
 use ratatui::Frame;
@@ -73,6 +74,7 @@ fn draw_track_list(
     }
     frame.render_widget(Paragraph::new(header_lines), header_area);
     let focused = state.focus == Focus::Main;
+    let now_playing = now_playing_tidal_id(state);
     let lines = match &view.phase {
         Phase::Loading => vec![Line::styled("Loading...", theme.dim)],
         Phase::Failed(reason) => vec![Line::styled(reason.clone(), theme.error)],
@@ -80,11 +82,31 @@ fn draw_track_list(
             &view.tracks.items,
             view.tracks.cursor.selected(),
             focused,
+            now_playing,
             usize::from(list_area.height),
             theme,
         ),
     };
     frame.render_widget(Paragraph::new(lines), list_area);
+}
+
+/// The TIDAL id of the track playing now, when there is one (see `lyrics::tidal_id`).
+fn now_playing_tidal_id(state: &State) -> Option<&str> {
+    state
+        .status
+        .as_ref()
+        .and_then(|status| status.track.as_ref())
+        .and_then(lyrics::tidal_id)
+}
+
+/// The cover id of the album the track playing now belongs to, when there is one: a track carries
+/// no album id of its own, only its album's cover id, which still ties it back to the album.
+fn now_playing_album_cover(state: &State) -> Option<&str> {
+    state
+        .status
+        .as_ref()
+        .and_then(|status| status.track.as_ref())
+        .and_then(|track| track.cover.as_deref())
 }
 
 /// The album's or the playlist's own line, plus its copyright when there is one, and a blank line
@@ -106,11 +128,13 @@ fn header_lines(header: &Header, theme: &Theme) -> Vec<Line<'static>> {
 }
 
 /// The tracks, numbered as they are on the album or the playlist, the one under the cursor
-/// highlighted when the list has the focus and one TIDAL will not stream dimmed.
+/// highlighted when the list has the focus, the one playing marked the same way the queue marks
+/// its own current entry, and one TIDAL will not stream dimmed.
 fn track_rows<'a>(
     tracks: &[TrackSummary],
     cursor: usize,
     focused: bool,
+    now_playing: Option<&str>,
     height: usize,
     theme: &Theme,
 ) -> Vec<Line<'a>> {
@@ -125,17 +149,31 @@ fn track_rows<'a>(
         .take(height.max(1))
         .map(|(index, track)| {
             let number = track.track_number.map_or(index + 1, |n| n as usize);
-            let text = format!("{number:>3}. {}", fmt::track_short(track));
-            row_line(text, index == cursor, focused, !track.streamable, theme)
+            let current = now_playing.is_some_and(|id| track.id == id);
+            let marker = if current { ">" } else { " " };
+            let text = format!("{marker}{number:>3}. {}", fmt::track_short(track));
+            let style = if focused && index == cursor {
+                theme.selected
+            } else if current {
+                theme.accent
+            } else if !track.streamable {
+                theme.dim
+            } else {
+                theme.text
+            };
+            Line::styled(text, style)
         })
         .collect()
 }
 
-/// An artist's albums or its EPs and singles, numbered from where the page starts.
+/// An artist's albums or its EPs and singles, numbered from where the page starts, the one the
+/// track playing belongs to (by its cover id, since a track has no album id of its own) marked the
+/// same way the queue marks its current entry.
 fn album_rows<'a>(
     albums: &[AlbumSummary],
     cursor: usize,
     focused: bool,
+    now_playing_cover: Option<&str>,
     height: usize,
     theme: &Theme,
 ) -> Vec<Line<'a>> {
@@ -149,8 +187,18 @@ fn album_rows<'a>(
         .skip(start)
         .take(height.max(1))
         .map(|(index, album)| {
-            let text = format!("{:>3}. {}", index + 1, fmt::album(album));
-            row_line(text, index == cursor, focused, false, theme)
+            let current =
+                now_playing_cover.is_some_and(|cover| album.cover.as_deref() == Some(cover));
+            let marker = if current { ">" } else { " " };
+            let text = format!("{marker}{:>3}. {}", index + 1, fmt::album(album));
+            let style = if focused && index == cursor {
+                theme.selected
+            } else if current {
+                theme.accent
+            } else {
+                theme.text
+            };
+            Line::styled(text, style)
         })
         .collect()
 }
@@ -229,6 +277,7 @@ fn draw_artist(
                 &view.top_tracks.items,
                 view.top_tracks.cursor.selected(),
                 focused,
+                now_playing_tidal_id(state),
                 usize::from(list_area.height),
                 theme,
             ),
@@ -236,6 +285,7 @@ fn draw_artist(
                 &view.albums.items,
                 view.albums.cursor.selected(),
                 focused,
+                now_playing_album_cover(state),
                 usize::from(list_area.height),
                 theme,
             ),
@@ -243,6 +293,7 @@ fn draw_artist(
                 &view.singles.items,
                 view.singles.cursor.selected(),
                 focused,
+                now_playing_album_cover(state),
                 usize::from(list_area.height),
                 theme,
             ),
