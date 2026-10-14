@@ -95,12 +95,16 @@ their turn comes.
 | Issue | What | Status |
 |---|---|---|
 | #124 | Layout and appearance modifying for better user experience | Closed (both parts merged) |
+| #159 | Highlight the track playing in search, and the album it belongs to | Closed (PR #161 merged) |
+| #160 | Enter inside an opened album queues it at the end of the queue | In progress |
 
 Brand new milestone, started right after #120. The owner's concrete ask
 (from a screenshot of TIDAL's own web player): a visually bigger, bolder
 track title with the artist on its own quieter line underneath, instead
 of today's single `Artist - Title` string — see `docs/DECISIONS.md` for
-the full design discussion and the decisions made.
+the full design discussion and the decisions made. #159 and #160 are two
+smaller, unplanned fixes that came out of using the TUI day to day rather
+than a planned part of the phase; see `docs/DECISIONS.md` for both.
 
 ### Phase 7 — Home screen and discovery
 
@@ -918,6 +922,23 @@ gain `#[zbus(property)]` setters mapping to the matching
 `Model::set_*_request` function(s); an invalid `LoopStatus` string is
 refused (`InvalidArgs`), not silently ignored. README gained an
 "MPRIS" section describing the feature for users. #34 is closed.
+
+**#159 is done, closed (PR #161 merged).** The track playing, if it is
+among the search results, and the album it belongs to (matched by cover
+id, since a track carries no album id of its own) are now marked with
+the same `>` marker and accent colour the queue already uses for its
+own current entry; the same marker also reached `browse::track_rows`
+(an opened album, playlist or artist's top tracks). See
+`docs/DECISIONS.md` for the rendering quirk this surfaced along the way.
+
+**#160 is in progress.** `Enter` on a track, wherever it is (the search
+results' own Tracks tab, or inside an opened album, playlist or
+artist's top tracks), now adds it (or the whole list it is part of) to
+the end of the queue, the same place `a` already adds it, instead of
+right after the track playing — it still starts playback at the track
+clicked, unchanged. `Enter` on an album or playlist not yet opened
+still opens it to browse, confirmed with the project owner as staying
+exactly as it is. See `docs/DECISIONS.md` for the full reasoning.
 
 ## Conventions this file assumes
 
