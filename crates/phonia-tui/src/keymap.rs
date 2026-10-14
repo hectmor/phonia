@@ -57,8 +57,11 @@ pub enum Action {
     /// Opens the radio of the track under the cursor (a search result, a favorite track, or one
     /// inside an already-open album, playlist, artist page or radio).
     OpenRadio,
-    /// Opens the artist page of the queue entry under the cursor.
+    /// Opens the artist page of the track under the cursor (a search result, a favorite track, or
+    /// one inside an already-open album, playlist, artist page or radio -- plus a queue entry).
     OpenArtist,
+    /// Opens the album page of the track under the cursor.
+    OpenAlbum,
     /// Leaves the album or the playlist open, back to what it was opened from.
     Back,
 }
@@ -379,6 +382,13 @@ pub const BINDINGS: &[Binding] = &[
         Group::Search,
     ),
     bind(
+        &[c('g'), c('r')],
+        "gr",
+        Action::OpenAlbum,
+        "open the album of the track under the cursor",
+        Group::Search,
+    ),
+    bind(
         &[Key::plain(KeyCode::Backspace)],
         "Backspace",
         Action::Back,
@@ -494,6 +504,14 @@ mod tests {
             Resolution::Action(Action::First)
         );
         assert_eq!(resolve(&[c('g')], c('x')), Resolution::None);
+    }
+
+    #[test]
+    fn gr_opens_the_album() {
+        assert_eq!(
+            resolve(&[c('g')], c('r')),
+            Resolution::Action(Action::OpenAlbum)
+        );
     }
 
     #[test]

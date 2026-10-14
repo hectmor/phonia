@@ -821,6 +821,7 @@ mod tests {
                             artist: None,
                             duration_ms: Some(65_000),
                             cover: None,
+                            album_id: None,
                             artist_id: None,
                         },
                         QueueItem {
@@ -830,6 +831,7 @@ mod tests {
                             artist: None,
                             duration_ms: None,
                             cover: None,
+                            album_id: None,
                             artist_id: None,
                         },
                     ],
@@ -1380,6 +1382,7 @@ mod tests {
                 artist: None,
                 duration_ms: None,
                 cover: None,
+                album_id: None,
                 artist_id: None,
             })
             .collect();

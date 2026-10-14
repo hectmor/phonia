@@ -690,6 +690,14 @@ fn on_view_response(state: &mut State, serial: u64, result: Result<Payload, Stri
         Some(browse::View::TrackList(view)) => {
             let opening = view.phase == browse::Phase::Loading;
             match result {
+                // Only `gr` opens an album with just its id and title known (`open_album_view`): the
+                // answer carries the album's own details, so the header ends up as complete as
+                // everywhere else.
+                Ok(Payload::Album { album, tracks }) if opening => {
+                    view.header = Header::Album(album);
+                    view.tracks = crate::list::Found::from_page(tracks);
+                    view.phase = browse::Phase::Done;
+                }
                 Ok(Payload::Tracks { page, .. }) => {
                     if opening {
                         view.tracks = crate::list::Found::from_page(page);
@@ -1314,7 +1322,7 @@ fn apply(state: &mut State, action: Action) -> Effects {
         Action::RemoveEntry | Action::MoveEntryDown | Action::MoveEntryUp | Action::ClearQueue => {
             return edit_queue(state, action);
         }
-        Action::OpenArtist => {
+        Action::OpenArtist | Action::OpenAlbum => {
             return match state.section() {
                 Section::Search if state.search_views.is_empty() => act_on_result(state, action),
                 Section::Search => act_in_view(state, action),
@@ -1324,7 +1332,8 @@ fn apply(state: &mut State, action: Action) -> Effects {
                 Section::Library => act_in_view(state, action),
                 Section::Home if state.home_views.is_empty() => act_on_home_result(state, action),
                 Section::Home => act_in_view(state, action),
-                Section::Queue => open_queue_artist(state),
+                Section::Queue if action == Action::OpenArtist => open_queue_artist(state),
+                Section::Queue => open_queue_album(state),
                 Section::Lyrics => Effects::default(),
             };
         }
@@ -1638,14 +1647,14 @@ fn act_on_result(state: &mut State, action: Action) -> Effects {
     let Some(selected) = state.search.selected() else {
         return Effects::default();
     };
-    if action == Action::OpenArtist {
+    if matches!(action, Action::OpenArtist | Action::OpenAlbum) {
         return match selected {
-            Selected::Track(track) => match track.artists.first() {
-                Some(artist) => {
-                    open_artist_view(state, artist.id.clone(), artist.name.clone(), None)
-                }
-                None => Effects::default(),
-            },
+            Selected::Track(track) => open_artist_or_album(
+                state,
+                action,
+                track.artists.first().cloned(),
+                track.album.clone(),
+            ),
             _ => Effects::default(),
         };
     }
@@ -1767,14 +1776,14 @@ fn act_on_library_result(state: &mut State, action: Action) -> Effects {
     let Some(selected) = library.selected() else {
         return Effects::default();
     };
-    if action == Action::OpenArtist {
+    if matches!(action, Action::OpenArtist | Action::OpenAlbum) {
         return match selected {
-            library::Selected::Track(track) => match track.artists.first() {
-                Some(artist) => {
-                    open_artist_view(state, artist.id.clone(), artist.name.clone(), None)
-                }
-                None => Effects::default(),
-            },
+            library::Selected::Track(track) => open_artist_or_album(
+                state,
+                action,
+                track.artists.first().cloned(),
+                track.album.clone(),
+            ),
             _ => Effects::default(),
         };
     }
@@ -2077,6 +2086,57 @@ fn open_queue_artist(state: &mut State) -> Effects {
     open_artist_view(state, id, name, None)
 }
 
+/// `gr` in the queue: the album of the entry under the cursor. The queue carries the album's
+/// id (since 1.17) and its cover, but not its title, so the header is named "Album" until the
+/// answer brings the real one.
+fn open_queue_album(state: &mut State) -> Effects {
+    if !in_queue(state) {
+        return Effects::default();
+    }
+    let Some(item) = state
+        .queue
+        .as_ref()
+        .and_then(|queue| queue.items.get(state.queue_cursor.selected()))
+    else {
+        return Effects::default();
+    };
+    let Some(id) = item.album_id.clone() else {
+        state.last_error = Some("this track has no album page to open".to_string());
+        return Effects::redraw();
+    };
+    let cover = item.cover.clone();
+    if !require_browsable(state, "albums") {
+        return Effects::redraw();
+    }
+    let index = Section::ALL
+        .iter()
+        .position(|section| *section == Section::Library)
+        .unwrap_or(0);
+    state.sidebar.select(index, Section::ALL.len());
+    open_album_view(state, id, "Album".to_string(), cover)
+}
+
+/// `ga` and `gr` on a track row, wherever the row is: the page of the track's first credited
+/// artist, or of the album it is on. A track without the one asked for does nothing.
+fn open_artist_or_album(
+    state: &mut State,
+    action: Action,
+    artist: Option<phonia_ipc::ArtistRef>,
+    album: Option<phonia_ipc::AlbumRef>,
+) -> Effects {
+    if action == Action::OpenAlbum {
+        match album {
+            Some(album) => open_album_view(state, album.id, album.title, album.cover),
+            None => Effects::default(),
+        }
+    } else {
+        match artist {
+            Some(artist) => open_artist_view(state, artist.id, artist.name, None),
+            None => Effects::default(),
+        }
+    }
+}
+
 fn open_artist_view(
     state: &mut State,
     id: String,
@@ -2101,6 +2161,54 @@ fn open_artist_view(
         commands: vec![Cmd::Request {
             tag: Tag::View { serial },
             request: Request::Artist { id, limit: None },
+        }],
+    }
+}
+
+/// Opens the album `id` onto the active stack, `title` and `cover` only naming it while it
+/// loads: unlike `open_track_list`, which is handed the whole `AlbumSummary` of the row that
+/// was activated, `gr` starts from a track, which carries just its album's id, title and
+/// cover -- so this asks for the album itself, whose answer carries both its details (for the
+/// header) and its first page of tracks.
+fn open_album_view(state: &mut State, id: String, title: String, cover: Option<String>) -> Effects {
+    if !require_browsable(state, "albums") {
+        return Effects::redraw();
+    }
+    let serial = next_serial(state);
+    let Some(stack) = active_stack_mut(state) else {
+        return Effects::default();
+    };
+    // Nothing but what the track knows: guessing the artists from it would credit the wrong one
+    // on a compilation.
+    let summary = phonia_ipc::AlbumSummary {
+        id: id.clone(),
+        title,
+        version: None,
+        artists: vec![],
+        release_date: None,
+        track_count: None,
+        duration_ms: None,
+        explicit: false,
+        quality: None,
+        kind: None,
+        copyright: None,
+        cover,
+    };
+    stack.push(
+        serial,
+        browse::View::TrackList(browse::TrackListView::new(
+            phonia_ipc::CatalogRef::Album { id: id.clone() },
+            Header::Album(summary),
+        )),
+    );
+    Effects {
+        redraw: true,
+        commands: vec![Cmd::Request {
+            tag: Tag::View { serial },
+            request: Request::Album {
+                id,
+                limit: Some(crate::search::PAGE_SIZE),
+            },
         }],
     }
 }
@@ -2217,19 +2325,21 @@ fn act_in_view(state: &mut State, action: Action) -> Effects {
             },
             Header::Album(album),
         ),
-        Some(Row::Album(album)) => send_add(
-            state,
-            Request::QueueAddFrom {
-                from: phonia_ipc::CatalogRef::Album { id: album.id },
-                at: if action == Action::AddToQueue {
-                    phonia_ipc::AddAt::End
-                } else {
-                    phonia_ipc::AddAt::Next
+        Some(Row::Album(album)) if matches!(action, Action::AddToQueue | Action::AddNext) => {
+            send_add(
+                state,
+                Request::QueueAddFrom {
+                    from: phonia_ipc::CatalogRef::Album { id: album.id },
+                    at: if action == Action::AddToQueue {
+                        phonia_ipc::AddAt::End
+                    } else {
+                        phonia_ipc::AddAt::Next
+                    },
                 },
-            },
-            false,
-        ),
-        None => Effects::default(),
+                false,
+            )
+        }
+        Some(Row::Album(_)) | None => Effects::default(),
     }
 }
 
@@ -2291,10 +2401,13 @@ fn act_on_track_row(
             send_add(state, request, false)
         }
         Action::OpenRadio => open_track_radio(state, track.id.clone(), track.title.clone()),
-        Action::OpenArtist => match track.artists.first() {
-            Some(artist) => open_artist_view(state, artist.id.clone(), artist.name.clone(), None),
-            None => Effects::default(),
-        },
+        Action::OpenArtist | Action::OpenAlbum => {
+            // Inside an open album, `gr` would only open the album the cursor is already in.
+            let album = track.album.filter(
+                |album| !matches!(&of, phonia_ipc::CatalogRef::Album { id } if *id == album.id),
+            );
+            open_artist_or_album(state, action, track.artists.first().cloned(), album)
+        }
         _ => Effects::default(),
     }
 }
@@ -2341,14 +2454,14 @@ fn act_on_home_result(state: &mut State, action: Action) -> Effects {
     let Some(selected) = home::selected(state, state.home_cursor.selected()) else {
         return Effects::default();
     };
-    if action == Action::OpenArtist {
+    if matches!(action, Action::OpenArtist | Action::OpenAlbum) {
         return match selected {
-            home::Selected::Track(track) => match track.artists.first() {
-                Some(artist) => {
-                    open_artist_view(state, artist.id.clone(), artist.name.clone(), None)
-                }
-                None => Effects::default(),
-            },
+            home::Selected::Track(track) => open_artist_or_album(
+                state,
+                action,
+                track.artists.first().cloned(),
+                track.album.clone(),
+            ),
             _ => Effects::default(),
         };
     }
@@ -3447,6 +3560,7 @@ mod tests {
                 artist: None,
                 duration_ms: None,
                 cover: None,
+                album_id: None,
                 artist_id: None,
             })
             .collect();
@@ -4196,6 +4310,174 @@ mod tests {
         ch(&mut state, 'g');
         assert!(ch(&mut state, 'a').commands.is_empty());
         assert!(state.search_views.is_empty(), "nothing was opened either");
+    }
+
+    fn on_album(mut track: phonia_ipc::TrackSummary, id: &str) -> phonia_ipc::TrackSummary {
+        track.album = Some(phonia_ipc::AlbumRef {
+            id: id.into(),
+            title: "Issues".into(),
+            cover: Some("cov".into()),
+        });
+        track
+    }
+
+    fn assert_album_view_opened(top: Option<&browse::View>, effects: Effects, id: &str) -> u64 {
+        let Some(browse::View::TrackList(view)) = top else {
+            panic!("no track list pushed")
+        };
+        assert_eq!(view.of, phonia_ipc::CatalogRef::Album { id: id.into() });
+        let browse::Header::Album(summary) = view.header() else {
+            panic!("not an album header")
+        };
+        assert_eq!(summary.title, "Issues");
+        assert!(summary.artists.is_empty());
+        let (tag, request) = tagged(effects);
+        let Tag::View { serial } = tag else {
+            panic!("not a view tag")
+        };
+        assert_eq!(
+            request,
+            Request::Album {
+                id: id.into(),
+                limit: Some(crate::search::PAGE_SIZE)
+            }
+        );
+        serial
+    }
+
+    #[test]
+    fn gr_opens_a_search_tracks_album_and_its_answer_fills_the_header() {
+        let mut state = with_results(vec![on_album(track_row(11), "55")], 1);
+        ch(&mut state, 'g');
+        let effects = ch(&mut state, 'r');
+        let serial = assert_album_view_opened(state.search_views.top(), effects, "55");
+        let mut full = library_album("55", "Issues");
+        full.artists = vec![phonia_ipc::ArtistRef {
+            id: "77".into(),
+            name: "Korn".into(),
+        }];
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::View { serial },
+                result: Ok(Payload::Album {
+                    album: full,
+                    tracks: page_of(vec![track_row(1), track_row(2)], 2, 0).unwrap(),
+                }),
+            },
+        );
+        let Some(browse::View::TrackList(view)) = state.search_views.top() else {
+            panic!("no view")
+        };
+        let browse::Header::Album(summary) = view.header() else {
+            panic!("not an album header")
+        };
+        assert_eq!(summary.artists.len(), 1);
+        assert_eq!(view.tracks.items.len(), 2);
+        assert_eq!(view.phase, browse::Phase::Done);
+    }
+
+    #[test]
+    fn gr_on_a_track_without_an_album_does_nothing() {
+        let mut state = with_results(vec![track_row(11)], 1);
+        ch(&mut state, 'g');
+        assert!(ch(&mut state, 'r').commands.is_empty());
+        assert!(state.search_views.is_empty());
+    }
+
+    #[test]
+    fn gr_on_a_favorite_track_opens_its_album() {
+        let mut state = with_library();
+        let track = &mut state.library.as_mut().unwrap().favorite_tracks.items[0];
+        *track = on_album(track.clone(), "55");
+        ch(&mut state, 'g');
+        let effects = ch(&mut state, 'r');
+        assert_album_view_opened(state.library_views.top(), effects, "55");
+    }
+
+    #[test]
+    fn gr_inside_a_radio_opens_the_album_and_inside_that_album_does_nothing() {
+        let mut state = with_results(vec![track_row(11)], 1);
+        let (tag, _) = tagged(ch(&mut state, 'o'));
+        let Tag::View { serial } = tag else {
+            panic!("not a view tag")
+        };
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::View { serial },
+                result: Ok(Payload::Tracks {
+                    from: phonia_ipc::CatalogRef::TrackRadio { id: "11".into() },
+                    page: page_of(vec![on_album(track_row(1), "55")], 1, 0).unwrap(),
+                }),
+            },
+        );
+        ch(&mut state, 'g');
+        let effects = ch(&mut state, 'r');
+        let serial = assert_album_view_opened(state.search_views.top(), effects, "55");
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::View { serial },
+                result: Ok(Payload::Album {
+                    album: library_album("55", "Issues"),
+                    tracks: page_of(vec![on_album(track_row(1), "55")], 1, 0).unwrap(),
+                }),
+            },
+        );
+        let depth = state.search_views.titles().len();
+        ch(&mut state, 'g');
+        assert!(ch(&mut state, 'r').commands.is_empty());
+        assert_eq!(state.search_views.titles().len(), depth);
+    }
+
+    #[test]
+    fn gr_ga_and_o_on_an_album_row_of_an_artist_page_do_nothing() {
+        for key in ['r', 'a'] {
+            let (mut state, _) = in_an_open_artist();
+            ch(&mut state, ']'); // Albums
+            let depth = state.search_views.titles().len();
+            ch(&mut state, 'g');
+            assert!(ch(&mut state, key).commands.is_empty());
+            assert_eq!(state.search_views.titles().len(), depth);
+        }
+        let (mut state, _) = in_an_open_artist();
+        ch(&mut state, ']');
+        let depth = state.search_views.titles().len();
+        assert!(ch(&mut state, 'o').commands.is_empty());
+        assert_eq!(state.search_views.titles().len(), depth);
+    }
+
+    #[test]
+    fn gr_in_the_queue_opens_the_selected_entrys_album() {
+        let mut state = in_the_queue(2);
+        state
+            .server
+            .as_mut()
+            .unwrap()
+            .capabilities
+            .push("catalog".into());
+        state.queue.as_mut().unwrap().items[1].album_id = Some("55".to_string());
+        ch(&mut state, 'j');
+        ch(&mut state, 'g');
+        let effects = ch(&mut state, 'r');
+        assert_eq!(state.section(), Section::Library);
+        assert!(!state.library_views.is_empty());
+        assert!(effects.commands.iter().any(|cmd| matches!(
+            cmd,
+            Cmd::Request { request: Request::Album { id, .. }, .. } if id == "55"
+        )));
+    }
+
+    #[test]
+    fn gr_on_a_queue_entry_without_an_album_opens_nothing() {
+        let mut state = in_the_queue(2);
+        ch(&mut state, 'g');
+        let effects = ch(&mut state, 'r');
+        assert_eq!(state.section(), Section::Queue);
+        assert!(state.library_views.is_empty());
+        assert!(effects.commands.is_empty());
+        assert!(state.last_error.is_some());
     }
 
     #[test]
