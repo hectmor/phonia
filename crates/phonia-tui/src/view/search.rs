@@ -2,6 +2,7 @@
 
 use super::first_visible;
 use crate::app::{Focus, State};
+use crate::lyrics;
 use crate::search::{Phase, Tab};
 use crate::theme::Theme;
 use phonia_ipc::fmt;
@@ -103,14 +104,34 @@ fn rows<'a>(state: &State, theme: &Theme, height: usize) -> Vec<Line<'a>> {
     }
     .selected();
     let focused = state.focus == Focus::Main && !search.editing;
+    // Only the Tracks tab has a "now playing" to mark: the other three list albums, artists and
+    // playlists, none of which is itself ever the thing in the engine's `status.track`.
+    let now_playing = (search.tab == Tab::Tracks)
+        .then(|| {
+            state
+                .status
+                .as_ref()
+                .and_then(|status| status.track.as_ref())
+        })
+        .flatten()
+        .and_then(lyrics::tidal_id);
     texts
         .into_iter()
         .enumerate()
         .skip(first_visible(cursor, height))
         .take(height.max(1))
         .map(|(index, text)| {
+            let current = now_playing.is_some_and(|id| {
+                search
+                    .tracks
+                    .items
+                    .get(index)
+                    .is_some_and(|track| track.id == id)
+            });
             let style = if focused && index == cursor {
                 theme.selected
+            } else if current {
+                theme.accent
             } else {
                 theme.text
             };

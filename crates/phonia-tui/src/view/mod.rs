@@ -1633,6 +1633,49 @@ mod tests {
     }
 
     #[test]
+    fn the_track_playing_is_highlighted_among_the_search_results() {
+        use phonia_ipc::Track;
+        let mut state = with_results();
+        state.status = Some(crate::app::tests_support::status());
+        state.status.as_mut().unwrap().track = Some(Track {
+            item_id: None,
+            source: Some("tidal:2".into()),
+            title: Some("Dead".into()),
+            artist: Some("Korn".into()),
+            duration_ms: None,
+            quality: None,
+            cover: None,
+            replay_gain: None,
+        });
+
+        let theme = Theme::new(true);
+        let mut terminal = Terminal::new(TestBackend::new(120, 14)).unwrap();
+        terminal
+            .draw(|frame| draw(&state, &theme, &Covers::disabled(), frame))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let row_fg = |needle: &str| {
+            let (x, y) = (0..14)
+                .find_map(|y| {
+                    let row: String = (0..120).map(|x| buffer[(x, y)].symbol()).collect();
+                    row.find(needle).map(|x| (x as u16, y))
+                })
+                .unwrap_or_else(|| panic!("{needle:?} not found on screen"));
+            buffer[(x, y)].style().fg
+        };
+        assert_eq!(
+            row_fg("2. Korn - Dead"),
+            theme.accent.fg,
+            "the track playing"
+        );
+        assert_ne!(
+            row_fg("1. Korn - Falling"),
+            theme.accent.fg,
+            "a different track, not highlighted"
+        );
+    }
+
+    #[test]
     fn the_results_are_listed_with_the_counts_in_the_tabs() {
         let state = with_results();
         let text = screen(&state, 120, 14);
