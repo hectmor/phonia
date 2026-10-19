@@ -85,6 +85,13 @@ tag messages, and every file in the repository. Milestone titles and the issues 
 date keep their original Spanish names on GitHub; where this repository quotes one, it translates
 the title there, not on GitHub.
 
+**Licensing.** phonia is dual-licensed, `MIT OR Apache-2.0`, the Rust ecosystem's own convention:
+MIT for brevity, Apache-2.0 for its explicit patent grant, whichever the user prefers. Unless you
+state otherwise, any contribution you submit for inclusion is licensed under both, with no
+additional terms. Before a binary package is published, `THIRD-PARTY-LICENSES.md` has to ship with
+it — nearly every dependency requires its copyright notice to be reproduced in a binary
+distribution, and that file is generated, never edited by hand.
+
 **Keeping this current.** `README.md` stays an entry point: it links to the documents under `docs/`
 and never restates a flag, a config key or a protocol field, because that is how it grew into a
 889-line manual the first time. `ROADMAP.md` is updated in the same session a part of an issue

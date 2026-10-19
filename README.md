@@ -2,7 +2,7 @@
   <h1>phonia</h1>
   <p>A terminal client for <a href="https://tidal.com">TIDAL</a>, with <strong>bit-perfect</strong> output to your DAC — your hardware, not a resampler.</p>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT_OR_Apache--2.0-blue.svg)](#license)
 ![Platform: Linux](https://img.shields.io/badge/Platform-Linux-yellow.svg)
 [![Built with Rust](https://img.shields.io/badge/Built_with-Rust-orange.svg)](https://www.rust-lang.org/)
 
@@ -244,4 +244,17 @@ own active subscription and plays only what that subscription already entitles y
 
 ## License
 
-MIT. See the [LICENSE](LICENSE) file.
+Dual-licensed under either of
+
+- MIT ([LICENSE-MIT](LICENSE-MIT))
+- Apache License 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+
+at your option — the Rust ecosystem's own convention. Take whichever suits you;
+MIT if you want the short one, Apache-2.0 if you need its explicit patent grant.
+
+Unless you state otherwise, any contribution you submit for inclusion in phonia
+is licensed under both, with no additional terms.
+
+The crates phonia is built from carry their own licenses, reproduced in
+[THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) — a generated file, not an
+edited one. None of them is copyleft over phonia as a whole.

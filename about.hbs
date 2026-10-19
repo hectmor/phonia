@@ -1,0 +1,40 @@
+# Third-party licenses
+
+phonia itself is dual-licensed, `MIT OR Apache-2.0` — see [LICENSE-MIT](LICENSE-MIT)
+and [LICENSE-APACHE](LICENSE-APACHE). This file covers the third-party crates
+compiled into its binaries, whose licenses require their copyright notices to be
+reproduced wherever those binaries are distributed.
+
+It is **generated**, never edited by hand:
+
+```sh
+cargo about generate about.hbs > THIRD-PARTY-LICENSES.md
+```
+
+Dynamically linked system libraries are not listed here, since they are not
+distributed with phonia. The one that matters is `libasound` (alsa-lib),
+LGPL-2.1-or-later: linking it dynamically satisfies the LGPL on its own, and a
+package that bundles it statically would have obligations this file does not cover.
+
+## Overview
+
+{{#each overview}}
+- [{{{name}}}](#{{id}}) — {{count}} crates
+{{/each}}
+
+{{#each licenses}}
+<a id="{{id}}"></a>
+
+## {{{name}}}
+
+Used by:
+
+{{#each used_by}}
+- [{{crate.name}} {{crate.version}}]({{#if crate.repository}}{{crate.repository}}{{else}}https://crates.io/crates/{{crate.name}}{{/if}})
+{{/each}}
+
+```
+{{{text}}}
+```
+
+{{/each}}

@@ -1,0 +1,26 @@
+# Which license each dependency is taken under, for `cargo about`.
+# Only the Linux targets phonia actually builds for: everything else is noise.
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unlicense",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "MIT-0",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    # symphonia and option-ext. Per-file copyleft: MPL-2.0 section 3.3 lets the
+    # Larger Work ship under other terms as long as the MPL files stay MPL, and
+    # phonia uses them unmodified. Patch one in-tree and that stops being true.
+    "MPL-2.0",
+]
