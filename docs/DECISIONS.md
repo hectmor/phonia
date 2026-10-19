@@ -3,8 +3,10 @@
 Why phonia is built the way it is, in the order the decisions were made. Each
 entry is short on purpose: enough for an auditor — human or model — to see
 what was chosen, what the alternative was, and why, without reading the pull
-request that implemented it. `ROADMAP.md` is the companion record of *what*
-is done; this file is only *why*.
+request that implemented it. This file is only *why*. Its companions are
+[`../ROADMAP.md`](../ROADMAP.md) for *what* is done,
+[`../CONTRIBUTING.md`](../CONTRIBUTING.md) for *how* the project is worked on,
+and the [README](../README.md) for what phonia is at all.
 
 New entries go at the bottom, dated, as decisions are made — not batched up
 afterwards. A decision that gets revisited gets a new entry saying so; old
@@ -3225,3 +3227,56 @@ Still out, for want of an album id: Home's recently played rows (`PlayedTrack` h
 track playing, from the Lyrics section.
 
 PR #167, 1 part, closes #166.
+
+## 2026-10-19 — #169: one subject per document, and a README that is an entry point
+
+The three documents had grown into each other. `README.md` was still titled
+"phonia -- phase 0" and still opened with "There's no TUI or daemon yet" — two
+phases out of date — and underneath that it had become an 889-line reference
+manual: every CLI flag, the TUI key by key, the whole config file, the IPC
+protocol, the ALSA and gapless and ReplayGain internals, plus 151 lines
+arguing for each dependency and 77 lines of working process. Nothing on the
+page told a stranger what phonia is. `ROADMAP.md`'s "Right now" section had
+grown to 816 of its 952 lines, narrating what each merged issue decided, part
+by part — the same material `DECISIONS.md` already holds, dated — and it was
+stale (it claimed #160 was in progress, three issues and a release later).
+
+The split: the README keeps only what an entry point needs (what phonia is,
+why it exists, what it does, how to install and start it, and a table pointing
+at everything else), and is forbidden from restating a flag, a config key or a
+protocol field — it links instead, which is the rule that stops it growing
+back. The manual moved out whole, not rewritten, into `docs/USAGE.md`
+(commands, the daemon, the protocol), `docs/CONFIGURATION.md` (the config file
+and where the TIDAL session lives), `docs/AUDIO.md` (bit-perfect verification,
+PipeWire, gapless, ReplayGain, play reporting, MPRIS, shared mode) and
+`CONTRIBUTING.md` (build, tests, process). Moving text verbatim rather than
+rewriting it was deliberate: a rewrite of 650 lines of hard-won detail is
+where facts get quietly lost.
+
+The dependency rationale got its own `docs/TECH_STACK.md` rather than being
+folded into this file or into `CONTRIBUTING.md`. It is genuinely *why*
+material, but it is a reference organized by dependency and revised when a
+dependency changes, whereas this file is append-only and organized by date;
+mixing the two would have forced one of them to break its own rule.
+
+The roadmap's historical narrative was **deleted**, not archived. Each of the
+sixteen issues it covered (#25/#26, #27, #28, #29, #30, #31, #120, #124, #32,
+#39, #33, #139, #144, #34, #159, #160) was checked against this file's own
+entries first; all sixteen were already here. Archiving it to a third file
+would have created a document duplicating this one that nobody would ever
+update — the failure the split is meant to end, not repeat.
+
+[SONE](https://github.com/lullabyX/sone) is credited in the README as the
+project's inspiration, at the owner's request and accurately: using it is what
+made clear that a bit-perfect Linux TIDAL client was both possible and worth
+having, and that the terminal one the owner wanted did not exist. Its README
+shape (hero, tagline, badges, media, grouped features, install, usage, tech
+stack, contributing, disclaimer, license) is the model for phonia's new one.
+
+Four screenshots and the architecture diagram, made earlier for a write-up
+about the project, were committed to `docs/media/` — a TUI that nobody can see
+running is a TUI nobody tries. The diagram's labels were translated; from this
+date on every issue, pull request, commit, tag and file is written in English,
+though the milestone titles and the issues opened before today keep their
+Spanish names on GitHub (translated only where this repository quotes them).
+(#169)
