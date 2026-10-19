@@ -64,3 +64,13 @@ jobs:
       # The device reservation and the keyring store talk to a private dbus-daemon that the tests
       # start themselves (with no service activation), so they need only the binary.
       - run: "cargo test -p phonia-core -- --ignored output::dbus:: auth::secret_service::"
+
+  licenses:
+    name: Licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Reads only the manifests, so it needs no system libraries and no build.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses

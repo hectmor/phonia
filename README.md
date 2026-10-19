@@ -254,3 +254,7 @@ MIT if you want the short one, Apache-2.0 if you need its explicit patent grant.
 
 Unless you state otherwise, any contribution you submit for inclusion in phonia
 is licensed under both, with no additional terms.
+
+The crates phonia is built from carry their own licenses, reproduced in
+[THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) — a generated file, not an
+edited one. None of them is copyleft over phonia as a whole.
