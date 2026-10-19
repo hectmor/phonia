@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 470" role="img" aria-label="The TUI and ctl talk to phoniad through phonia-ipc, NDJSON over a Unix socket; phoniad uses phonia-core, which touches ALSA, PipeWire and TIDAL">
+<title>phonia architecture</title>
+<style>
+text{font-family:"Bricolage Grotesque","Segoe UI",system-ui,sans-serif;fill:#1d1a26;font-size:13px;text-anchor:middle}
+.s{font-size:12px;fill:#625d73}.b{font-weight:700;font-size:14px}.m{font-family:"JetBrains Mono",ui-monospace,Menlo,monospace;font-size:12px}
+.n{fill:#f1eef9;stroke:#c9c2df;stroke-width:1.5}.h{fill:#e6defa;stroke:#6b3fd4;stroke-width:2}
+.a{stroke:#1d1a26;stroke-width:1.5;fill:none}.ah{fill:#1d1a26}.d{fill:#ee7a22}
+@media (prefers-color-scheme: dark){
+text{font-family:"Bricolage Grotesque","Segoe UI",system-ui,sans-serif;fill:#ebe8f3;font-size:13px;text-anchor:middle}
+.s{font-size:12px;fill:#a39db6}.b{font-weight:700;font-size:14px}.m{font-family:"JetBrains Mono",ui-monospace,Menlo,monospace;font-size:12px}
+.n{fill:#1d1a28;stroke:#3d3758;stroke-width:1.5}.h{fill:#2e2450;stroke:#a88af5;stroke-width:2}
+.a{stroke:#ebe8f3;stroke-width:1.5;fill:none}.ah{fill:#ebe8f3}.d{fill:#f59a52}
+}
+</style>
+<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path class="ah" d="M0 0L10 5L0 10z"/></marker></defs>
+<rect x="100" y="16" width="200" height="50" rx="8" class="n"/><text class="b" x="200" y="38">phonia tui</text><text class="s" x="200" y="56">crate phonia-tui</text>
+<rect x="380" y="16" width="200" height="50" rx="8" class="n"/><text class="b" x="480" y="38">phonia ctl</text><text class="s" x="480" y="56">crate phonia</text>
+<path class="a" d="M200 66V100" marker-end="url(#ar)"/><path class="a" d="M480 66V100" marker-end="url(#ar)"/>
+<rect x="60" y="100" width="560" height="56" rx="8" class="h"/><text class="b" x="340" y="123">phonia-ipc</text><text class="s" x="340" y="143">NDJSON over a Unix socket · major.minor versioned</text>
+<path class="a" d="M340 156V192" marker-end="url(#ar)"/>
+<text class="s" x="356" y="178" style="text-anchor:start">requests and events</text>
+<rect x="190" y="192" width="300" height="56" rx="8" class="n"/><text class="b" x="340" y="215">phoniad</text><text class="s" x="340" y="235">the daemon: owns the session and the output</text>
+<path class="a" d="M340 248V282" marker-end="url(#ar)"/>
+<rect x="190" y="282" width="300" height="56" rx="8" class="h"/><text class="b" x="340" y="305">phonia-core</text><text class="s" x="340" y="325">engine, queue, decoding, catalog</text>
+<path class="a" d="M240 338V392"/><path class="a" d="M340 338V392"/><path class="a" d="M440 338V392"/>
+<path class="a" d="M240 392H110V404" marker-end="url(#ar)"/><path class="a" d="M340 392V404" marker-end="url(#ar)"/><path class="a" d="M440 392H570V404" marker-end="url(#ar)"/>
+<text class="s" x="110" y="380" style="text-anchor:middle">exclusive</text><text class="s" x="350" y="380" style="text-anchor:start">shared</text><text class="s" x="570" y="380">HTTPS</text>
+<rect x="30" y="404" width="160" height="52" rx="8" class="n"/><text class="b" x="110" y="426">ALSA hw</text><text class="s" x="110" y="444">bit-perfect to the DAC</text>
+<rect x="260" y="404" width="160" height="52" rx="8" class="n"/><text class="b" x="340" y="426">PipeWire</text><text class="s" x="340" y="444">mixed with the system</text>
+<rect x="490" y="404" width="160" height="52" rx="8" class="n"/><text class="b" x="570" y="426">TIDAL</text><text class="s" x="570" y="444">API and DASH segments</text>
+</svg>

@@ -49,7 +49,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --all-targets
       # The tests that need a sound card, a sound server or the user's session are marked #[ignore]
-      # and are not run here (see "Development" in the README).
+      # and are not run here (see "Development" in CONTRIBUTING.md).
       - run: cargo test --workspace
 
   private-bus:
