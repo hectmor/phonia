@@ -12,7 +12,7 @@
 > Requires an active [TIDAL](https://tidal.com) subscription — hi-res needs whichever
 > tier TIDAL grants the `HI_RES_LOSSLESS` entitlement to. Not affiliated with TIDAL.
 
-![Searching TIDAL from the terminal](docs/media/search.gif)
+![Searching TIDAL from the terminal while a 24-bit/192 kHz track plays bit-perfect to the DAC](docs/media/search.gif)
 
 ## Why phonia
 
@@ -59,6 +59,8 @@ exists for headphones and speakers, and it says plainly that it is not bit-perfe
 - **Shared mode** through PipeWire or PulseAudio for any output at all, labelled as not
   bit-perfect everywhere it appears.
 
+![The playback bar: 24-bit/192 kHz reaching the DAC untouched, with the transport keys](docs/media/playback-bar.gif)
+
 **Interface**
 
 - A **TUI** with Home, Queue, Search, Library and Lyrics, vim-style keys throughout.
@@ -66,12 +68,14 @@ exists for headphones and speakers, and it says plainly that it is not bit-perfe
   with a half-block fallback, and nothing at all rather than something that looks wrong.
 - **The signal path, always visible**: what is playing, through what format, to which
   device, with the same verdict `phonia ctl status` prints —
-  `TIDAL hires 24-bit / 96 kHz → S24_3LE → Fosi Audio DS2 (hw:1,0)  ✔ BIT-PERFECT`.
+  `TIDAL hires 24-bit / 192 kHz → S24_3LE → Fosi Audio DS2 (hw:1,0)  ✔ BIT-PERFECT`.
 - **The terminal's own sixteen colours**, so it follows your palette; `NO_COLOR` is
   honoured.
 - **Help that cannot go stale**, generated from the same table the keys are read from.
 - It **reconnects by itself** when the daemon is not there yet or goes away, and says why
   when what answers is not a compatible daemon.
+
+![Opening an album from a search result, its cover drawn in the terminal](docs/media/album.gif)
 
 **Library**
 
@@ -85,6 +89,10 @@ exists for headphones and speakers, and it says plainly that it is not bit-perfe
 - **Synced lyrics**, following the line being sung.
 - **Recently played**, kept locally and surviving a restart.
 
+![Pressing ga on a track opens its artist: picture, bio, top tracks, albums, EPs and singles](docs/media/artist.gif)
+
+![Synced lyrics following the line being sung](docs/media/lyrics.gif)
+
 **Integrations**
 
 - **MPRIS2**: media keys, lock-screen widgets and desktop panels control phonia with no
@@ -93,15 +101,7 @@ exists for headphones and speakers, and it says plainly that it is not bit-perfe
 - **A documented IPC protocol** — newline-delimited JSON over a Unix socket, versioned
   `major.minor` — so `socat` is a working client and so is anything else you write.
 
-<table>
-  <tr>
-    <td><img src="docs/media/album.gif" alt="Opening an album from a search result"></td>
-    <td><img src="docs/media/library.gif" alt="The library: favorite albums and tracks, your playlists"></td>
-  </tr>
-  <tr>
-    <td colspan="2"><img src="docs/media/playback-bar.gif" alt="The playback bar, showing the format actually reaching the DAC"></td>
-  </tr>
-</table>
+![The Home screen: continue where you left off, recently played, favorites and playlists](docs/media/home.gif)
 
 ## Requirements
 
@@ -192,6 +192,8 @@ from the same table the keys are read from.
 | `s` / `r` / `O` | shuffle / repeat / autoplay |
 | `d`, `J` `K`, `cc` | in the queue: remove, move, clear (two presses) |
 | `?` / `q` | help / quit |
+
+![The help overlay, listing every key by group, scrolling with Ctrl-d](docs/media/help.gif)
 
 ## Architecture
 
