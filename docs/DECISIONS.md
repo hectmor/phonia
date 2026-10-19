@@ -3280,3 +3280,46 @@ date on every issue, pull request, commit, tag and file is written in English,
 though the milestone titles and the issues opened before today keep their
 Spanish names on GitHub (translated only where this repository quotes them).
 (#169)
+
+## 2026-10-19 — #173: dual `MIT OR Apache-2.0`, and third-party notices are generated
+
+A licence audit of the dependency tree prompted both halves of this. Of the
+302 third-party crates linked into the Linux binaries, none is GPL and nothing
+conflicts with MIT, but three things came out of it.
+
+**The licence is now `MIT OR Apache-2.0`**, not Apache-2.0 alone. Switching
+outright would have cost compatibility with GPL-2.0-only projects — Apache's
+patent clause is precisely what GPL-2 refuses — and imposed its `NOTICE`
+paperwork on everyone for no gain. Dual is the Rust ecosystem's own convention
+and gives each user the one they want: MIT for brevity, Apache-2.0 for the
+explicit patent grant MIT leaves out. `Copyright (c) 2026 phonia` stays the
+holder in the MIT file, as decided when the licence was first chosen.
+
+It was done now because re-licensing needs every copyright holder to agree,
+and phonia has exactly one. Today it is editing four files; after a few
+contributors it is a correspondence. The argument that it matters at all,
+for an application nobody links against, is `phonia-ipc`: that crate is built
+to be reusable, depending only on `serde` and `tokio` so any client can speak
+the protocol without ALSA or a TIDAL session. If it is ever published, dual is
+what its users will expect.
+
+**Third-party notices will be generated, never hand-written.** MIT, Apache-2.0,
+BSD and ISC all require their copyright notices to be reproduced when binaries
+are distributed, and the repository ships none. Source distribution is fine —
+the notices travel in the builder's own registry — but the packages of #43 and
+#44 are not. `cargo-about` reads the real licence texts rather than trusting
+the `license` field each crate declares, which also catches embedded data
+(fonts, Unicode tables, root certificates) carrying terms of its own.
+`cargo-deny check licenses` in CI, with an explicit allow-list, is what stops a
+GPL dependency arriving unnoticed.
+
+**Three findings worth keeping.** symphonia (12 crates) and `option-ext` are
+MPL-2.0, the only copyleft here, and it is per-file: §3.3 allows the Larger
+Work under other terms so long as the MPL files stay MPL, so using symphonia
+unmodified owes nothing. Vendoring and patching it would — not far-fetched,
+since `tidal.rs` and `dash.rs` exist because `tidlers` fell short. `self_cell`
+is `Apache-2.0 OR GPL-2.0-only`, the one crate where choosing wrong would pull
+GPL-2 in; Apache-2.0 is the choice. `libasound` is LGPL-2.1-or-later and is
+linked dynamically, which satisfies the LGPL by itself — a static binary or an
+AppImage bundling it would not, and that is a packaging decision #43 and #44
+have to state rather than discover. (#173)
