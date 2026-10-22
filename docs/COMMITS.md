@@ -44,4 +44,20 @@ Branches are deleted, local and remote, once their pull request merges.
 
 Pull requests target `develop`, never `main`. The title follows the commit format above; the
 description is concise — what changed, why, and how it was verified. Each one is assigned to
-@hectmor and carries the label and milestone of the issue it belongs to.
+@hectmor, carries the label and milestone of the issue it belongs to, and is added to the
+**phonia** GitHub Project board.
+
+The board is project 3, `phonia`. Adding to it needs the `project` scope on the `gh` token,
+granted 2026-10-22. `gh project item-add` is not usable for this — as of gh 2.87.3 it exits 0
+without adding anything — so the add goes through the API:
+
+```sh
+gh api graphql \
+  -f query='mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' \
+  -F p=PVT_kwHOBG62mM4Bj2Op \
+  -F c="$(gh api repos/hectmor/phonia/pulls/<number> --jq .node_id)"
+```
+
+Use `issues/<number>` in place of `pulls/<number>` for an issue. To check it landed, read the
+pull request's own `projectItems` (`gh pr view <number> --json projectItems`), not the board's
+item list: the board's list serves a stale count for a while after an add.
