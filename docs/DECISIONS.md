@@ -3420,3 +3420,51 @@ correct: that terminal really has the pixels to fill.
 
 The cover is unchanged at 80x24, 100x30, 120x40, 140x45 and 160x50; at 200x60
 it goes from 12 to 16 rows, and at 300x80 to 24.
+
+## 2026-10-22 — #175 part 3/4: panels measure the room they have, instead of assuming it
+
+Three things assumed more room than they had and were silently clipped. All
+three now measure the area they are actually handed. **No width breakpoints in
+this part, deliberately:** these are content problems, and measuring also works
+for a narrow panel on a wide screen, which a breakpoint on the terminal's own
+width could not. The one real breakpoint belongs to part 4, in `areas()`.
+
+**The bar's key hints were cut at 80 columns** — the size phonia is designed
+for. `KEYS` was a single 88-column string rendered without wrapping or
+truncation, so the last ten characters went over the edge: `q quit`, `? help`,
+and the flags appended after them. Four tiers now, of 88, 59, 36 and 14
+columns, chosen by the room left once the flags have theirs.
+
+**The flags win over the hints**, because the flags are state (what the volume
+is, whether shuffle is on) and the hints are a reminder of what `?` lists in
+full. Four tiers rather than three because three left a cliff from 59 straight
+to 14. Checked against the real `flags()` output at 80 columns: nothing or
+`vol 60%` keeps tier 2, `vol 60%   RG -3.2 dB` drops to tier 3, and everything
+at once — muted volume, replay gain, shuffle, repeat all, autoplay, 63 columns
+of it — leaves twelve, so the hints go to tier 4 and the flags themselves are
+truncated. At that point truncating the flags is unavoidable: they are 63 of
+the 80 columns.
+
+**The hints shrink inside the bar's last row, never beyond it.**
+`BAR_HEIGHT = 5` is the invariant from 2026-10-03 and stays untouched, with its
+own regression test still green and unedited.
+
+**The three tab rows (library, search, artist) built the same row three times**
+and all three clipped. One `tabs_line` helper now, with three tiers: names with
+counts, names alone, then `‹ selected name ›` when even that does not fit, and
+the name truncated with an ellipsis if the arrows tier is still too wide. The
+arrows tier is honest rather than lossy — `h`/`l` already move between tabs,
+which the help lists. Library's labels are the reason it is needed: about 69
+columns with their counts, against a 44-column panel at 60 terminal columns.
+
+A render test was added beyond the helper's own unit tests, because the helper
+being correct is not the thing most likely to be wrong — part 1's bug was a
+correct function handed the wrong area. `draw_tabs` is now pinned to hand it the
+panel's own width, not the terminal's.
+
+**Half a page is half the panel, not half the terminal.** `half_page` halved
+`state.size.1`, which includes the five-row bar and the panel's borders, so
+`ctrl+d` and `ctrl+u` overshot by about three rows. It uses `content_area` now,
+the function part 1 introduced. The existing test could not tell 16 rows from
+20 — it only checked where the cursor landed — so the new test pins the number
+itself.

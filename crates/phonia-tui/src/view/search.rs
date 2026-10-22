@@ -1,6 +1,7 @@
 //! The search section: the line being typed, the tabs, and the list of what was found.
 
 use super::first_visible;
+use super::{TabLabel, tabs_line};
 use crate::app::{Focus, State};
 use crate::lyrics;
 use crate::search::{Phase, Tab};
@@ -49,23 +50,16 @@ fn draw_input(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
 
 fn draw_tabs(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
     let search = &state.search;
-    let mut spans = Vec::new();
-    for tab in Tab::ALL {
-        // The counts are known once the results are in.
-        let label = if search.phase == Phase::Done {
-            format!("{} ({})", tab.title(), search.total(tab))
-        } else {
-            tab.title().to_string()
-        };
-        let style = if tab == search.tab {
-            theme.accent
-        } else {
-            theme.dim
-        };
-        spans.push(Span::styled(label, style));
-        spans.push(Span::raw("   "));
-    }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    let tabs: Vec<TabLabel> = Tab::ALL
+        .into_iter()
+        .map(|tab| TabLabel {
+            name: tab.title(),
+            // The counts are known once the results are in.
+            count: (search.phase == Phase::Done).then(|| search.total(tab)),
+            selected: tab == search.tab,
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(tabs_line(&tabs, area.width, theme)), area);
 }
 
 fn draw_list(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {

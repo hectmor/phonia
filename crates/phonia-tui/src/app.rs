@@ -162,9 +162,11 @@ impl State {
                 .is_some_and(|server| server.capabilities.iter().any(|c| c == capability))
     }
 
-    /// How many rows half a page is: half the terminal's height, and at least one.
+    /// How many rows half a page is: half the main panel's content height (not the terminal's,
+    /// which also holds the bar and the borders), and at least one.
     fn half_page(&self) -> usize {
-        usize::from(self.size.1 / 2).max(1)
+        let area = ratatui::layout::Rect::new(0, 0, self.size.0, self.size.1);
+        usize::from(crate::view::content_area(area).height / 2).max(1)
     }
 
     /// The cover (or picture) the main panel's current section wants to show: an opened album's
@@ -2810,6 +2812,15 @@ mod tests {
         update(&mut state, Msg::Resize(80, 1));
         ctrl(&mut state, 'd');
         assert_eq!(state.section(), Section::Queue, "one row at least");
+    }
+
+    #[test]
+    fn half_a_page_is_half_the_panel_not_half_the_terminal() {
+        let mut state = State::default();
+        assert_eq!(state.half_page(), 1, "no size yet: still one row");
+        // 40 rows, less the bar (5) and the panel's two borders: 33 rows of content.
+        update(&mut state, Msg::Resize(80, 40));
+        assert_eq!(state.half_page(), 16);
     }
 
     #[test]

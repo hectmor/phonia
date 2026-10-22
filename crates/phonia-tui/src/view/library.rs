@@ -2,6 +2,7 @@
 
 use super::browse::folder_entry_text;
 use super::first_visible;
+use super::{TabLabel, tabs_line};
 use crate::app::{Connection, Focus, State};
 use crate::browse::Phase;
 use crate::library::{LibraryState, LibraryTab};
@@ -9,7 +10,7 @@ use crate::theme::Theme;
 use phonia_ipc::fmt;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
 pub fn draw(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
@@ -22,29 +23,26 @@ fn draw_tabs(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
     let Some(library) = &state.library else {
         return;
     };
-    let mut spans = Vec::new();
-    for tab in LibraryTab::ALL {
-        // The counts are known once it has loaded -- the Playlists tab (the root of the folder
-        // tree) loads separately from the other two, so it has its own phase to check.
-        let ready = match tab {
-            LibraryTab::Playlists => library.playlists_phase == Phase::Done,
-            LibraryTab::FavoriteArtists => library.artists_phase == Phase::Done,
-            LibraryTab::FavoriteTracks | LibraryTab::FavoriteAlbums => library.phase == Phase::Done,
-        };
-        let label = if ready {
-            format!("{} ({})", tab.title(), library.total(tab))
-        } else {
-            tab.title().to_string()
-        };
-        let style = if tab == library.tab {
-            theme.accent
-        } else {
-            theme.dim
-        };
-        spans.push(Span::styled(label, style));
-        spans.push(Span::raw("   "));
-    }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    let tabs: Vec<TabLabel> = LibraryTab::ALL
+        .into_iter()
+        .map(|tab| {
+            // The counts are known once it has loaded -- the Playlists tab (the root of the folder
+            // tree) loads separately from the other two, so it has its own phase to check.
+            let ready = match tab {
+                LibraryTab::Playlists => library.playlists_phase == Phase::Done,
+                LibraryTab::FavoriteArtists => library.artists_phase == Phase::Done,
+                LibraryTab::FavoriteTracks | LibraryTab::FavoriteAlbums => {
+                    library.phase == Phase::Done
+                }
+            };
+            TabLabel {
+                name: tab.title(),
+                count: ready.then(|| library.total(tab)),
+                selected: tab == library.tab,
+            }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(tabs_line(&tabs, area.width, theme)), area);
 }
 
 fn draw_list(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
