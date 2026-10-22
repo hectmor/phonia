@@ -26,7 +26,7 @@ use crate::theme::Theme;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui_image::Image;
 
 /// The columns the sidebar takes: the longest section name and room for the border and the mark.
@@ -49,11 +49,24 @@ pub struct Areas {
     pub bar: Rect,
 }
 
+/// Below this many columns the sections list is not worth 14 of the few there are: the panel's
+/// own title still names the section, and the digits 1-5 still switch it (#175).
+pub(crate) const NARROW_COLUMNS: u16 = 60;
+/// The smallest screen the interface is laid out for. phonia is designed for 80x24 (#175); under
+/// this the panels would be borders around nothing, so it says so instead of drawing a ruin.
+const MIN_COLUMNS: u16 = 40;
+const MIN_ROWS: u16 = 10;
+
 pub fn areas(area: Rect) -> Areas {
     let [top, bar] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(BAR_HEIGHT)]).areas(area);
+    let sidebar_width = if area.width >= NARROW_COLUMNS {
+        SIDEBAR_WIDTH
+    } else {
+        0
+    };
     let [sidebar, main] =
-        Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)]).areas(top);
+        Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Min(0)]).areas(top);
     Areas { sidebar, main, bar }
 }
 
@@ -67,13 +80,33 @@ pub fn content_area(area: Rect) -> Rect {
 }
 
 pub fn draw(state: &State, theme: &Theme, covers: &Covers, frame: &mut Frame) {
-    let areas = areas(frame.area());
+    let screen = frame.area();
+    if screen.width < MIN_COLUMNS || screen.height < MIN_ROWS {
+        draw_too_small(theme, frame);
+        return;
+    }
+    let areas = areas(screen);
     draw_sidebar(state, theme, frame, areas.sidebar);
     draw_main(state, theme, covers, frame, areas.main);
     draw_bar(state, theme, frame, areas.bar);
     if state.help {
         help::draw(theme, state.help_scroll, frame);
     }
+}
+
+fn draw_too_small(theme: &Theme, frame: &mut Frame) {
+    let screen = frame.area();
+    let text = format!(
+        "Terminal too small.\nphonia needs {MIN_COLUMNS}x{MIN_ROWS}; this is {}x{}.\nq quit",
+        screen.width, screen.height
+    );
+    let area = help::centered(screen, 36, 5);
+    frame.render_widget(
+        Paragraph::new(text)
+            .style(theme.text)
+            .wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 /// The border of a panel: bright when it has the focus.
@@ -89,6 +122,10 @@ fn panel<'a>(title: &'a str, focused: bool, theme: &Theme) -> Block<'a> {
 }
 
 fn draw_sidebar(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
+    // Deliberate: `areas` gives the sidebar no width when the screen is narrow.
+    if area.width == 0 {
+        return;
+    }
     let focused = state.focus == Focus::Sidebar;
     let lines: Vec<Line> = Section::ALL
         .iter()
@@ -1638,12 +1675,104 @@ mod tests {
         assert_eq!(a.sidebar.height + a.bar.height, area.height);
         assert_eq!(a.bar.y, a.sidebar.height);
         assert_eq!(a.main.x, a.sidebar.right());
+        // Narrow: the sections list gives all its width to the panel.
+        let a = areas(Rect::new(0, 0, NARROW_COLUMNS - 1, 24));
+        assert_eq!(a.sidebar.width, 0);
+        assert_eq!(a.main.width, NARROW_COLUMNS - 1);
+    }
+
+    fn with_size(columns: u16, rows: u16) -> State {
+        let mut state = State::default();
+        update(&mut state, Msg::Resize(columns, rows));
+        state
+    }
+
+    #[test]
+    fn below_sixty_columns_the_sections_list_gives_its_width_to_the_panel() {
+        let screen = screen(&with_size(59, 24), 59, 24);
+        assert!(!screen.contains(" 1 Home"), "{screen}");
+        assert!(!screen.contains("phonia "), "{screen}");
+        assert_eq!(areas(Rect::new(0, 0, 59, 24)).main.width, 59);
+    }
+
+    #[test]
+    fn the_sections_list_is_still_there_at_sixty_columns() {
+        let screen = screen(&with_size(60, 24), 60, 24);
+        assert!(screen.contains(" 1 Home"), "{screen}");
+        assert_eq!(areas(Rect::new(0, 0, 60, 24)).sidebar.width, SIDEBAR_WIDTH);
+    }
+
+    #[test]
+    fn the_panel_keeps_the_focus_when_a_resize_takes_the_sections_list_away() {
+        let mut state = State {
+            focus: Focus::Sidebar,
+            ..State::default()
+        };
+        update(&mut state, Msg::Resize(50, 24));
+        assert_eq!(state.focus, Focus::Main);
+    }
+
+    #[test]
+    fn the_focus_does_not_move_onto_a_sections_list_that_is_not_there() {
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        // Control: with the list on screen, both keys do reach it.
+        let mut wide = with_size(80, 24);
+        wide.focus = Focus::Main;
+        update(&mut wide, Msg::Key(tab));
+        assert_eq!(wide.focus, Focus::Sidebar);
+        let mut narrow = with_size(50, 24);
+        narrow.focus = Focus::Main;
+        update(&mut narrow, Msg::Key(tab));
+        assert_eq!(narrow.focus, Focus::Main);
+        press(&mut narrow, 'h');
+        assert_eq!(narrow.focus, Focus::Main);
+    }
+
+    #[test]
+    fn with_no_sections_list_the_digits_still_switch_section() {
+        let mut state = with_size(50, 24);
+        press(&mut state, '3');
+        assert_eq!(state.section(), Section::Search);
+    }
+
+    #[test]
+    fn a_terminal_below_the_floor_says_so_and_still_says_how_to_quit() {
+        let mut state = with_size(30, 8);
+        state.help = true;
+        let screen = screen(&state, 30, 8);
+        assert!(screen.contains("Terminal too small."), "{screen}");
+        // It wraps at 30 columns, so the two halves are on different lines.
+        assert!(screen.contains("phonia needs 40x10;"), "{screen}");
+        assert!(screen.contains("30x8."), "{screen}");
+        assert!(screen.contains("q quit"), "{screen}");
+        assert!(!screen.contains("? help"), "{screen}");
+    }
+
+    #[test]
+    fn at_eighty_by_twenty_four_every_panel_border_and_the_quit_key_are_on_screen() {
+        let screen = screen(&with_size(80, 24), 80, 24);
+        assert_eq!(screen.matches('\u{250c}').count(), 2, "{screen}");
+        assert_eq!(screen.matches('\u{2518}').count(), 2, "{screen}");
+        assert!(screen.contains("q quit"), "{screen}");
     }
 
     #[test]
     fn terminals_too_small_for_the_layout_do_not_panic() {
         let mut state = State::default();
-        for (w, h) in [(0, 0), (1, 1), (5, 2), (13, 3), (14, 3), (20, 4)] {
+        for (w, h) in [
+            (0, 0),
+            (1, 1),
+            (5, 2),
+            (13, 3),
+            (14, 3),
+            (20, 4),
+            (39, 24),
+            (40, 24),
+            (59, 24),
+            (60, 24),
+            (80, 9),
+            (80, 10),
+        ] {
             let _ = screen(&state, w, h);
             state.help = true;
             let _ = screen(&state, w, h);

@@ -147,6 +147,12 @@ pub struct State {
 }
 
 impl State {
+    /// Whether the sections list is on screen at the size last known. A size of zero means nothing
+    /// has told us yet (a fresh `State`, before the first `Msg::Resize`): assume it is there.
+    fn sidebar_shown(&self) -> bool {
+        self.size.0 == 0 || self.size.0 >= crate::view::NARROW_COLUMNS
+    }
+
     pub fn section(&self) -> Section {
         Section::ALL[self.sidebar.selected().min(Section::ALL.len() - 1)]
     }
@@ -374,6 +380,9 @@ fn update_now(state: &mut State, msg: Msg) -> Effects {
         Msg::Key(event) => on_key(state, event),
         Msg::Resize(columns, rows) => {
             state.size = (columns, rows);
+            if !state.sidebar_shown() {
+                state.focus = Focus::Main;
+            }
             Effects::redraw()
         }
         Msg::Tick => tick(state),
@@ -1244,11 +1253,12 @@ fn apply(state: &mut State, action: Action) -> Effects {
         Action::FocusNext => {
             state.focus = match state.focus {
                 Focus::Sidebar => Focus::Main,
-                Focus::Main => Focus::Sidebar,
+                Focus::Main if state.sidebar_shown() => Focus::Sidebar,
+                Focus::Main => Focus::Main,
             }
         }
         Action::FocusSidebar => {
-            if !pop_view_if_browsing(state) {
+            if !pop_view_if_browsing(state) && state.sidebar_shown() {
                 state.focus = Focus::Sidebar;
             }
         }
