@@ -3382,3 +3382,41 @@ halfblock image of a uniform colour writes spaces with colours set.
 Parts 2 to 4 are the responsive work proper: the cover grows past its 12-row
 cap, each panel fits its hints and tab rows to the room it actually has, and a
 narrow terminal gives the sections list's columns to the panel.
+
+## 2026-10-22 — #175 part 2/4: the cover grows with the terminal, in steps
+
+The 12-row cap decided on 2026-10-01 ("a third of the header's own height,
+clamped to 6-12 rows") is gone. It meant a 60-row terminal showed the same
+cover as a 40-row one, which is the first bullet of #175. A third of the pane
+is still the rule — the list under the cover always keeps the larger share —
+but the ceiling is now the room available rather than a constant.
+
+**The size comes from a ladder, not from the exact third.** Every row up to 12,
+then 16, 20, 24 and 30. Two reasons for the shape:
+
+- *Below 12, every row*, so that no terminal which showed a cover before this
+  change gets a smaller one. This was nearly got wrong: a sparser ladder
+  (6, 7, 9, 11, 12, ...) reads better and is one line shorter, and it quietly
+  shrank the cover by a row at terminal heights 31, 32, 33, 37, 38 and 39 —
+  the heights whose third is 8 or 10. The whole range of thirds from 4 to 29
+  was checked against the old formula before this shipped, not a sample of
+  convenient sizes.
+- *Above 12, steps*, because the size is what the encoded protocol is cached
+  against: a continuous third would re-encode every three rows while a window
+  is being dragged, and on a cover that big two rows either way are invisible.
+
+**The smallest step shows whenever it fits at all**, even when it is more than
+a third of the pane. phonia is designed for 80x24, where the panel is 17 rows
+and a third is five — a strict third-of-the-pane rule would have removed the
+cover at exactly the size the project targets. Keeping it there is the owner's
+explicit decision, and the `or_else` in `cover_size` is that decision, not a
+redundant branch.
+
+**The top step is the download cap.** The requested pixel size is derived from
+the cover's width in cells, so at a typical 10x20 cell the largest request is
+600 px, which resolves to TIDAL's 640 px image (about 150 KB). The 1280 px one
+stays unreachable in practice. On a HiDPI cell it is reachable, which is
+correct: that terminal really has the pixels to fill.
+
+The cover is unchanged at 80x24, 100x30, 120x40, 140x45 and 160x50; at 200x60
+it goes from 12 to 16 rows, and at 300x80 to 24.

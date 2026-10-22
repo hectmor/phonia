@@ -99,7 +99,8 @@ track is in [AUDIO.md](AUDIO.md). Start at the [README](../README.md).
   playlist's header, an opened artist's own page, and the **Queue** section's own currently
   playing track show their cover or picture beside their text (the
   artist's tabs stay full width, under both), at whatever size fits (a third of the panel's
-  height, square in pixels, never shown at all if the panel is too small or the item has none),
+  height, in steps, so it grows with the terminal; square in pixels; never shown at all if the
+  panel is too small or the item has none),
   through a real graphics protocol (Kitty, Sixel, iTerm2) when the
   terminal has one; `halfblocks` (24-bit colour, `▀`/`▄` characters) only when the
   terminal says it has true colour, so `theme.rs`'s own 16-ANSI-colours rule is never broken by
