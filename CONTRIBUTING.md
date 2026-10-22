@@ -54,7 +54,8 @@ piece of work goes straight to implementation. Nothing is committed, pushed, or 
 request without the person's explicit go-ahead in that session — approval for one piece of work
 does not carry over to the next.
 
-**Branching and pull requests.** Every issue (or a part of one, when it is split into several) gets
+**Branching and pull requests.** The exact format of a commit message, a branch name and a
+pull request is in [docs/COMMITS.md](docs/COMMITS.md). Every issue (or a part of one, when it is split into several) gets
 its own branch off `develop`, never off another open feature branch (no stacking): a stacked branch
 can't be merged independently, and a base branch that gets deleted before retargeting orphans it.
 Pull requests target `develop`, not `main`. Each one is assigned to the project owner, carries the

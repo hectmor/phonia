@@ -220,6 +220,7 @@ on a machine with no sound card at all.
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | The whole `config.toml`, and where the TIDAL login is kept |
 | [docs/AUDIO.md](docs/AUDIO.md) | Verifying bit-perfect output, sharing the DAC, gapless, ReplayGain, MPRIS, shared mode |
 | [docs/TECH_STACK.md](docs/TECH_STACK.md) | Why every dependency is there, and what was tried and rejected |
+| [docs/COMMITS.md](docs/COMMITS.md) | The commit convention, and the branch, issue and pull request rules |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | Why phonia is built the way it is, dated, in the order the decisions were made |
 | [ROADMAP.md](ROADMAP.md) | What is done and what remains, phase by phase |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Building, testing, and the process every change goes through |
