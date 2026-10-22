@@ -3468,3 +3468,52 @@ panel's own width, not the terminal's.
 the function part 1 introduced. The existing test could not tell 16 rows from
 20 — it only checked where the cursor landed — so the new test pins the number
 itself.
+
+## 2026-10-22 — #175 part 4/4 (last): one width breakpoint, and a floor — CLOSES #175
+
+**One breakpoint, at 60 columns, and it lives in `areas()`.** Below it the
+sections list gives its 14 columns to the panel. One rather than a ladder
+because the sidebar is the only *pane* worth hiding — there are two — and every
+other narrow-width problem was a content problem, solved in part 3 by measuring
+the area each piece is handed, which also works for a narrow panel on a wide
+screen. Putting the rule in `areas()` keeps a single layout authority:
+`content_area`, `lyrics_panel_rows` and `half_page` all derive from it and
+followed automatically, no second place to keep in step.
+
+Nothing becomes unreachable when the list goes: the panel's own title still
+names the section and the digits 1-5 still switch it, which the help lists.
+
+**The focus cannot land on a list that is not drawn.** `State::sidebar_shown`
+guards three places: `Msg::Resize` forces the focus to the panel when the list
+goes away, and `FocusNext` and `FocusSidebar` refuse to move onto it. Without
+this the focus ring would point at nothing and `j`/`k` would quietly stop
+meaning "next row".
+
+A width of zero counts as "shown", and that is load-bearing rather than
+defensive: `State` derives `Default`, so the size is `(0, 0)` until the first
+`Msg::Resize`, and treating that as narrow would have moved the focus in a
+dozen tests that have nothing to do with this change.
+
+**A floor at 40x10.** Under it the panels would be borders around nothing, so
+`draw` returns a centred message — `Terminal too small.`, the size needed and
+the size there is, and `q quit`, because leaving is the only thing possible.
+The check runs before `areas()` and before the help overlay, so nothing paints
+over it. `help::centered` was reused rather than a second centring helper
+written. 40x10 sits under every size the suite renders at and above the point
+where a bordered panel stops being possible: the bar alone is five rows.
+
+**No existing test had to be changed, and that was checked rather than
+assumed.** The claim is suspicious on its face for the one part that moves the
+panel's origin, so the breakpoint was raised to 200 columns on purpose, to make
+the sidebar vanish at every size the suite renders at: nine tests failed,
+including `the_areas_do_not_overlap_and_fill_the_screen` and
+`the_sections_list_is_still_there_at_sixty_columns`. The suite does see this
+change; it passes at 60 because 60 is genuinely above the line, not because
+nothing is looking. (A first count of two failures was wrong — truncated
+output, not a weak suite.)
+
+This closes #175. What the four parts came to: a cover that was invisible at
+twelve terminal heights now appears and survives a resize; it grows past the
+12-row cap on a tall terminal; the bar's key hints and the three tab rows fit
+the room they are given instead of being clipped at 80 columns; and a narrow
+terminal reflows rather than cramming.

@@ -33,7 +33,7 @@ first tag where the tag, `main` and `Cargo.toml` agree.
 | 3 — Audio quality | [Fase 3](https://github.com/hectmor/phonia/milestone/4) | Done (#25–#31) |
 | 4 — SONE-like features | [Fase 4](https://github.com/hectmor/phonia/milestone/5) | In progress (4 of 12 issues left) |
 | 5 — Extras and packaging | [Fase 5](https://github.com/hectmor/phonia/milestone/6) | Barely started (CI only) |
-| 6 — Layout and appearance | [Fase 6](https://github.com/hectmor/phonia/milestone/7) | Done (#124, #159, #160) |
+| 6 — Layout and appearance | [Fase 6](https://github.com/hectmor/phonia/milestone/7) | Done (#124, #159, #160, #175) |
 | 7 — Home screen and discovery | [Fase 7](https://github.com/hectmor/phonia/milestone/8) | Code complete; #169 (this reorganization) open |
 
 Phases 0 and 1 delivered: TIDAL PKCE login, HiRes/DASH streaming, bit-perfect
@@ -117,14 +117,16 @@ description each and are to be scoped with Opus when their turn comes.
 | #124 | Layout and appearance modifying for better user experience | Closed (both parts) |
 | #159 | Highlight the track playing in search, and the album it belongs to | Closed (PR #161) |
 | #160 | `Enter` inside an opened album queues it at the end of the queue | Closed |
-| #175 | Making the TUI responsive: the cover and the whole interface fit the terminal | Open (parts 1-3 of 4 done) |
+| #175 | Making the TUI responsive: the cover and the whole interface fit the terminal | Closed (all four parts) |
 
 Started right after #120. The owner's concrete ask, from a screenshot of
 TIDAL's own web player: a visually bigger, bolder track title with the artist
 on its own quieter line underneath, instead of a single `Artist - Title`
 string. #159 and #160 came out of daily use rather than the phase's plan, and
 #175 reopened the phase: its first part fixed a cover that was invisible at
-twelve terminal heights.
+twelve terminal heights, and the other three made the cover grow with the
+terminal, fit the bar's hints and tab rows to the room they have, and reflow a
+narrow terminal.
 
 ### Phase 7 — Home screen and discovery
 

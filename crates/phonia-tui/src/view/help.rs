@@ -85,7 +85,7 @@ fn lines(theme: &Theme) -> Vec<Line<'static>> {
 }
 
 /// A rectangle of `width` by `height` (or as much as fits) in the middle of `area`.
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
+pub(super) fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let [row] = Layout::vertical([Constraint::Length(height.min(area.height))])
         .flex(Flex::Center)
         .areas(area);
