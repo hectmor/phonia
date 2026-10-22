@@ -2413,6 +2413,24 @@ mod tests {
     }
 
     #[test]
+    fn a_tall_terminal_draws_a_bigger_cover_than_a_short_one() {
+        let state = state_with_an_open_album();
+        let font = ratatui_image::picker::Picker::halfblocks().font_size();
+        let mut rows = Vec::new();
+        for (width, height) in [(100, 30), (200, 60)] {
+            let mut covers = Covers::new(Some(ratatui_image::picker::Picker::halfblocks()));
+            let (drawn, screen) = cover_shows_at(&state, &mut covers, width, height);
+            assert!(drawn, "no cover at {width}x{height}:\n{screen}");
+            rows.push(
+                covers::cover_size(content_area(Rect::new(0, 0, width, height)), font)
+                    .unwrap()
+                    .height,
+            );
+        }
+        assert!(rows[1] > rows[0], "{rows:?}");
+    }
+
+    #[test]
     fn a_cover_still_shows_after_the_terminal_changes_height() {
         let state = state_with_an_open_album();
         let mut covers = Covers::new(Some(ratatui_image::picker::Picker::halfblocks()));

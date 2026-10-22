@@ -286,31 +286,44 @@ fn url_at(
     phonia_ipc::image::url(kind, id, min_px)
 }
 
-/// The size, in cells, a cover should be encoded at to fit `header_area`: a third of its height,
-/// clamped to a sane range, with the width computed from the terminal's own font size so the
+/// The size, in cells, a cover should be encoded at to fit `area`: the largest tier that is at
+/// most a third of its height, with the width computed from the terminal's own font size so the
 /// image comes out square in pixels, not just in character cells (usually about twice as tall as
-/// wide). `None` if `header_area` is too small to fit even the minimum, or there is no room left
-/// for the header's own text beside it.
-pub fn cover_size(header_area: Rect, font_size: FontSize) -> Option<Size> {
+/// wide). `None` if `area` is too small for even the smallest tier, or if any cover would leave
+/// the header's own text beside it under 20 columns.
+pub fn cover_size(area: Rect, font_size: FontSize) -> Option<Size> {
+    /// Below this a cover is a smudge, so none shows instead.
     const MIN_HEIGHT: u16 = 6;
-    const MAX_HEIGHT: u16 = 12;
-    /// However narrow the cover ends up, the header's text needs at least this much room beside
-    /// it, or showing a cover here is not worth it.
+    /// However narrow the cover ends up, the header's text keeps this much room beside it.
     const MIN_TEXT_WIDTH: u16 = 20;
+    /// The heights a cover is ever drawn at: every row up to 12, which is where the old cap was,
+    /// so no terminal that showed a cover before #175 gets a smaller one now; then steps, because
+    /// above that a ladder means dragging a terminal's edge re-encodes once per step instead of
+    /// once every three rows, and two rows either way are invisible on a cover that big. The top
+    /// step is also the download cap: at a typical 10x20 cell it asks TIDAL for 640 px, never the
+    /// 1280 px one.
+    const TIERS: [u16; 11] = [6, 7, 8, 9, 10, 11, 12, 16, 20, 24, 30];
 
     if font_size.width == 0 || font_size.height == 0 {
         return None;
     }
-    let height = (header_area.height / 3).clamp(MIN_HEIGHT, MAX_HEIGHT);
-    if height > header_area.height {
-        return None;
-    }
-    let width = ((u32::from(height) * u32::from(font_size.height)) / u32::from(font_size.width))
-        .max(1) as u16;
-    if width + MIN_TEXT_WIDTH > header_area.width {
-        return None;
-    }
-    Some(Size::new(width, height))
+    // Square in pixels, not just in cells: cells are usually about twice as tall as wide.
+    let width_of = |height: u16| {
+        ((u32::from(height) * u32::from(font_size.height)) / u32::from(font_size.width)).max(1)
+            as u16
+    };
+    let fits =
+        |height: u16| height <= area.height && width_of(height) + MIN_TEXT_WIDTH <= area.width;
+    // A third of the pane, so the list under it always keeps the larger share -- except for the
+    // smallest tier, which shows whenever it fits at all: phonia is designed for 80x24, where a
+    // third is only five rows, and losing the cover there would be a regression (#175).
+    let height = TIERS
+        .iter()
+        .rev()
+        .copied()
+        .find(|&height| height <= area.height / 3 && fits(height))
+        .or_else(|| fits(MIN_HEIGHT).then_some(MIN_HEIGHT))?;
+    Some(Size::new(width_of(height), height))
 }
 
 #[cfg(test)]
@@ -555,21 +568,88 @@ mod tests {
         Picker::halfblocks().font_size()
     }
 
+    /// The pane `cover_size` is handed for a terminal of `width` x `height`.
+    fn pane(width: u16, height: u16) -> Rect {
+        crate::view::content_area(Rect::new(0, 0, width, height))
+    }
+
     #[test]
-    fn the_cover_is_a_third_of_the_height_clamped_and_square_in_pixels() {
-        let area = Rect::new(0, 0, 100, 30);
-        let cells = cover_size(area, font_size()).unwrap();
-        assert_eq!(cells.height, 10, "a third of 30");
-        // 10 rows * 20px tall / 10px wide = 20 columns, to come out square in pixels.
-        assert_eq!(cells.width, 20);
+    fn the_cover_grows_with_the_pane_in_tiers_and_stays_square_in_pixels() {
+        for ((w, h), (cw, ch)) in [
+            ((80, 24), (12, 6)),
+            ((100, 30), (14, 7)),
+            ((120, 40), (22, 11)),
+            ((140, 45), (24, 12)),
+            ((160, 50), (24, 12)),
+            ((200, 60), (32, 16)),
+            ((300, 80), (48, 24)),
+        ] {
+            let cells = cover_size(pane(w, h), font_size()).unwrap();
+            assert_eq!((cells.width, cells.height), (cw, ch), "at {w}x{h}");
+            // 10x20 px cells: twice as many columns as rows is square in pixels.
+            assert_eq!(cells.width, cells.height * 2, "at {w}x{h}");
+        }
+    }
 
-        // Clamped to at most 12 rows, however tall the area is.
-        let tall = Rect::new(0, 0, 100, 90);
-        assert_eq!(cover_size(tall, font_size()).unwrap().height, 12);
+    #[test]
+    fn the_cover_is_the_same_size_as_before_at_eighty_by_twenty_four() {
+        assert_eq!(
+            cover_size(pane(80, 24), font_size()),
+            Some(Size::new(12, 6))
+        );
+    }
 
-        // Clamped to at least 6 rows, as long as that still fits.
-        let short = Rect::new(0, 0, 100, 10);
-        assert_eq!(cover_size(short, font_size()).unwrap().height, 6);
+    #[test]
+    fn the_cover_only_takes_the_ladders_heights_between_the_smallest_and_the_top() {
+        let heights: Vec<u16> = (18..=120)
+            .map(|rows| {
+                cover_size(Rect::new(0, 0, 300, rows), font_size())
+                    .unwrap()
+                    .height
+            })
+            .collect();
+        assert!(
+            heights.windows(2).all(|pair| pair[0] <= pair[1]),
+            "{heights:?}"
+        );
+        let mut distinct = heights.clone();
+        distinct.dedup();
+        assert_eq!(distinct, [6, 7, 8, 9, 10, 11, 12, 16, 20, 24, 30]);
+        // Never more than a third of the pane, except the smallest tier.
+        for rows in 18..=120u16 {
+            let cells = cover_size(Rect::new(0, 0, 300, rows), font_size()).unwrap();
+            assert!(cells.height <= (rows / 3).max(6), "{rows} rows: {cells:?}");
+        }
+    }
+
+    #[test]
+    fn a_pane_too_short_for_the_smallest_tier_shows_no_cover_at_all() {
+        assert_eq!(cover_size(Rect::new(0, 0, 100, 5), font_size()), None);
+        assert!(cover_size(Rect::new(0, 0, 100, 6), font_size()).is_some());
+    }
+
+    #[test]
+    fn a_pane_too_narrow_leaves_the_header_its_twenty_columns() {
+        // The smallest tier is 12 columns wide: 12 + 20 = 32.
+        assert_eq!(cover_size(Rect::new(0, 0, 31, 30), font_size()), None);
+        assert_eq!(
+            cover_size(Rect::new(0, 0, 32, 30), font_size()),
+            Some(Size::new(12, 6))
+        );
+        // A narrow pane picks a smaller tier rather than none: 14 + 20 = 34 does not fit in
+        // 33 columns, 12 + 20 does, so the 7-row tier falls to the 6-row one.
+        assert_eq!(
+            cover_size(Rect::new(0, 0, 33, 30), font_size()),
+            Some(Size::new(12, 6))
+        );
+    }
+
+    #[test]
+    fn the_tallest_tier_never_asks_tidal_for_the_1280_pixel_cover() {
+        let top = cover_size(Rect::new(0, 0, 500, 300), font_size()).unwrap();
+        assert_eq!(top.height, 30);
+        let url = cover_url(&album_header(Some(COVER_ID)), top, font_size()).unwrap();
+        assert!(url.ends_with("640x640.jpg"), "{url}");
     }
 
     #[test]
