@@ -47,6 +47,17 @@ description is concise — what changed, why, and how it was verified. Each one 
 @hectmor, carries the label and milestone of the issue it belongs to, and is added to the
 **phonia** GitHub Project board.
 
-Adding to the board is the one step the `gh` CLI cannot do yet: the token in use has no
-`project` scope, so it is done by hand in the web UI until the project owner runs
-`gh auth refresh -s project` once (a CLI login cannot grant itself a new scope).
+The board is project 3, `phonia`. Adding to it needs the `project` scope on the `gh` token,
+granted 2026-10-22. `gh project item-add` is not usable for this — as of gh 2.87.3 it exits 0
+without adding anything — so the add goes through the API:
+
+```sh
+gh api graphql \
+  -f query='mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' \
+  -F p=PVT_kwHOBG62mM4Bj2Op \
+  -F c="$(gh api repos/hectmor/phonia/pulls/<number> --jq .node_id)"
+```
+
+Use `issues/<number>` in place of `pulls/<number>` for an issue. To check it landed, read the
+pull request's own `projectItems` (`gh pr view <number> --json projectItems`), not the board's
+item list: the board's list serves a stale count for a while after an add.
