@@ -44,4 +44,9 @@ Branches are deleted, local and remote, once their pull request merges.
 
 Pull requests target `develop`, never `main`. The title follows the commit format above; the
 description is concise — what changed, why, and how it was verified. Each one is assigned to
-@hectmor and carries the label and milestone of the issue it belongs to.
+@hectmor, carries the label and milestone of the issue it belongs to, and is added to the
+**phonia** GitHub Project board.
+
+Adding to the board is the one step the `gh` CLI cannot do yet: the token in use has no
+`project` scope, so it is done by hand in the web UI until the project owner runs
+`gh auth refresh -s project` once (a CLI login cannot grant itself a new scope).
