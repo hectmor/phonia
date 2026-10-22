@@ -3323,3 +3323,62 @@ GPL-2 in; Apache-2.0 is the choice. `libasound` is LGPL-2.1-or-later and is
 linked dynamically, which satisfies the LGPL by itself — a static binary or an
 AppImage bundling it would not, and that is a packaging decision #43 and #44
 have to state rather than discover. (#173)
+
+## 2026-10-22 — #175 part 1/4: the cover is sized against the very area it is drawn in
+
+The first half of making the TUI responsive turned out to be a bug fix. The
+cover was invisible at twelve terminal heights — 26, 27, 29, 30, 32, 33, 35,
+36, 38, 39, 41 and 42 — and nobody had noticed, because the heights outside
+that band are exactly the ones where the old `clamp(6, 12)` absorbed the
+mistake.
+
+**The fetch and the draw were measuring different rectangles.** The run loop
+sized the request against `areas(full).main`, the main panel's outer area,
+while every draw path sized it against `block.inner(area)`, two rows and two
+columns smaller. `cover_size` divides by three, so the two landed in different
+buckets for most heights in that band, and `ratatui_image::Image::render`
+returns **without drawing anything at all** when the encoded protocol is bigger
+than the area it is given — it does not clip, and `allow_clipping` is not set
+here. The reserved space stayed, blank.
+
+**This reverses the deliberate approximation recorded on 2026-10-01**, which
+said the panel's border was "a row and a column `cover_size` does not need to
+the pixel". That is true for choosing which TIDAL size to download, and false
+for the rectangle an all-or-nothing widget renders into. The two uses were
+conflated. There is now one `view::content_area`, which `lyrics_panel_rows`
+also uses in place of its own hand-rolled `-2`, so the change removes a
+parallel way to compute the layout rather than adding one — the worry the
+original decision was protecting against.
+
+**A resize now re-encodes, and does not re-download.** The ready cache was
+keyed by URL alone, so a resize that stayed inside the same TIDAL pixel bucket
+never re-encoded and the cached protocol, now too big for its area, stopped
+being drawn. One entry per URL carries the size it was encoded for and the
+bytes it came from, so `READY_CAPACITY` still means eight covers rather than
+eight (url, size) pairs, and a re-encode costs no second request.
+
+The two predicates are deliberately different, and the reason is worth keeping:
+**drawing asks whether what we have fits** (`protocol.size()` no bigger than
+the area), **fetching asks whether it is the size we asked for**
+(`ready.cells`). They cannot be the same test, because `Resize::Fit` never
+upscales: a protocol asked for at 40x20 cells can legitimately come back
+smaller, and comparing the encoded size against the requested one would
+re-fetch forever. The "does it fit" rule also buys something: while a resize's
+own re-encode is still running, an older, slightly small cover is drawn instead
+of leaving the space blank.
+
+A late result whose size the screen has already grown out of is now dropped, so
+a slow fetch cannot evict the one that is wanted.
+
+**Why the tests did not catch any of this.** The three cover tests asked
+whether a cell had been drawn with `style.fg.is_some() || style.bg.is_some()`,
+and `Cell::style` builds `fg: Some(self.fg)`, `bg: Some(self.bg)`
+unconditionally — so the predicate was true for every cell on a blank screen.
+All three were vacuous, with a comment asserting the opposite ("the plain
+background everywhere else never is"). They now compare against
+`Color::Reset`. Checking for a non-space glyph would not work either: a
+halfblock image of a uniform colour writes spaces with colours set.
+
+Parts 2 to 4 are the responsive work proper: the cover grows past its 12-row
+cap, each panel fits its hints and tab rows to the room it actually has, and a
+narrow terminal gives the sections list's columns to the panel.

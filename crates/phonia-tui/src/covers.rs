@@ -60,18 +60,34 @@ pub fn http_source() -> CoverSource {
 
 /// A cover fetched, decoded and encoded for the terminal, or why it could not be.
 pub enum Outcome {
-    Ready(Protocol),
+    /// The encoded cover, and the bytes it was decoded from, so a resize can encode them again
+    /// without asking the CDN twice.
+    Ready {
+        protocol: Protocol,
+        bytes: Arc<Vec<u8>>,
+    },
     Failed(String),
 }
 
-/// Fetches the image at `url`, decodes it, and encodes it with `picker` to fit `cells`. The
-/// decode and the encode are CPU-bound, so both run on a blocking thread rather than one of the
-/// async runtime's own.
-pub async fn fetch(url: String, picker: Picker, cells: Size, source: CoverSource) -> Outcome {
-    let bytes = match source(url).await {
-        Ok(bytes) => bytes,
-        Err(reason) => return Outcome::Failed(reason),
+/// Fetches the image at `url` unless `bytes` already has it (a resize re-encoding what was
+/// downloaded before), decodes it, and encodes it with `picker` to fit `cells`. The decode and
+/// the encode are CPU-bound, so both run on a blocking thread rather than one of the async
+/// runtime's own.
+pub async fn fetch(
+    url: String,
+    picker: Picker,
+    cells: Size,
+    source: CoverSource,
+    bytes: Option<Arc<Vec<u8>>>,
+) -> Outcome {
+    let bytes = match bytes {
+        Some(bytes) => bytes,
+        None => match source(url).await {
+            Ok(bytes) => Arc::new(bytes),
+            Err(reason) => return Outcome::Failed(reason),
+        },
     };
+    let kept = bytes.clone();
     let decoded = tokio::task::spawn_blocking(move || {
         let image = image::load_from_memory(&bytes).map_err(|error| error.to_string())?;
         picker
@@ -80,10 +96,21 @@ pub async fn fetch(url: String, picker: Picker, cells: Size, source: CoverSource
     })
     .await;
     match decoded {
-        Ok(Ok(protocol)) => Outcome::Ready(protocol),
+        Ok(Ok(protocol)) => Outcome::Ready {
+            protocol,
+            bytes: kept,
+        },
         Ok(Err(reason)) => Outcome::Failed(reason),
         Err(_) => Outcome::Failed("decoding was interrupted".to_string()),
     }
+}
+
+/// A cover ready to draw: what it was encoded for, the encoded protocol itself, and the bytes it
+/// was decoded from -- kept so a resize re-encodes at the new size without asking the CDN again.
+struct Ready {
+    cells: Size,
+    protocol: Protocol,
+    bytes: Arc<Vec<u8>>,
 }
 
 /// Covers ready to draw, what is being asked for right now, and what has already failed: so the
@@ -96,9 +123,11 @@ pub async fn fetch(url: String, picker: Picker, cells: Size, source: CoverSource
 /// never has to be modelled in state that must stay pure and comparable.
 pub struct Covers {
     picker: Option<Picker>,
-    in_flight: HashSet<String>,
+    /// What is being fetched now, and the size it was asked for: a resize while one runs
+    /// supersedes it rather than racing it.
+    in_flight: HashMap<String, Size>,
     failed: HashSet<String>,
-    ready: HashMap<String, Protocol>,
+    ready: HashMap<String, Ready>,
     /// The order covers were made ready in, oldest first, so the least recently finished one is
     /// what gets evicted once [`READY_CAPACITY`] is reached.
     ready_order: VecDeque<String>,
@@ -108,7 +137,7 @@ impl Covers {
     pub fn new(picker: Option<Picker>) -> Self {
         Self {
             picker,
-            in_flight: HashSet::new(),
+            in_flight: HashMap::new(),
             failed: HashSet::new(),
             ready: HashMap::new(),
             ready_order: VecDeque::new(),
@@ -124,35 +153,53 @@ impl Covers {
         self.picker.as_ref()
     }
 
-    /// The cover at `url`, ready to draw, if it has finished fetching.
-    pub fn ready(&self, url: &str) -> Option<&Protocol> {
-        self.ready.get(url)
+    /// The cover at `url` ready to draw in `cells`: the one encoded for this size, or, while a
+    /// resize's own re-encode is still running, an older one that still fits -- which draws a
+    /// little small instead of leaving the reserved space blank. A protocol *bigger* than the
+    /// area is no use: `Image` silently draws nothing then.
+    pub fn ready(&self, url: &str, cells: Size) -> Option<&Protocol> {
+        let ready = self.ready.get(url)?;
+        let encoded = ready.protocol.size();
+        (encoded.width <= cells.width && encoded.height <= cells.height).then_some(&ready.protocol)
     }
 
-    /// Whether `url` is worth asking for: not already in flight, not already failed, and not
-    /// already ready.
-    fn should_fetch(&self, url: &str) -> bool {
-        !self.in_flight.contains(url) && !self.failed.contains(url) && !self.ready.contains_key(url)
+    /// The downloaded bytes of `url`, if still kept, to encode again at another size.
+    pub fn bytes(&self, url: &str) -> Option<Arc<Vec<u8>>> {
+        Some(self.ready.get(url)?.bytes.clone())
     }
 
-    /// Marks `url` as being fetched now, if it is worth fetching; `false` (and no change) if it
-    /// was already in flight, had already failed, or is already ready, so the caller does not ask
-    /// again.
-    pub fn start(&mut self, url: &str) -> bool {
-        if !self.should_fetch(url) {
+    /// Whether `url` is worth asking for *at this size*: not that very fetch already in flight,
+    /// not failed, and not already encoded for exactly these cells. (Not by `protocol.size()`:
+    /// `Resize::Fit` never upscales, so an encode can come out smaller than it was asked for.)
+    fn should_fetch(&self, url: &str, cells: Size) -> bool {
+        self.in_flight.get(url) != Some(&cells)
+            && !self.failed.contains(url)
+            && self.ready.get(url).map(|ready| ready.cells) != Some(cells)
+    }
+
+    /// Marks `url` at `cells` as being fetched now, if it is worth fetching; `false` (and no
+    /// change) otherwise, so the caller does not ask again. A fetch already running at another
+    /// size is superseded.
+    pub fn start(&mut self, url: &str, cells: Size) -> bool {
+        if !self.should_fetch(url, cells) {
             return false;
         }
-        self.in_flight.insert(url.to_string());
+        self.in_flight.insert(url.to_string(), cells);
         true
     }
 
-    /// The fetch for `url` is done: no longer in flight, and, depending on how it went, remembered
-    /// as ready to draw (evicting the oldest ready cover first, if that means there are now too
-    /// many) or as failed.
-    pub fn finish(&mut self, url: String, outcome: Outcome) {
+    /// The fetch for `url` at `cells` is done: no longer in flight, and, depending on how it went,
+    /// remembered as ready to draw (evicting the oldest ready cover first, if that means there are
+    /// now too many) or as failed.
+    pub fn finish(&mut self, url: String, cells: Size, outcome: Outcome) {
+        // Superseded while it ran: the screen was resized and a fetch for the size it wants now is
+        // on its way. Dropping this keeps a slow old result from evicting the new one.
+        if self.in_flight.get(&url) != Some(&cells) {
+            return;
+        }
         self.in_flight.remove(&url);
         match outcome {
-            Outcome::Ready(protocol) => {
+            Outcome::Ready { protocol, bytes } => {
                 if !self.ready.contains_key(&url) {
                     self.ready_order.push_back(url.clone());
                     if self.ready_order.len() > READY_CAPACITY
@@ -161,7 +208,14 @@ impl Covers {
                         self.ready.remove(&oldest);
                     }
                 }
-                self.ready.insert(url, protocol);
+                self.ready.insert(
+                    url,
+                    Ready {
+                        cells,
+                        protocol,
+                        bytes,
+                    },
+                );
             }
             Outcome::Failed(_) => {
                 self.failed.insert(url);
@@ -291,9 +345,10 @@ mod tests {
             picker,
             Size::new(8, 4),
             fake_source(Ok(a_jpeg())),
+            None,
         )
         .await;
-        assert!(matches!(outcome, Outcome::Ready(_)));
+        assert!(matches!(outcome, Outcome::Ready { .. }));
     }
 
     #[tokio::test]
@@ -303,6 +358,7 @@ mod tests {
             Picker::halfblocks(),
             Size::new(8, 4),
             fake_source(Err("connection refused".into())),
+            None,
         )
         .await;
         assert!(matches!(outcome, Outcome::Failed(reason) if reason.contains("refused")));
@@ -315,9 +371,19 @@ mod tests {
             Picker::halfblocks(),
             Size::new(8, 4),
             fake_source(Ok(b"not a jpeg".to_vec())),
+            None,
         )
         .await;
         assert!(matches!(outcome, Outcome::Failed(_)));
+    }
+
+    const C: Size = Size::new(8, 4);
+
+    fn ready_outcome() -> Outcome {
+        Outcome::Ready {
+            protocol: a_tiny_protocol(),
+            bytes: Arc::new(vec![]),
+        }
     }
 
     fn a_tiny_protocol() -> Protocol {
@@ -333,30 +399,30 @@ mod tests {
     #[test]
     fn the_same_url_is_not_fetched_twice_at_once() {
         let mut covers = Covers::disabled();
-        assert!(covers.start("a"));
-        assert!(!covers.start("a"), "already in flight");
-        assert!(covers.start("b"), "a different url is unaffected");
+        assert!(covers.start("a", C));
+        assert!(!covers.start("a", C), "already in flight");
+        assert!(covers.start("b", C), "a different url is unaffected");
     }
 
     #[test]
     fn a_failed_cover_is_not_retried_but_stays_fetchable_elsewhere() {
         let mut covers = Covers::disabled();
-        covers.start("a");
-        covers.finish("a".into(), Outcome::Failed("404".into()));
-        assert!(!covers.start("a"), "a failure is remembered");
-        assert!(covers.ready("a").is_none());
+        covers.start("a", C);
+        covers.finish("a".into(), C, Outcome::Failed("404".into()));
+        assert!(!covers.start("a", C), "a failure is remembered");
+        assert!(covers.ready("a", C).is_none());
     }
 
     #[test]
     fn a_ready_cover_is_not_fetched_again_but_can_be_looked_up() {
         let mut covers = Covers::disabled();
-        covers.start("b");
-        covers.finish("b".into(), Outcome::Ready(a_tiny_protocol()));
+        covers.start("b", C);
+        covers.finish("b".into(), C, ready_outcome());
         assert!(
-            !covers.start("b"),
+            !covers.start("b", C),
             "already ready: fetching again would be wasted"
         );
-        assert!(covers.ready("b").is_some());
+        assert!(covers.ready("b", C).is_some());
     }
 
     #[test]
@@ -364,14 +430,91 @@ mod tests {
         let mut covers = Covers::disabled();
         for n in 0..READY_CAPACITY + 1 {
             let url = n.to_string();
-            covers.start(&url);
-            covers.finish(url, Outcome::Ready(a_tiny_protocol()));
+            covers.start(&url, C);
+            covers.finish(url, C, ready_outcome());
         }
         assert!(
-            covers.ready("0").is_none(),
+            covers.ready("0", C).is_none(),
             "the oldest one fell out once one too many arrived"
         );
-        assert!(covers.ready(&READY_CAPACITY.to_string()).is_some());
+        assert!(covers.ready(&READY_CAPACITY.to_string(), C).is_some());
+    }
+
+    #[tokio::test]
+    async fn a_resize_to_a_new_cell_size_re_encodes_without_fetching_again() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let bytes = a_jpeg();
+        let source: CoverSource = Arc::new(move |_url: String| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            let bytes = bytes.clone();
+            Box::pin(async move { Ok(bytes) })
+        });
+        let picker = Picker::halfblocks();
+        let url = "http://example/cover.jpg";
+        let (small, large) = (Size::new(8, 4), Size::new(16, 8));
+
+        let mut covers = Covers::new(Some(picker.clone()));
+        assert!(covers.start(url, small));
+        let outcome = fetch(url.into(), picker.clone(), small, source.clone(), None).await;
+        covers.finish(url.into(), small, outcome);
+
+        // The same url at a new size is wanted again, but its bytes are already held.
+        assert!(covers.start(url, large));
+        let held = covers.bytes(url);
+        assert!(held.is_some(), "the bytes were kept");
+        let outcome = fetch(url.into(), picker, large, source, held).await;
+        covers.finish(url.into(), large, outcome);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "downloaded exactly once");
+        assert!(covers.ready(url, large).is_some());
+    }
+
+    #[test]
+    fn a_cover_still_encoded_for_a_smaller_size_is_drawn_rather_than_leaving_the_space_blank() {
+        let mut covers = Covers::disabled();
+        covers.start("a", C);
+        covers.finish("a".into(), C, ready_outcome()); // a 1x1 protocol
+        let bigger = Size::new(C.width + 4, C.height + 2);
+        assert!(
+            covers.ready("a", bigger).is_some(),
+            "still fits: drawn small"
+        );
+        assert!(covers.start("a", bigger), "but a better fit is asked for");
+        assert!(covers.ready("a", bigger).is_some(), "and kept meanwhile");
+        assert!(
+            covers.ready("a", Size::new(0, 0)).is_none(),
+            "one bigger than its area draws nothing, so it is not offered"
+        );
+    }
+
+    #[test]
+    fn a_result_for_a_size_the_screen_has_already_grown_out_of_is_dropped() {
+        let mut covers = Covers::disabled();
+        let newer = Size::new(16, 8);
+        covers.start("a", C);
+        covers.start("a", newer); // superseded
+        covers.finish("a".into(), C, ready_outcome());
+        assert!(
+            covers.ready("a", newer).is_none(),
+            "the stale result is gone"
+        );
+        assert!(
+            !covers.start("a", newer),
+            "and the newer fetch is still the one in flight"
+        );
+        covers.finish("a".into(), newer, ready_outcome());
+        assert!(!covers.start("a", newer), "now ready at exactly that size");
+    }
+
+    #[test]
+    fn a_cover_already_ready_at_this_very_size_is_not_fetched_again() {
+        let mut covers = Covers::disabled();
+        covers.start("a", C);
+        covers.finish("a".into(), C, ready_outcome());
+        assert!(!covers.start("a", C));
+        assert!(covers.start("a", Size::new(9, 4)), "another size is");
     }
 
     /// A one-request server on a local port: answers with `status` and `body`. Mirrors

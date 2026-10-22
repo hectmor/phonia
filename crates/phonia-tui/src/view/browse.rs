@@ -56,7 +56,7 @@ fn draw_track_list(
             let [cover_area, header_area] =
                 Layout::horizontal([Constraint::Length(cells.width), Constraint::Min(0)])
                     .areas(top);
-            (Some((cover_area, url)), header_area, list_area)
+            (Some((cover_area, url, cells)), header_area, list_area)
         }
         None => {
             let [header_area, list_area] = Layout::vertical([
@@ -67,8 +67,8 @@ fn draw_track_list(
             (None, header_area, list_area)
         }
     };
-    if let Some((cover_area, url)) = &cover_area
-        && let Some(protocol) = covers.ready(url)
+    if let Some((cover_area, url, cells)) = &cover_area
+        && let Some(protocol) = covers.ready(url, *cells)
     {
         frame.render_widget(Image::new(protocol), *cover_area);
     }
@@ -247,7 +247,12 @@ fn draw_artist(
             let [cover_area, header_area] =
                 Layout::horizontal([Constraint::Length(cells.width), Constraint::Min(0)])
                     .areas(top);
-            (Some((cover_area, url)), header_area, tabs_area, list_area)
+            (
+                Some((cover_area, url, cells)),
+                header_area,
+                tabs_area,
+                list_area,
+            )
         }
         None => {
             let [header_area, tabs_area, list_area] = Layout::vertical([
@@ -259,8 +264,8 @@ fn draw_artist(
             (None, header_area, tabs_area, list_area)
         }
     };
-    if let Some((cover_area, url)) = &cover_area
-        && let Some(protocol) = covers.ready(url)
+    if let Some((cover_area, url, cells)) = &cover_area
+        && let Some(protocol) = covers.ready(url, *cells)
     {
         frame.render_widget(Image::new(protocol), *cover_area);
     }

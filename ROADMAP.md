@@ -117,11 +117,14 @@ description each and are to be scoped with Opus when their turn comes.
 | #124 | Layout and appearance modifying for better user experience | Closed (both parts) |
 | #159 | Highlight the track playing in search, and the album it belongs to | Closed (PR #161) |
 | #160 | `Enter` inside an opened album queues it at the end of the queue | Closed |
+| #175 | Making the TUI responsive: the cover and the whole interface fit the terminal | Open (part 1 of 4 done) |
 
 Started right after #120. The owner's concrete ask, from a screenshot of
 TIDAL's own web player: a visually bigger, bolder track title with the artist
 on its own quieter line underneath, instead of a single `Artist - Title`
-string. #159 and #160 came out of daily use rather than the phase's plan.
+string. #159 and #160 came out of daily use rather than the phase's plan, and
+#175 reopened the phase: its first part fixed a cover that was invisible at
+twelve terminal heights.
 
 ### Phase 7 — Home screen and discovery
 
