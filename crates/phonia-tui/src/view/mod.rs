@@ -17,8 +17,7 @@ pub fn help_overflow(rows: u16) -> usize {
 /// scroll (the notice and the footer, when either shows, take their own row out of this in turn --
 /// see `lyrics::body_rows`).
 pub fn lyrics_panel_rows(state: &State) -> usize {
-    let area = areas(Rect::new(0, 0, state.size.0, state.size.1)).main;
-    usize::from(area.height.saturating_sub(2))
+    usize::from(content_area(Rect::new(0, 0, state.size.0, state.size.1)).height)
 }
 
 use crate::app::{Connection, Focus, Section, State, seconds_left};
@@ -56,6 +55,15 @@ pub fn areas(area: Rect) -> Areas {
     let [sidebar, main] =
         Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)]).areas(top);
     Areas { sidebar, main, bar }
+}
+
+/// The area a panel's content is laid out in: the main panel, inside its own border. The run
+/// loop's cover fetching and every draw path must agree on this to the cell -- `Image` draws
+/// nothing at all, rather than clipping, when the encoded protocol is larger than the area it is
+/// given. That reverses the deliberate approximation recorded in `docs/DECISIONS.md` on
+/// 2026-10-01: the border is load-bearing, not a rounding error.
+pub fn content_area(area: Rect) -> Rect {
+    Block::bordered().inner(areas(area).main)
 }
 
 pub fn draw(state: &State, theme: &Theme, covers: &Covers, frame: &mut Frame) {
@@ -223,7 +231,7 @@ fn draw_queue(
             let [cover_area, header_area] =
                 Layout::horizontal([Constraint::Length(cells.width), Constraint::Min(0)])
                     .areas(top);
-            (Some((cover_area, url)), Some(header_area), list_area)
+            (Some((cover_area, url, cells)), Some(header_area), list_area)
         }
         // No image to size the header by (no picker, no cover, or not enough room for one), but
         // there is still a track to name: reserved on "is one playing", never on whether a cover
@@ -236,8 +244,8 @@ fn draw_queue(
         }
         None => (None, None, area),
     };
-    if let Some((cover_area, url)) = &cover_area
-        && let Some(protocol) = covers.ready(url)
+    if let Some((cover_area, url, cells)) = &cover_area
+        && let Some(protocol) = covers.ready(url, *cells)
     {
         frame.render_widget(Image::new(protocol), *cover_area);
     }
@@ -2248,7 +2256,7 @@ mod tests {
         let url = covers::cover_url(&Header::Album(album), cells, picker.font_size()).unwrap();
 
         let mut covers = Covers::new(Some(picker.clone()));
-        covers.start(&url);
+        covers.start(&url, cells);
         let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
             u32::from(cells.width) * 10,
             u32::from(cells.height) * 20,
@@ -2257,7 +2265,14 @@ mod tests {
         let protocol = picker
             .new_protocol(image, cells, Resize::default())
             .unwrap();
-        covers.finish(url, Outcome::Ready(protocol));
+        covers.finish(
+            url,
+            cells,
+            Outcome::Ready {
+                protocol,
+                bytes: std::sync::Arc::new(vec![]),
+            },
+        );
 
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
@@ -2265,12 +2280,12 @@ mod tests {
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
 
-        // Somewhere in the reserved area, a cell's style was touched: the plain background
-        // everywhere else never is.
+        // Somewhere in the reserved area a cell carries a real color. Not `style().fg.is_some()`,
+        // which `Cell::style` makes true for every cell, drawn or blank (#175).
         let drawn = (inner.y..inner.y + cells.height).any(|y| {
             (inner.x..inner.x + cells.width).any(|x| {
-                let style = buffer[(x, y)].style();
-                style.fg.is_some() || style.bg.is_some()
+                let cell = &buffer[(x, y)];
+                cell.fg != ratatui::style::Color::Reset || cell.bg != ratatui::style::Color::Reset
             })
         });
         assert!(drawn, "no cover pixels found in the reserved area");
@@ -2285,6 +2300,128 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("Korn - Issues"), "{text}");
+    }
+
+    /// An album with a cover id open on the Search section, for the cover tests below.
+    fn state_with_an_open_album() -> State {
+        use crate::browse::{Header, TrackListView, View};
+        let mut state = State::default();
+        press(&mut state, '3'); // Search
+        state.search_views.push(
+            0,
+            View::TrackList(TrackListView::new(
+                phonia_ipc::CatalogRef::Album { id: "9".into() },
+                Header::Album(phonia_ipc::AlbumSummary {
+                    id: "9".into(),
+                    title: "Issues".into(),
+                    version: None,
+                    artists: vec![],
+                    release_date: None,
+                    track_count: None,
+                    duration_ms: None,
+                    explicit: false,
+                    quality: None,
+                    kind: None,
+                    copyright: None,
+                    cover: Some("3c6247c7-d0d7-4978-91b1-0bddc13f45b5".into()),
+                }),
+            )),
+        );
+        state
+    }
+
+    /// What the run loop does for a screen of `width` x `height`, minus the network: asks for the
+    /// cover the way `maybe_fetch_cover` does, encodes a synthetic image for it, then draws, and
+    /// reports whether any cell of the cover's rectangle was touched. The screen is returned too,
+    /// for the failure message.
+    fn cover_shows_at(
+        state: &State,
+        covers: &mut Covers,
+        width: u16,
+        height: u16,
+    ) -> (bool, String) {
+        let full = Rect::new(0, 0, width, height);
+        // What the draw computes, spelled out rather than shared: the fetch must match it.
+        let inner = panel("x", false, &Theme::new(false)).inner(areas(full).main);
+        let wanted = covers::wanted(state, covers, content_area(full)).expect("a cover is wanted");
+        if covers.start(&wanted.url, wanted.cells) {
+            let picker = covers.picker().unwrap().clone();
+            let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+                u32::from(wanted.cells.width) * 10,
+                u32::from(wanted.cells.height) * 20,
+                image::Rgb([220, 20, 20]),
+            ));
+            let protocol = picker
+                .new_protocol(image, wanted.cells, ratatui_image::Resize::default())
+                .unwrap();
+            covers.finish(
+                wanted.url,
+                wanted.cells,
+                covers::Outcome::Ready {
+                    protocol,
+                    bytes: std::sync::Arc::new(vec![]),
+                },
+            );
+        }
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| draw(state, &Theme::new(false), covers, frame))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        // The rectangle the draw reserved for the cover (from its own measure, not the fetch's),
+        // and a drawn cover colours its cells; a blank one keeps the terminal's own `Reset`.
+        let reserved = covers::cover_size(inner, covers.picker().unwrap().font_size()).unwrap();
+        let drawn = (inner.y..inner.y + reserved.height).any(|y| {
+            (inner.x..inner.x + reserved.width).any(|x| {
+                let cell = &buffer[(x, y)];
+                cell.fg != ratatui::style::Color::Reset || cell.bg != ratatui::style::Color::Reset
+            })
+        });
+        (drawn, screen_with(state, covers, width, height))
+    }
+
+    #[test]
+    fn the_cover_is_sized_against_the_very_area_the_header_draws_in() {
+        let theme = Theme::new(false);
+        for section in Section::ALL {
+            let mut state = State::default();
+            state
+                .sidebar
+                .select(Section::ALL.iter().position(|s| *s == section).unwrap(), 5);
+            assert_eq!(state.section(), section);
+            for width in 20..=200 {
+                for height in 10..=80 {
+                    let full = Rect::new(0, 0, width, height);
+                    assert_eq!(
+                        content_area(full),
+                        panel("x", false, &theme).inner(areas(full).main),
+                        "{section:?} at {width}x{height}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_cover_shows_at_every_height_the_old_approximation_broke() {
+        let state = state_with_an_open_album();
+        for height in [26, 27, 29, 30, 32, 33, 35, 36, 38, 39, 41, 42] {
+            let mut covers = Covers::new(Some(ratatui_image::picker::Picker::halfblocks()));
+            let (drawn, screen) = cover_shows_at(&state, &mut covers, 100, height);
+            assert!(drawn, "no cover at height {height}:\n{screen}");
+        }
+    }
+
+    #[test]
+    fn a_cover_still_shows_after_the_terminal_changes_height() {
+        let state = state_with_an_open_album();
+        let mut covers = Covers::new(Some(ratatui_image::picker::Picker::halfblocks()));
+        let (drawn, screen) = cover_shows_at(&state, &mut covers, 100, 30);
+        assert!(drawn, "{screen}");
+        let (drawn, screen) = cover_shows_at(&state, &mut covers, 100, 40);
+        assert!(drawn, "{screen}");
+        let (drawn, screen) = cover_shows_at(&state, &mut covers, 100, 30);
+        assert!(drawn, "{screen}");
     }
 
     #[test]
@@ -2558,7 +2695,7 @@ mod tests {
         .unwrap();
 
         let mut covers = Covers::new(Some(picker.clone()));
-        covers.start(&url);
+        covers.start(&url, cells);
         let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
             u32::from(cells.width) * 10,
             u32::from(cells.height) * 20,
@@ -2567,7 +2704,14 @@ mod tests {
         let protocol = picker
             .new_protocol(image, cells, Resize::default())
             .unwrap();
-        covers.finish(url, Outcome::Ready(protocol));
+        covers.finish(
+            url,
+            cells,
+            Outcome::Ready {
+                protocol,
+                bytes: std::sync::Arc::new(vec![]),
+            },
+        );
 
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
@@ -2577,8 +2721,8 @@ mod tests {
 
         let drawn = (inner.y..inner.y + cells.height).any(|y| {
             (inner.x..inner.x + cells.width).any(|x| {
-                let style = buffer[(x, y)].style();
-                style.fg.is_some() || style.bg.is_some()
+                let cell = &buffer[(x, y)];
+                cell.fg != ratatui::style::Color::Reset || cell.bg != ratatui::style::Color::Reset
             })
         });
         assert!(drawn, "no picture pixels found in the reserved area");
@@ -2665,7 +2809,7 @@ mod tests {
         let url = covers::track_cover_url(Some(cover_id), cells, picker.font_size()).unwrap();
 
         let mut covers = Covers::new(Some(picker.clone()));
-        covers.start(&url);
+        covers.start(&url, cells);
         let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
             u32::from(cells.width) * 10,
             u32::from(cells.height) * 20,
@@ -2674,7 +2818,14 @@ mod tests {
         let protocol = picker
             .new_protocol(image, cells, Resize::default())
             .unwrap();
-        covers.finish(url, Outcome::Ready(protocol));
+        covers.finish(
+            url,
+            cells,
+            Outcome::Ready {
+                protocol,
+                bytes: std::sync::Arc::new(vec![]),
+            },
+        );
 
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
@@ -2684,8 +2835,8 @@ mod tests {
 
         let drawn = (inner.y..inner.y + cells.height).any(|y| {
             (inner.x..inner.x + cells.width).any(|x| {
-                let style = buffer[(x, y)].style();
-                style.fg.is_some() || style.bg.is_some()
+                let cell = &buffer[(x, y)];
+                cell.fg != ratatui::style::Color::Reset || cell.bg != ratatui::style::Color::Reset
             })
         });
         assert!(drawn, "no cover pixels found in the reserved area");
