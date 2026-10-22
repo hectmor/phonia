@@ -1,6 +1,7 @@
 //! An album, a playlist or an artist, opened to see its music.
 
 use super::first_visible;
+use super::{TabLabel, tabs_line};
 use crate::app::{Focus, State};
 use crate::browse::{ArtistTab, ArtistView, FolderView, Header, Phase, Stack, TrackListView, View};
 use crate::covers::{self, Covers};
@@ -9,7 +10,7 @@ use crate::theme::Theme;
 use phonia_ipc::{AlbumSummary, FolderEntry, TrackSummary, fmt};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui_image::Image;
 
@@ -271,7 +272,10 @@ fn draw_artist(
     }
     frame.render_widget(Paragraph::new(header), header_area);
     if view.phase != Phase::Loading {
-        frame.render_widget(Paragraph::new(tabs_line(view, theme)), tabs_area);
+        frame.render_widget(
+            Paragraph::new(artist_tabs(view, tabs_area.width, theme)),
+            tabs_area,
+        );
     }
     let focused = state.focus == Focus::Main;
     let lines = match &view.phase {
@@ -414,24 +418,18 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-/// The three tabs, with a count once they have loaded.
-fn tabs_line<'a>(view: &ArtistView, theme: &Theme) -> Line<'a> {
-    let mut spans = Vec::new();
-    for tab in ArtistTab::ALL {
-        let count = match tab {
+/// The artist's three tabs, with a count once they have loaded.
+fn artist_tabs<'a>(view: &ArtistView, width: u16, theme: &Theme) -> Line<'a> {
+    let tabs = ArtistTab::ALL.map(|tab| TabLabel {
+        name: tab.title(),
+        count: Some(match tab {
             ArtistTab::TopTracks => view.top_tracks.total,
             ArtistTab::Albums => view.albums.total,
             ArtistTab::Singles => view.singles.total,
-        };
-        let style = if tab == view.tab {
-            theme.accent
-        } else {
-            theme.dim
-        };
-        spans.push(Span::styled(format!("{} ({count})", tab.title()), style));
-        spans.push(Span::raw("   "));
-    }
-    Line::from(spans)
+        }),
+        selected: tab == view.tab,
+    });
+    tabs_line(&tabs, width, theme)
 }
 
 #[cfg(test)]

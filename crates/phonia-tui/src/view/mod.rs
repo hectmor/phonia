@@ -569,8 +569,83 @@ fn state_word(state: phonia_ipc::State) -> &'static str {
     }
 }
 
-const KEYS: &str =
-    "Space pause  n/p skip  </> seek  +/- volume  m mute  s shuffle  r repeat  ? help  q quit";
+/// The key hints, widest first. The bar's last row is pinned (`BAR_HEIGHT`), so the hints shrink
+/// to share it with the flags rather than being cut off mid-word -- `? help  q quit` survives
+/// every tier (#175).
+const KEYS: [&str; 4] = [
+    "Space pause  n/p skip  </> seek  +/- volume  m mute  s shuffle  r repeat  ? help  q quit",
+    "Space pause  n/p skip  </> seek  +/- volume  ? help  q quit",
+    "Space  n/p  </>  +/-  ? help  q quit",
+    "? help  q quit",
+];
+
+/// The widest tier of hints that still leaves `flags_width` columns for the flags beside them.
+fn hints(width: u16, flags_width: usize) -> &'static str {
+    let room = usize::from(width).saturating_sub(flags_width);
+    KEYS.iter()
+        .copied()
+        .find(|keys| keys.chars().count() <= room)
+        .unwrap_or(KEYS[KEYS.len() - 1])
+}
+
+/// One tab of a tab row: its name, how many items it holds once that is known, and whether it is
+/// the one being shown.
+pub(super) struct TabLabel<'a> {
+    pub name: &'a str,
+    pub count: Option<u64>,
+    pub selected: bool,
+}
+
+/// The tab row that fits `width`: every name with its count, the names alone when those do not
+/// fit, or just the one being shown, between arrows, when even that is too wide. A tab row is
+/// never silently clipped, and the selected tab is always legible (#175).
+pub(super) fn tabs_line<'a>(tabs: &[TabLabel<'_>], width: u16, theme: &Theme) -> Line<'a> {
+    const SEP: &str = "   ";
+    let width = usize::from(width);
+    let text = |tab: &TabLabel, counts: bool| match tab.count {
+        Some(count) if counts => format!("{} ({count})", tab.name),
+        _ => tab.name.to_string(),
+    };
+    let row_width = |counts: bool| {
+        let labels: usize = tabs
+            .iter()
+            .map(|tab| text(tab, counts).chars().count())
+            .sum();
+        labels + SEP.len() * tabs.len().saturating_sub(1)
+    };
+    for counts in [true, false] {
+        if row_width(counts) <= width {
+            let mut spans = Vec::new();
+            for tab in tabs {
+                if !spans.is_empty() {
+                    spans.push(Span::raw(SEP));
+                }
+                let style = if tab.selected {
+                    theme.accent
+                } else {
+                    theme.dim
+                };
+                spans.push(Span::styled(text(tab, counts), style));
+            }
+            return Line::from(spans);
+        }
+    }
+    let Some(tab) = tabs.iter().find(|tab| tab.selected) else {
+        return Line::default();
+    };
+    // The arrows and their spaces take 4 columns.
+    let inner = width.saturating_sub(4);
+    let with_count = text(tab, true);
+    let label = if with_count.chars().count() <= inner {
+        with_count
+    } else {
+        truncate(tab.name, inner)
+    };
+    Line::from(vec![Span::styled(
+        format!("\u{2039} {label} \u{203a}"),
+        theme.accent,
+    )])
+}
 
 fn draw_bar(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
     let lines = match &state.connection {
@@ -589,20 +664,24 @@ fn draw_bar(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
                 _ => String::new(),
             };
             let flags = flags(state);
+            let suffix = if flags.is_empty() {
+                String::new()
+            } else {
+                format!("   | {flags}")
+            };
+            let keys = hints(area.width, suffix.chars().count());
+            // Only the narrowest tier can still overflow; the flags give way, not the hints.
+            let suffix = truncate(
+                &suffix,
+                usize::from(area.width).saturating_sub(keys.chars().count()),
+            );
             vec![
                 connected_line(state, theme),
                 signal_line(state, theme, area.width),
                 Line::styled(progress, theme.accent),
                 Line::from(vec![
-                    Span::styled(KEYS, theme.dim),
-                    Span::styled(
-                        if flags.is_empty() {
-                            String::new()
-                        } else {
-                            format!("   | {flags}")
-                        },
-                        theme.text,
-                    ),
+                    Span::styled(keys, theme.dim),
+                    Span::styled(suffix, theme.text),
                 ]),
             ]
         }
@@ -1287,6 +1366,86 @@ mod tests {
     }
 
     #[test]
+    fn the_help_and_quit_keys_are_visible_at_eighty_columns() {
+        let screen = screen(&connected(), 80, 24);
+        assert!(screen.contains("? help  q quit"), "{screen}");
+    }
+
+    #[test]
+    fn every_tier_of_hints_keeps_the_quit_key() {
+        for width in 0..=160 {
+            for flags_width in 0..=80 {
+                let keys = hints(width, flags_width);
+                assert!(keys.contains("q quit"), "{width} {flags_width}: {keys}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_hints_shrink_before_the_flags_do() {
+        use phonia_ipc::{Queue, Repeat, Volume};
+        let mut state = connected();
+        state.status.as_mut().unwrap().volume = Some(Volume {
+            percent: 100,
+            muted: true,
+        });
+        state.queue = Some(Queue {
+            shuffle: true,
+            repeat: Repeat::All,
+            autoplay: true,
+            ..state.queue.clone().unwrap()
+        });
+        let flags = flags(&state);
+        let screen = screen(&state, 100, 12);
+        assert!(screen.contains(&flags), "{screen}");
+        assert!(!screen.contains("m mute"), "{screen}");
+        assert!(screen.contains("? help  q quit"), "{screen}");
+    }
+
+    fn row_text(line: &Line) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    fn some_tabs(selected: usize) -> Vec<TabLabel<'static>> {
+        ["Favorite tracks", "Favorite albums", "Your playlists"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, name)| TabLabel {
+                name,
+                count: Some(12),
+                selected: i == selected,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_tab_row_drops_its_counts_before_it_drops_a_tab() {
+        let theme = Theme::new(false);
+        let full = row_text(&tabs_line(&some_tabs(0), 100, &theme));
+        assert_eq!(
+            full,
+            "Favorite tracks (12)   Favorite albums (12)   Your playlists (12)"
+        );
+        let names = row_text(&tabs_line(&some_tabs(0), 60, &theme));
+        assert_eq!(names, "Favorite tracks   Favorite albums   Your playlists");
+    }
+
+    #[test]
+    fn a_tab_row_too_narrow_for_every_name_shows_the_one_being_shown() {
+        let theme = Theme::new(false);
+        let row = row_text(&tabs_line(&some_tabs(1), 40, &theme));
+        assert_eq!(row, "\u{2039} Favorite albums (12) \u{203a}");
+        let tight = row_text(&tabs_line(&some_tabs(1), 20, &theme));
+        assert!(
+            tight.chars().count() <= 20 && tight.contains("Favorite"),
+            "{tight}"
+        );
+    }
+
+    #[test]
     fn the_quit_key_is_on_the_same_row_in_every_connection_state_and_with_or_without_a_report() {
         // The bar reserves a fixed 4 content rows in every state (connecting, connected,
         // disconnected, refused) so the row the last line of the bar lands on -- "? help q quit"
@@ -1957,6 +2116,18 @@ mod tests {
         assert!(text.contains("Favorite artists (1)"), "{text}");
         assert!(text.contains("Your playlists (1)"), "{text}");
         assert!(text.contains("1. Korn - Freak On a Leash"), "{text}");
+    }
+
+    #[test]
+    fn a_narrow_panel_collapses_the_librarys_tabs_to_the_one_being_shown() {
+        // `tabs_line` has its own unit tests; this one pins that `draw_tabs` hands it the panel's
+        // own width rather than the terminal's -- the mistake #175 part 1 was about.
+        let state = with_library();
+        let narrow = screen(&state, 60, 14);
+        assert!(narrow.contains('\u{2039}'), "{narrow}");
+        assert!(!narrow.contains("Favorite albums"), "{narrow}");
+        // Still one row: the list underneath did not move.
+        assert!(narrow.contains("Freak On a Leash"), "{narrow}");
     }
 
     #[test]
