@@ -750,7 +750,11 @@ impl SharedSinkFactory {
 
     fn open_stream(&self, spec: SourceSpec) -> Result<Box<dyn AudioSink>> {
         let client = self.client()?;
-        let info = self.resolve(&client)?;
+        // A cached connection the server has dropped only shows up here: forget it, or every
+        // later open fails the same way until the daemon restarts.
+        let info = self
+            .resolve(&client)
+            .inspect_err(|_| self.forget_client())?;
         let output = output_from(&info, None);
 
         let channel_map = match spec.channels {
