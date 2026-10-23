@@ -2017,7 +2017,7 @@ dependencies = [
 
 [[package]]
 name = "phonia"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2032,7 +2032,7 @@ dependencies = [
 
 [[package]]
 name = "phonia-core"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "alsa",
  "anyhow",
@@ -2058,7 +2058,7 @@ dependencies = [
 
 [[package]]
 name = "phonia-ipc"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "reqwest",
  "serde",
@@ -2068,7 +2068,7 @@ dependencies = [
 
 [[package]]
 name = "phonia-tui"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -2084,7 +2084,7 @@ dependencies = [
 
 [[package]]
 name = "phoniad"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",

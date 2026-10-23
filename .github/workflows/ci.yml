@@ -49,7 +49,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --all-targets
       # The tests that need a sound card, a sound server or the user's session are marked #[ignore]
-      # and are not run here (see "Development" in the README).
+      # and are not run here (see "Development" in CONTRIBUTING.md).
       - run: cargo test --workspace
 
   private-bus:
@@ -64,3 +64,13 @@ jobs:
       # The device reservation and the keyring store talk to a private dbus-daemon that the tests
       # start themselves (with no service activation), so they need only the binary.
       - run: "cargo test -p phonia-core -- --ignored output::dbus:: auth::secret_service::"
+
+  licenses:
+    name: Licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Reads only the manifests, so it needs no system libraries and no build.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses

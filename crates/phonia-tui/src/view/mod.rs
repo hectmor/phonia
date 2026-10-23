@@ -17,8 +17,7 @@ pub fn help_overflow(rows: u16) -> usize {
 /// scroll (the notice and the footer, when either shows, take their own row out of this in turn --
 /// see `lyrics::body_rows`).
 pub fn lyrics_panel_rows(state: &State) -> usize {
-    let area = areas(Rect::new(0, 0, state.size.0, state.size.1)).main;
-    usize::from(area.height.saturating_sub(2))
+    usize::from(content_area(Rect::new(0, 0, state.size.0, state.size.1)).height)
 }
 
 use crate::app::{Connection, Focus, Section, State, seconds_left};
@@ -27,7 +26,7 @@ use crate::theme::Theme;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui_image::Image;
 
 /// The columns the sidebar takes: the longest section name and room for the border and the mark.
@@ -50,22 +49,64 @@ pub struct Areas {
     pub bar: Rect,
 }
 
+/// Below this many columns the sections list is not worth 14 of the few there are: the panel's
+/// own title still names the section, and the digits 1-5 still switch it (#175).
+pub(crate) const NARROW_COLUMNS: u16 = 60;
+/// The smallest screen the interface is laid out for. phonia is designed for 80x24 (#175); under
+/// this the panels would be borders around nothing, so it says so instead of drawing a ruin.
+const MIN_COLUMNS: u16 = 40;
+const MIN_ROWS: u16 = 10;
+
 pub fn areas(area: Rect) -> Areas {
     let [top, bar] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(BAR_HEIGHT)]).areas(area);
+    let sidebar_width = if area.width >= NARROW_COLUMNS {
+        SIDEBAR_WIDTH
+    } else {
+        0
+    };
     let [sidebar, main] =
-        Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)]).areas(top);
+        Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Min(0)]).areas(top);
     Areas { sidebar, main, bar }
 }
 
+/// The area a panel's content is laid out in: the main panel, inside its own border. The run
+/// loop's cover fetching and every draw path must agree on this to the cell -- `Image` draws
+/// nothing at all, rather than clipping, when the encoded protocol is larger than the area it is
+/// given. That reverses the deliberate approximation recorded in `docs/DECISIONS.md` on
+/// 2026-10-01: the border is load-bearing, not a rounding error.
+pub fn content_area(area: Rect) -> Rect {
+    Block::bordered().inner(areas(area).main)
+}
+
 pub fn draw(state: &State, theme: &Theme, covers: &Covers, frame: &mut Frame) {
-    let areas = areas(frame.area());
+    let screen = frame.area();
+    if screen.width < MIN_COLUMNS || screen.height < MIN_ROWS {
+        draw_too_small(theme, frame);
+        return;
+    }
+    let areas = areas(screen);
     draw_sidebar(state, theme, frame, areas.sidebar);
     draw_main(state, theme, covers, frame, areas.main);
     draw_bar(state, theme, frame, areas.bar);
     if state.help {
         help::draw(theme, state.help_scroll, frame);
     }
+}
+
+fn draw_too_small(theme: &Theme, frame: &mut Frame) {
+    let screen = frame.area();
+    let text = format!(
+        "Terminal too small.\nphonia needs {MIN_COLUMNS}x{MIN_ROWS}; this is {}x{}.\nq quit",
+        screen.width, screen.height
+    );
+    let area = help::centered(screen, 36, 5);
+    frame.render_widget(
+        Paragraph::new(text)
+            .style(theme.text)
+            .wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 /// The border of a panel: bright when it has the focus.
@@ -81,6 +122,10 @@ fn panel<'a>(title: &'a str, focused: bool, theme: &Theme) -> Block<'a> {
 }
 
 fn draw_sidebar(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
+    // Deliberate: `areas` gives the sidebar no width when the screen is narrow.
+    if area.width == 0 {
+        return;
+    }
     let focused = state.focus == Focus::Sidebar;
     let lines: Vec<Line> = Section::ALL
         .iter()
@@ -217,13 +262,19 @@ fn draw_queue(
     });
     let (cover_area, header_area, list_area) = match reserved {
         Some((url, cells)) => {
-            let [top, list_area] =
-                Layout::vertical([Constraint::Length(cells.height), Constraint::Min(0)])
-                    .areas(area);
-            let [cover_area, header_area] =
-                Layout::horizontal([Constraint::Length(cells.width), Constraint::Min(0)])
-                    .areas(top);
-            (Some((cover_area, url)), Some(header_area), list_area)
+            let [top, _, list_area] = Layout::vertical([
+                Constraint::Length(cells.height),
+                Constraint::Length(covers::COVER_GAP_ROWS),
+                Constraint::Min(0),
+            ])
+            .areas(area);
+            let [cover_area, _, header_area] = Layout::horizontal([
+                Constraint::Length(cells.width),
+                Constraint::Length(covers::COVER_GAP_COLS),
+                Constraint::Min(0),
+            ])
+            .areas(top);
+            (Some((cover_area, url, cells)), Some(header_area), list_area)
         }
         // No image to size the header by (no picker, no cover, or not enough room for one), but
         // there is still a track to name: reserved on "is one playing", never on whether a cover
@@ -236,8 +287,8 @@ fn draw_queue(
         }
         None => (None, None, area),
     };
-    if let Some((cover_area, url)) = &cover_area
-        && let Some(protocol) = covers.ready(url)
+    if let Some((cover_area, url, cells)) = &cover_area
+        && let Some(protocol) = covers.ready(url, *cells)
     {
         frame.render_widget(Image::new(protocol), *cover_area);
     }
@@ -561,8 +612,83 @@ fn state_word(state: phonia_ipc::State) -> &'static str {
     }
 }
 
-const KEYS: &str =
-    "Space pause  n/p skip  </> seek  +/- volume  m mute  s shuffle  r repeat  ? help  q quit";
+/// The key hints, widest first. The bar's last row is pinned (`BAR_HEIGHT`), so the hints shrink
+/// to share it with the flags rather than being cut off mid-word -- `? help  q quit` survives
+/// every tier (#175).
+const KEYS: [&str; 4] = [
+    "Space pause  n/p skip  </> seek  +/- volume  m mute  s shuffle  r repeat  ? help  q quit",
+    "Space pause  n/p skip  </> seek  +/- volume  ? help  q quit",
+    "Space  n/p  </>  +/-  ? help  q quit",
+    "? help  q quit",
+];
+
+/// The widest tier of hints that still leaves `flags_width` columns for the flags beside them.
+fn hints(width: u16, flags_width: usize) -> &'static str {
+    let room = usize::from(width).saturating_sub(flags_width);
+    KEYS.iter()
+        .copied()
+        .find(|keys| keys.chars().count() <= room)
+        .unwrap_or(KEYS[KEYS.len() - 1])
+}
+
+/// One tab of a tab row: its name, how many items it holds once that is known, and whether it is
+/// the one being shown.
+pub(super) struct TabLabel<'a> {
+    pub name: &'a str,
+    pub count: Option<u64>,
+    pub selected: bool,
+}
+
+/// The tab row that fits `width`: every name with its count, the names alone when those do not
+/// fit, or just the one being shown, between arrows, when even that is too wide. A tab row is
+/// never silently clipped, and the selected tab is always legible (#175).
+pub(super) fn tabs_line<'a>(tabs: &[TabLabel<'_>], width: u16, theme: &Theme) -> Line<'a> {
+    const SEP: &str = "   ";
+    let width = usize::from(width);
+    let text = |tab: &TabLabel, counts: bool| match tab.count {
+        Some(count) if counts => format!("{} ({count})", tab.name),
+        _ => tab.name.to_string(),
+    };
+    let row_width = |counts: bool| {
+        let labels: usize = tabs
+            .iter()
+            .map(|tab| text(tab, counts).chars().count())
+            .sum();
+        labels + SEP.len() * tabs.len().saturating_sub(1)
+    };
+    for counts in [true, false] {
+        if row_width(counts) <= width {
+            let mut spans = Vec::new();
+            for tab in tabs {
+                if !spans.is_empty() {
+                    spans.push(Span::raw(SEP));
+                }
+                let style = if tab.selected {
+                    theme.accent
+                } else {
+                    theme.dim
+                };
+                spans.push(Span::styled(text(tab, counts), style));
+            }
+            return Line::from(spans);
+        }
+    }
+    let Some(tab) = tabs.iter().find(|tab| tab.selected) else {
+        return Line::default();
+    };
+    // The arrows and their spaces take 4 columns.
+    let inner = width.saturating_sub(4);
+    let with_count = text(tab, true);
+    let label = if with_count.chars().count() <= inner {
+        with_count
+    } else {
+        truncate(tab.name, inner)
+    };
+    Line::from(vec![Span::styled(
+        format!("\u{2039} {label} \u{203a}"),
+        theme.accent,
+    )])
+}
 
 fn draw_bar(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
     let lines = match &state.connection {
@@ -581,20 +707,24 @@ fn draw_bar(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
                 _ => String::new(),
             };
             let flags = flags(state);
+            let suffix = if flags.is_empty() {
+                String::new()
+            } else {
+                format!("   | {flags}")
+            };
+            let keys = hints(area.width, suffix.chars().count());
+            // Only the narrowest tier can still overflow; the flags give way, not the hints.
+            let suffix = truncate(
+                &suffix,
+                usize::from(area.width).saturating_sub(keys.chars().count()),
+            );
             vec![
                 connected_line(state, theme),
                 signal_line(state, theme, area.width),
                 Line::styled(progress, theme.accent),
                 Line::from(vec![
-                    Span::styled(KEYS, theme.dim),
-                    Span::styled(
-                        if flags.is_empty() {
-                            String::new()
-                        } else {
-                            format!("   | {flags}")
-                        },
-                        theme.text,
-                    ),
+                    Span::styled(keys, theme.dim),
+                    Span::styled(suffix, theme.text),
                 ]),
             ]
         }
@@ -1279,6 +1409,86 @@ mod tests {
     }
 
     #[test]
+    fn the_help_and_quit_keys_are_visible_at_eighty_columns() {
+        let screen = screen(&connected(), 80, 24);
+        assert!(screen.contains("? help  q quit"), "{screen}");
+    }
+
+    #[test]
+    fn every_tier_of_hints_keeps_the_quit_key() {
+        for width in 0..=160 {
+            for flags_width in 0..=80 {
+                let keys = hints(width, flags_width);
+                assert!(keys.contains("q quit"), "{width} {flags_width}: {keys}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_hints_shrink_before_the_flags_do() {
+        use phonia_ipc::{Queue, Repeat, Volume};
+        let mut state = connected();
+        state.status.as_mut().unwrap().volume = Some(Volume {
+            percent: 100,
+            muted: true,
+        });
+        state.queue = Some(Queue {
+            shuffle: true,
+            repeat: Repeat::All,
+            autoplay: true,
+            ..state.queue.clone().unwrap()
+        });
+        let flags = flags(&state);
+        let screen = screen(&state, 100, 12);
+        assert!(screen.contains(&flags), "{screen}");
+        assert!(!screen.contains("m mute"), "{screen}");
+        assert!(screen.contains("? help  q quit"), "{screen}");
+    }
+
+    fn row_text(line: &Line) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    fn some_tabs(selected: usize) -> Vec<TabLabel<'static>> {
+        ["Favorite tracks", "Favorite albums", "Your playlists"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, name)| TabLabel {
+                name,
+                count: Some(12),
+                selected: i == selected,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_tab_row_drops_its_counts_before_it_drops_a_tab() {
+        let theme = Theme::new(false);
+        let full = row_text(&tabs_line(&some_tabs(0), 100, &theme));
+        assert_eq!(
+            full,
+            "Favorite tracks (12)   Favorite albums (12)   Your playlists (12)"
+        );
+        let names = row_text(&tabs_line(&some_tabs(0), 60, &theme));
+        assert_eq!(names, "Favorite tracks   Favorite albums   Your playlists");
+    }
+
+    #[test]
+    fn a_tab_row_too_narrow_for_every_name_shows_the_one_being_shown() {
+        let theme = Theme::new(false);
+        let row = row_text(&tabs_line(&some_tabs(1), 40, &theme));
+        assert_eq!(row, "\u{2039} Favorite albums (12) \u{203a}");
+        let tight = row_text(&tabs_line(&some_tabs(1), 20, &theme));
+        assert!(
+            tight.chars().count() <= 20 && tight.contains("Favorite"),
+            "{tight}"
+        );
+    }
+
+    #[test]
     fn the_quit_key_is_on_the_same_row_in_every_connection_state_and_with_or_without_a_report() {
         // The bar reserves a fixed 4 content rows in every state (connecting, connected,
         // disconnected, refused) so the row the last line of the bar lands on -- "? help q quit"
@@ -1471,12 +1681,104 @@ mod tests {
         assert_eq!(a.sidebar.height + a.bar.height, area.height);
         assert_eq!(a.bar.y, a.sidebar.height);
         assert_eq!(a.main.x, a.sidebar.right());
+        // Narrow: the sections list gives all its width to the panel.
+        let a = areas(Rect::new(0, 0, NARROW_COLUMNS - 1, 24));
+        assert_eq!(a.sidebar.width, 0);
+        assert_eq!(a.main.width, NARROW_COLUMNS - 1);
+    }
+
+    fn with_size(columns: u16, rows: u16) -> State {
+        let mut state = State::default();
+        update(&mut state, Msg::Resize(columns, rows));
+        state
+    }
+
+    #[test]
+    fn below_sixty_columns_the_sections_list_gives_its_width_to_the_panel() {
+        let screen = screen(&with_size(59, 24), 59, 24);
+        assert!(!screen.contains(" 1 Home"), "{screen}");
+        assert!(!screen.contains("phonia "), "{screen}");
+        assert_eq!(areas(Rect::new(0, 0, 59, 24)).main.width, 59);
+    }
+
+    #[test]
+    fn the_sections_list_is_still_there_at_sixty_columns() {
+        let screen = screen(&with_size(60, 24), 60, 24);
+        assert!(screen.contains(" 1 Home"), "{screen}");
+        assert_eq!(areas(Rect::new(0, 0, 60, 24)).sidebar.width, SIDEBAR_WIDTH);
+    }
+
+    #[test]
+    fn the_panel_keeps_the_focus_when_a_resize_takes_the_sections_list_away() {
+        let mut state = State {
+            focus: Focus::Sidebar,
+            ..State::default()
+        };
+        update(&mut state, Msg::Resize(50, 24));
+        assert_eq!(state.focus, Focus::Main);
+    }
+
+    #[test]
+    fn the_focus_does_not_move_onto_a_sections_list_that_is_not_there() {
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        // Control: with the list on screen, both keys do reach it.
+        let mut wide = with_size(80, 24);
+        wide.focus = Focus::Main;
+        update(&mut wide, Msg::Key(tab));
+        assert_eq!(wide.focus, Focus::Sidebar);
+        let mut narrow = with_size(50, 24);
+        narrow.focus = Focus::Main;
+        update(&mut narrow, Msg::Key(tab));
+        assert_eq!(narrow.focus, Focus::Main);
+        press(&mut narrow, 'h');
+        assert_eq!(narrow.focus, Focus::Main);
+    }
+
+    #[test]
+    fn with_no_sections_list_the_digits_still_switch_section() {
+        let mut state = with_size(50, 24);
+        press(&mut state, '3');
+        assert_eq!(state.section(), Section::Search);
+    }
+
+    #[test]
+    fn a_terminal_below_the_floor_says_so_and_still_says_how_to_quit() {
+        let mut state = with_size(30, 8);
+        state.help = true;
+        let screen = screen(&state, 30, 8);
+        assert!(screen.contains("Terminal too small."), "{screen}");
+        // It wraps at 30 columns, so the two halves are on different lines.
+        assert!(screen.contains("phonia needs 40x10;"), "{screen}");
+        assert!(screen.contains("30x8."), "{screen}");
+        assert!(screen.contains("q quit"), "{screen}");
+        assert!(!screen.contains("? help"), "{screen}");
+    }
+
+    #[test]
+    fn at_eighty_by_twenty_four_every_panel_border_and_the_quit_key_are_on_screen() {
+        let screen = screen(&with_size(80, 24), 80, 24);
+        assert_eq!(screen.matches('\u{250c}').count(), 2, "{screen}");
+        assert_eq!(screen.matches('\u{2518}').count(), 2, "{screen}");
+        assert!(screen.contains("q quit"), "{screen}");
     }
 
     #[test]
     fn terminals_too_small_for_the_layout_do_not_panic() {
         let mut state = State::default();
-        for (w, h) in [(0, 0), (1, 1), (5, 2), (13, 3), (14, 3), (20, 4)] {
+        for (w, h) in [
+            (0, 0),
+            (1, 1),
+            (5, 2),
+            (13, 3),
+            (14, 3),
+            (20, 4),
+            (39, 24),
+            (40, 24),
+            (59, 24),
+            (60, 24),
+            (80, 9),
+            (80, 10),
+        ] {
             let _ = screen(&state, w, h);
             state.help = true;
             let _ = screen(&state, w, h);
@@ -1952,6 +2254,18 @@ mod tests {
     }
 
     #[test]
+    fn a_narrow_panel_collapses_the_librarys_tabs_to_the_one_being_shown() {
+        // `tabs_line` has its own unit tests; this one pins that `draw_tabs` hands it the panel's
+        // own width rather than the terminal's -- the mistake #175 part 1 was about.
+        let state = with_library();
+        let narrow = screen(&state, 60, 14);
+        assert!(narrow.contains('\u{2039}'), "{narrow}");
+        assert!(!narrow.contains("Favorite albums"), "{narrow}");
+        // Still one row: the list underneath did not move.
+        assert!(narrow.contains("Freak On a Leash"), "{narrow}");
+    }
+
+    #[test]
     fn the_favorite_artists_tab_lists_them_and_opens_one() {
         use crate::app::Tag;
         let mut state = with_library();
@@ -2248,7 +2562,7 @@ mod tests {
         let url = covers::cover_url(&Header::Album(album), cells, picker.font_size()).unwrap();
 
         let mut covers = Covers::new(Some(picker.clone()));
-        covers.start(&url);
+        covers.start(&url, cells);
         let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
             u32::from(cells.width) * 10,
             u32::from(cells.height) * 20,
@@ -2257,7 +2571,14 @@ mod tests {
         let protocol = picker
             .new_protocol(image, cells, Resize::default())
             .unwrap();
-        covers.finish(url, Outcome::Ready(protocol));
+        covers.finish(
+            url,
+            cells,
+            Outcome::Ready {
+                protocol,
+                bytes: std::sync::Arc::new(vec![]),
+            },
+        );
 
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
@@ -2265,12 +2586,12 @@ mod tests {
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
 
-        // Somewhere in the reserved area, a cell's style was touched: the plain background
-        // everywhere else never is.
+        // Somewhere in the reserved area a cell carries a real color. Not `style().fg.is_some()`,
+        // which `Cell::style` makes true for every cell, drawn or blank (#175).
         let drawn = (inner.y..inner.y + cells.height).any(|y| {
             (inner.x..inner.x + cells.width).any(|x| {
-                let style = buffer[(x, y)].style();
-                style.fg.is_some() || style.bg.is_some()
+                let cell = &buffer[(x, y)];
+                cell.fg != ratatui::style::Color::Reset || cell.bg != ratatui::style::Color::Reset
             })
         });
         assert!(drawn, "no cover pixels found in the reserved area");
@@ -2285,6 +2606,190 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("Korn - Issues"), "{text}");
+    }
+
+    /// An album with a cover id open on the Search section, for the cover tests below.
+    fn state_with_an_open_album() -> State {
+        use crate::browse::{Header, TrackListView, View};
+        let mut state = State::default();
+        press(&mut state, '3'); // Search
+        state.search_views.push(
+            0,
+            View::TrackList(TrackListView::new(
+                phonia_ipc::CatalogRef::Album { id: "9".into() },
+                Header::Album(phonia_ipc::AlbumSummary {
+                    id: "9".into(),
+                    title: "Issues".into(),
+                    version: None,
+                    artists: vec![],
+                    release_date: None,
+                    track_count: None,
+                    duration_ms: None,
+                    explicit: false,
+                    quality: None,
+                    kind: None,
+                    copyright: None,
+                    cover: Some("3c6247c7-d0d7-4978-91b1-0bddc13f45b5".into()),
+                }),
+            )),
+        );
+        state
+    }
+
+    /// What the run loop does for a screen of `width` x `height`, minus the network: asks for the
+    /// cover the way `maybe_fetch_cover` does, encodes a synthetic image for it, then draws, and
+    /// reports whether any cell of the cover's rectangle was touched. The screen is returned too,
+    /// for the failure message.
+    fn cover_shows_at(
+        state: &State,
+        covers: &mut Covers,
+        width: u16,
+        height: u16,
+    ) -> (bool, String) {
+        let full = Rect::new(0, 0, width, height);
+        // What the draw computes, spelled out rather than shared: the fetch must match it.
+        let inner = panel("x", false, &Theme::new(false)).inner(areas(full).main);
+        let wanted = covers::wanted(state, covers, content_area(full)).expect("a cover is wanted");
+        if covers.start(&wanted.url, wanted.cells) {
+            let picker = covers.picker().unwrap().clone();
+            let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+                u32::from(wanted.cells.width) * 10,
+                u32::from(wanted.cells.height) * 20,
+                image::Rgb([220, 20, 20]),
+            ));
+            let protocol = picker
+                .new_protocol(image, wanted.cells, ratatui_image::Resize::default())
+                .unwrap();
+            covers.finish(
+                wanted.url,
+                wanted.cells,
+                covers::Outcome::Ready {
+                    protocol,
+                    bytes: std::sync::Arc::new(vec![]),
+                },
+            );
+        }
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| draw(state, &Theme::new(false), covers, frame))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        // The rectangle the draw reserved for the cover (from its own measure, not the fetch's),
+        // and a drawn cover colours its cells; a blank one keeps the terminal's own `Reset`.
+        let reserved = covers::cover_size(inner, covers.picker().unwrap().font_size()).unwrap();
+        let drawn = (inner.y..inner.y + reserved.height).any(|y| {
+            (inner.x..inner.x + reserved.width).any(|x| {
+                let cell = &buffer[(x, y)];
+                cell.fg != ratatui::style::Color::Reset || cell.bg != ratatui::style::Color::Reset
+            })
+        });
+        (drawn, screen_with(state, covers, width, height))
+    }
+
+    #[test]
+    fn the_cover_is_sized_against_the_very_area_the_header_draws_in() {
+        let theme = Theme::new(false);
+        for section in Section::ALL {
+            let mut state = State::default();
+            state
+                .sidebar
+                .select(Section::ALL.iter().position(|s| *s == section).unwrap(), 5);
+            assert_eq!(state.section(), section);
+            for width in 20..=200 {
+                for height in 10..=80 {
+                    let full = Rect::new(0, 0, width, height);
+                    assert_eq!(
+                        content_area(full),
+                        panel("x", false, &theme).inner(areas(full).main),
+                        "{section:?} at {width}x{height}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_cover_shows_at_every_height_the_old_approximation_broke() {
+        let state = state_with_an_open_album();
+        for height in [26, 27, 29, 30, 32, 33, 35, 36, 38, 39, 41, 42] {
+            let mut covers = Covers::new(Some(ratatui_image::picker::Picker::halfblocks()));
+            let (drawn, screen) = cover_shows_at(&state, &mut covers, 100, height);
+            assert!(drawn, "no cover at height {height}:\n{screen}");
+        }
+    }
+
+    #[test]
+    fn a_tall_terminal_draws_a_bigger_cover_than_a_short_one() {
+        let state = state_with_an_open_album();
+        let font = ratatui_image::picker::Picker::halfblocks().font_size();
+        let mut rows = Vec::new();
+        for (width, height) in [(100, 30), (200, 60)] {
+            let mut covers = Covers::new(Some(ratatui_image::picker::Picker::halfblocks()));
+            let (drawn, screen) = cover_shows_at(&state, &mut covers, width, height);
+            assert!(drawn, "no cover at {width}x{height}:\n{screen}");
+            rows.push(
+                covers::cover_size(content_area(Rect::new(0, 0, width, height)), font)
+                    .unwrap()
+                    .height,
+            );
+        }
+        assert!(rows[1] > rows[0], "{rows:?}");
+    }
+
+    #[test]
+    fn a_cover_still_shows_after_the_terminal_changes_height() {
+        let state = state_with_an_open_album();
+        let mut covers = Covers::new(Some(ratatui_image::picker::Picker::halfblocks()));
+        let (drawn, screen) = cover_shows_at(&state, &mut covers, 100, 30);
+        assert!(drawn, "{screen}");
+        let (drawn, screen) = cover_shows_at(&state, &mut covers, 100, 40);
+        assert!(drawn, "{screen}");
+        let (drawn, screen) = cover_shows_at(&state, &mut covers, 100, 30);
+        assert!(drawn, "{screen}");
+    }
+
+    #[test]
+    fn the_cover_keeps_two_columns_from_its_text_and_a_row_from_the_list() {
+        let state = state_with_an_open_album();
+        let covers = Covers::new(Some(ratatui_image::picker::Picker::halfblocks()));
+        let (width, height) = (100, 30);
+        let theme = Theme::new(false);
+        let inner = panel("x", false, &theme).inner(areas(Rect::new(0, 0, width, height)).main);
+        let cells = covers::cover_size(inner, covers.picker().unwrap().font_size()).unwrap();
+
+        let screen = screen_with(&state, &covers, width, height);
+        let lines: Vec<&str> = screen.lines().collect();
+        // The first column holding anything inside the pane, counted in cells rather than bytes:
+        // the panel borders on either side are multi-byte, and are not the pane's to read.
+        let first_text_in = |row: u16| {
+            lines[usize::from(row)]
+                .chars()
+                .enumerate()
+                .skip(usize::from(inner.x))
+                .take(usize::from(inner.width))
+                .find(|(_, c)| !c.is_whitespace())
+                .map(|(x, _)| x as u16)
+        };
+
+        // No image has arrived, so the cover's own cells are blank: the first text on its top row
+        // is the header's, and it starts past the gap.
+        // Two columns and one row, spelled out rather than read back from the constants, because
+        // those are what #188 asks for: a test quoting them passes whatever they become.
+        assert_eq!(
+            first_text_in(inner.y),
+            Some(inner.x + cells.width + 2),
+            "{screen}"
+        );
+        assert_eq!(
+            first_text_in(inner.y + cells.height),
+            None,
+            "the row under the cover is not blank:\n{screen}"
+        );
+        // And the list does start right after it, so the gap is a gap, not a short pane.
+        assert!(
+            first_text_in(inner.y + cells.height + 1).is_some(),
+            "{screen}"
+        );
     }
 
     #[test]
@@ -2558,7 +3063,7 @@ mod tests {
         .unwrap();
 
         let mut covers = Covers::new(Some(picker.clone()));
-        covers.start(&url);
+        covers.start(&url, cells);
         let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
             u32::from(cells.width) * 10,
             u32::from(cells.height) * 20,
@@ -2567,7 +3072,14 @@ mod tests {
         let protocol = picker
             .new_protocol(image, cells, Resize::default())
             .unwrap();
-        covers.finish(url, Outcome::Ready(protocol));
+        covers.finish(
+            url,
+            cells,
+            Outcome::Ready {
+                protocol,
+                bytes: std::sync::Arc::new(vec![]),
+            },
+        );
 
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
@@ -2577,8 +3089,8 @@ mod tests {
 
         let drawn = (inner.y..inner.y + cells.height).any(|y| {
             (inner.x..inner.x + cells.width).any(|x| {
-                let style = buffer[(x, y)].style();
-                style.fg.is_some() || style.bg.is_some()
+                let cell = &buffer[(x, y)];
+                cell.fg != ratatui::style::Color::Reset || cell.bg != ratatui::style::Color::Reset
             })
         });
         assert!(drawn, "no picture pixels found in the reserved area");
@@ -2665,7 +3177,7 @@ mod tests {
         let url = covers::track_cover_url(Some(cover_id), cells, picker.font_size()).unwrap();
 
         let mut covers = Covers::new(Some(picker.clone()));
-        covers.start(&url);
+        covers.start(&url, cells);
         let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
             u32::from(cells.width) * 10,
             u32::from(cells.height) * 20,
@@ -2674,7 +3186,14 @@ mod tests {
         let protocol = picker
             .new_protocol(image, cells, Resize::default())
             .unwrap();
-        covers.finish(url, Outcome::Ready(protocol));
+        covers.finish(
+            url,
+            cells,
+            Outcome::Ready {
+                protocol,
+                bytes: std::sync::Arc::new(vec![]),
+            },
+        );
 
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
@@ -2684,8 +3203,8 @@ mod tests {
 
         let drawn = (inner.y..inner.y + cells.height).any(|y| {
             (inner.x..inner.x + cells.width).any(|x| {
-                let style = buffer[(x, y)].style();
-                style.fg.is_some() || style.bg.is_some()
+                let cell = &buffer[(x, y)];
+                cell.fg != ratatui::style::Color::Reset || cell.bg != ratatui::style::Color::Reset
             })
         });
         assert!(drawn, "no cover pixels found in the reserved area");

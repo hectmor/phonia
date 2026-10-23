@@ -60,18 +60,34 @@ pub fn http_source() -> CoverSource {
 
 /// A cover fetched, decoded and encoded for the terminal, or why it could not be.
 pub enum Outcome {
-    Ready(Protocol),
+    /// The encoded cover, and the bytes it was decoded from, so a resize can encode them again
+    /// without asking the CDN twice.
+    Ready {
+        protocol: Protocol,
+        bytes: Arc<Vec<u8>>,
+    },
     Failed(String),
 }
 
-/// Fetches the image at `url`, decodes it, and encodes it with `picker` to fit `cells`. The
-/// decode and the encode are CPU-bound, so both run on a blocking thread rather than one of the
-/// async runtime's own.
-pub async fn fetch(url: String, picker: Picker, cells: Size, source: CoverSource) -> Outcome {
-    let bytes = match source(url).await {
-        Ok(bytes) => bytes,
-        Err(reason) => return Outcome::Failed(reason),
+/// Fetches the image at `url` unless `bytes` already has it (a resize re-encoding what was
+/// downloaded before), decodes it, and encodes it with `picker` to fit `cells`. The decode and
+/// the encode are CPU-bound, so both run on a blocking thread rather than one of the async
+/// runtime's own.
+pub async fn fetch(
+    url: String,
+    picker: Picker,
+    cells: Size,
+    source: CoverSource,
+    bytes: Option<Arc<Vec<u8>>>,
+) -> Outcome {
+    let bytes = match bytes {
+        Some(bytes) => bytes,
+        None => match source(url).await {
+            Ok(bytes) => Arc::new(bytes),
+            Err(reason) => return Outcome::Failed(reason),
+        },
     };
+    let kept = bytes.clone();
     let decoded = tokio::task::spawn_blocking(move || {
         let image = image::load_from_memory(&bytes).map_err(|error| error.to_string())?;
         picker
@@ -80,10 +96,21 @@ pub async fn fetch(url: String, picker: Picker, cells: Size, source: CoverSource
     })
     .await;
     match decoded {
-        Ok(Ok(protocol)) => Outcome::Ready(protocol),
+        Ok(Ok(protocol)) => Outcome::Ready {
+            protocol,
+            bytes: kept,
+        },
         Ok(Err(reason)) => Outcome::Failed(reason),
         Err(_) => Outcome::Failed("decoding was interrupted".to_string()),
     }
+}
+
+/// A cover ready to draw: what it was encoded for, the encoded protocol itself, and the bytes it
+/// was decoded from -- kept so a resize re-encodes at the new size without asking the CDN again.
+struct Ready {
+    cells: Size,
+    protocol: Protocol,
+    bytes: Arc<Vec<u8>>,
 }
 
 /// Covers ready to draw, what is being asked for right now, and what has already failed: so the
@@ -96,9 +123,11 @@ pub async fn fetch(url: String, picker: Picker, cells: Size, source: CoverSource
 /// never has to be modelled in state that must stay pure and comparable.
 pub struct Covers {
     picker: Option<Picker>,
-    in_flight: HashSet<String>,
+    /// What is being fetched now, and the size it was asked for: a resize while one runs
+    /// supersedes it rather than racing it.
+    in_flight: HashMap<String, Size>,
     failed: HashSet<String>,
-    ready: HashMap<String, Protocol>,
+    ready: HashMap<String, Ready>,
     /// The order covers were made ready in, oldest first, so the least recently finished one is
     /// what gets evicted once [`READY_CAPACITY`] is reached.
     ready_order: VecDeque<String>,
@@ -108,7 +137,7 @@ impl Covers {
     pub fn new(picker: Option<Picker>) -> Self {
         Self {
             picker,
-            in_flight: HashSet::new(),
+            in_flight: HashMap::new(),
             failed: HashSet::new(),
             ready: HashMap::new(),
             ready_order: VecDeque::new(),
@@ -124,35 +153,53 @@ impl Covers {
         self.picker.as_ref()
     }
 
-    /// The cover at `url`, ready to draw, if it has finished fetching.
-    pub fn ready(&self, url: &str) -> Option<&Protocol> {
-        self.ready.get(url)
+    /// The cover at `url` ready to draw in `cells`: the one encoded for this size, or, while a
+    /// resize's own re-encode is still running, an older one that still fits -- which draws a
+    /// little small instead of leaving the reserved space blank. A protocol *bigger* than the
+    /// area is no use: `Image` silently draws nothing then.
+    pub fn ready(&self, url: &str, cells: Size) -> Option<&Protocol> {
+        let ready = self.ready.get(url)?;
+        let encoded = ready.protocol.size();
+        (encoded.width <= cells.width && encoded.height <= cells.height).then_some(&ready.protocol)
     }
 
-    /// Whether `url` is worth asking for: not already in flight, not already failed, and not
-    /// already ready.
-    fn should_fetch(&self, url: &str) -> bool {
-        !self.in_flight.contains(url) && !self.failed.contains(url) && !self.ready.contains_key(url)
+    /// The downloaded bytes of `url`, if still kept, to encode again at another size.
+    pub fn bytes(&self, url: &str) -> Option<Arc<Vec<u8>>> {
+        Some(self.ready.get(url)?.bytes.clone())
     }
 
-    /// Marks `url` as being fetched now, if it is worth fetching; `false` (and no change) if it
-    /// was already in flight, had already failed, or is already ready, so the caller does not ask
-    /// again.
-    pub fn start(&mut self, url: &str) -> bool {
-        if !self.should_fetch(url) {
+    /// Whether `url` is worth asking for *at this size*: not that very fetch already in flight,
+    /// not failed, and not already encoded for exactly these cells. (Not by `protocol.size()`:
+    /// `Resize::Fit` never upscales, so an encode can come out smaller than it was asked for.)
+    fn should_fetch(&self, url: &str, cells: Size) -> bool {
+        self.in_flight.get(url) != Some(&cells)
+            && !self.failed.contains(url)
+            && self.ready.get(url).map(|ready| ready.cells) != Some(cells)
+    }
+
+    /// Marks `url` at `cells` as being fetched now, if it is worth fetching; `false` (and no
+    /// change) otherwise, so the caller does not ask again. A fetch already running at another
+    /// size is superseded.
+    pub fn start(&mut self, url: &str, cells: Size) -> bool {
+        if !self.should_fetch(url, cells) {
             return false;
         }
-        self.in_flight.insert(url.to_string());
+        self.in_flight.insert(url.to_string(), cells);
         true
     }
 
-    /// The fetch for `url` is done: no longer in flight, and, depending on how it went, remembered
-    /// as ready to draw (evicting the oldest ready cover first, if that means there are now too
-    /// many) or as failed.
-    pub fn finish(&mut self, url: String, outcome: Outcome) {
+    /// The fetch for `url` at `cells` is done: no longer in flight, and, depending on how it went,
+    /// remembered as ready to draw (evicting the oldest ready cover first, if that means there are
+    /// now too many) or as failed.
+    pub fn finish(&mut self, url: String, cells: Size, outcome: Outcome) {
+        // Superseded while it ran: the screen was resized and a fetch for the size it wants now is
+        // on its way. Dropping this keeps a slow old result from evicting the new one.
+        if self.in_flight.get(&url) != Some(&cells) {
+            return;
+        }
         self.in_flight.remove(&url);
         match outcome {
-            Outcome::Ready(protocol) => {
+            Outcome::Ready { protocol, bytes } => {
                 if !self.ready.contains_key(&url) {
                     self.ready_order.push_back(url.clone());
                     if self.ready_order.len() > READY_CAPACITY
@@ -161,7 +208,14 @@ impl Covers {
                         self.ready.remove(&oldest);
                     }
                 }
-                self.ready.insert(url, protocol);
+                self.ready.insert(
+                    url,
+                    Ready {
+                        cells,
+                        protocol,
+                        bytes,
+                    },
+                );
             }
             Outcome::Failed(_) => {
                 self.failed.insert(url);
@@ -232,31 +286,51 @@ fn url_at(
     phonia_ipc::image::url(kind, id, min_px)
 }
 
-/// The size, in cells, a cover should be encoded at to fit `header_area`: a third of its height,
-/// clamped to a sane range, with the width computed from the terminal's own font size so the
+/// Columns left between the cover and the text beside it.
+pub const COVER_GAP_COLS: u16 = 2;
+/// Rows left between the cover and the list beneath it.
+pub const COVER_GAP_ROWS: u16 = 1;
+
+/// The size, in cells, a cover should be encoded at to fit `area`: the largest tier that is at
+/// most a third of its height, with the width computed from the terminal's own font size so the
 /// image comes out square in pixels, not just in character cells (usually about twice as tall as
-/// wide). `None` if `header_area` is too small to fit even the minimum, or there is no room left
-/// for the header's own text beside it.
-pub fn cover_size(header_area: Rect, font_size: FontSize) -> Option<Size> {
+/// wide). `None` if `area` is too small for even the smallest tier, or if any cover would leave
+/// the header's own text beside it under 20 columns.
+pub fn cover_size(area: Rect, font_size: FontSize) -> Option<Size> {
+    /// Below this a cover is a smudge, so none shows instead.
     const MIN_HEIGHT: u16 = 6;
-    const MAX_HEIGHT: u16 = 12;
-    /// However narrow the cover ends up, the header's text needs at least this much room beside
-    /// it, or showing a cover here is not worth it.
+    /// However narrow the cover ends up, the header's text keeps this much room beside it.
     const MIN_TEXT_WIDTH: u16 = 20;
+    /// The heights a cover is ever drawn at: every row up to 12, which is where the old cap was,
+    /// so no terminal that showed a cover before #175 gets a smaller one now; then steps, because
+    /// above that a ladder means dragging a terminal's edge re-encodes once per step instead of
+    /// once every three rows, and two rows either way are invisible on a cover that big. The top
+    /// step is also the download cap: at a typical 10x20 cell it asks TIDAL for 640 px, never the
+    /// 1280 px one.
+    const TIERS: [u16; 11] = [6, 7, 8, 9, 10, 11, 12, 16, 20, 24, 30];
 
     if font_size.width == 0 || font_size.height == 0 {
         return None;
     }
-    let height = (header_area.height / 3).clamp(MIN_HEIGHT, MAX_HEIGHT);
-    if height > header_area.height {
-        return None;
-    }
-    let width = ((u32::from(height) * u32::from(font_size.height)) / u32::from(font_size.width))
-        .max(1) as u16;
-    if width + MIN_TEXT_WIDTH > header_area.width {
-        return None;
-    }
-    Some(Size::new(width, height))
+    // Square in pixels, not just in cells: cells are usually about twice as tall as wide.
+    let width_of = |height: u16| {
+        ((u32::from(height) * u32::from(font_size.height)) / u32::from(font_size.width)).max(1)
+            as u16
+    };
+    let fits = |height: u16| {
+        height + COVER_GAP_ROWS <= area.height
+            && width_of(height) + COVER_GAP_COLS + MIN_TEXT_WIDTH <= area.width
+    };
+    // A third of the pane, so the list under it always keeps the larger share -- except for the
+    // smallest tier, which shows whenever it fits at all: phonia is designed for 80x24, where a
+    // third is only five rows, and losing the cover there would be a regression (#175).
+    let height = TIERS
+        .iter()
+        .rev()
+        .copied()
+        .find(|&height| height <= area.height / 3 && fits(height))
+        .or_else(|| fits(MIN_HEIGHT).then_some(MIN_HEIGHT))?;
+    Some(Size::new(width_of(height), height))
 }
 
 #[cfg(test)]
@@ -291,9 +365,10 @@ mod tests {
             picker,
             Size::new(8, 4),
             fake_source(Ok(a_jpeg())),
+            None,
         )
         .await;
-        assert!(matches!(outcome, Outcome::Ready(_)));
+        assert!(matches!(outcome, Outcome::Ready { .. }));
     }
 
     #[tokio::test]
@@ -303,6 +378,7 @@ mod tests {
             Picker::halfblocks(),
             Size::new(8, 4),
             fake_source(Err("connection refused".into())),
+            None,
         )
         .await;
         assert!(matches!(outcome, Outcome::Failed(reason) if reason.contains("refused")));
@@ -315,9 +391,19 @@ mod tests {
             Picker::halfblocks(),
             Size::new(8, 4),
             fake_source(Ok(b"not a jpeg".to_vec())),
+            None,
         )
         .await;
         assert!(matches!(outcome, Outcome::Failed(_)));
+    }
+
+    const C: Size = Size::new(8, 4);
+
+    fn ready_outcome() -> Outcome {
+        Outcome::Ready {
+            protocol: a_tiny_protocol(),
+            bytes: Arc::new(vec![]),
+        }
     }
 
     fn a_tiny_protocol() -> Protocol {
@@ -333,30 +419,30 @@ mod tests {
     #[test]
     fn the_same_url_is_not_fetched_twice_at_once() {
         let mut covers = Covers::disabled();
-        assert!(covers.start("a"));
-        assert!(!covers.start("a"), "already in flight");
-        assert!(covers.start("b"), "a different url is unaffected");
+        assert!(covers.start("a", C));
+        assert!(!covers.start("a", C), "already in flight");
+        assert!(covers.start("b", C), "a different url is unaffected");
     }
 
     #[test]
     fn a_failed_cover_is_not_retried_but_stays_fetchable_elsewhere() {
         let mut covers = Covers::disabled();
-        covers.start("a");
-        covers.finish("a".into(), Outcome::Failed("404".into()));
-        assert!(!covers.start("a"), "a failure is remembered");
-        assert!(covers.ready("a").is_none());
+        covers.start("a", C);
+        covers.finish("a".into(), C, Outcome::Failed("404".into()));
+        assert!(!covers.start("a", C), "a failure is remembered");
+        assert!(covers.ready("a", C).is_none());
     }
 
     #[test]
     fn a_ready_cover_is_not_fetched_again_but_can_be_looked_up() {
         let mut covers = Covers::disabled();
-        covers.start("b");
-        covers.finish("b".into(), Outcome::Ready(a_tiny_protocol()));
+        covers.start("b", C);
+        covers.finish("b".into(), C, ready_outcome());
         assert!(
-            !covers.start("b"),
+            !covers.start("b", C),
             "already ready: fetching again would be wasted"
         );
-        assert!(covers.ready("b").is_some());
+        assert!(covers.ready("b", C).is_some());
     }
 
     #[test]
@@ -364,14 +450,91 @@ mod tests {
         let mut covers = Covers::disabled();
         for n in 0..READY_CAPACITY + 1 {
             let url = n.to_string();
-            covers.start(&url);
-            covers.finish(url, Outcome::Ready(a_tiny_protocol()));
+            covers.start(&url, C);
+            covers.finish(url, C, ready_outcome());
         }
         assert!(
-            covers.ready("0").is_none(),
+            covers.ready("0", C).is_none(),
             "the oldest one fell out once one too many arrived"
         );
-        assert!(covers.ready(&READY_CAPACITY.to_string()).is_some());
+        assert!(covers.ready(&READY_CAPACITY.to_string(), C).is_some());
+    }
+
+    #[tokio::test]
+    async fn a_resize_to_a_new_cell_size_re_encodes_without_fetching_again() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let bytes = a_jpeg();
+        let source: CoverSource = Arc::new(move |_url: String| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            let bytes = bytes.clone();
+            Box::pin(async move { Ok(bytes) })
+        });
+        let picker = Picker::halfblocks();
+        let url = "http://example/cover.jpg";
+        let (small, large) = (Size::new(8, 4), Size::new(16, 8));
+
+        let mut covers = Covers::new(Some(picker.clone()));
+        assert!(covers.start(url, small));
+        let outcome = fetch(url.into(), picker.clone(), small, source.clone(), None).await;
+        covers.finish(url.into(), small, outcome);
+
+        // The same url at a new size is wanted again, but its bytes are already held.
+        assert!(covers.start(url, large));
+        let held = covers.bytes(url);
+        assert!(held.is_some(), "the bytes were kept");
+        let outcome = fetch(url.into(), picker, large, source, held).await;
+        covers.finish(url.into(), large, outcome);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "downloaded exactly once");
+        assert!(covers.ready(url, large).is_some());
+    }
+
+    #[test]
+    fn a_cover_still_encoded_for_a_smaller_size_is_drawn_rather_than_leaving_the_space_blank() {
+        let mut covers = Covers::disabled();
+        covers.start("a", C);
+        covers.finish("a".into(), C, ready_outcome()); // a 1x1 protocol
+        let bigger = Size::new(C.width + 4, C.height + 2);
+        assert!(
+            covers.ready("a", bigger).is_some(),
+            "still fits: drawn small"
+        );
+        assert!(covers.start("a", bigger), "but a better fit is asked for");
+        assert!(covers.ready("a", bigger).is_some(), "and kept meanwhile");
+        assert!(
+            covers.ready("a", Size::new(0, 0)).is_none(),
+            "one bigger than its area draws nothing, so it is not offered"
+        );
+    }
+
+    #[test]
+    fn a_result_for_a_size_the_screen_has_already_grown_out_of_is_dropped() {
+        let mut covers = Covers::disabled();
+        let newer = Size::new(16, 8);
+        covers.start("a", C);
+        covers.start("a", newer); // superseded
+        covers.finish("a".into(), C, ready_outcome());
+        assert!(
+            covers.ready("a", newer).is_none(),
+            "the stale result is gone"
+        );
+        assert!(
+            !covers.start("a", newer),
+            "and the newer fetch is still the one in flight"
+        );
+        covers.finish("a".into(), newer, ready_outcome());
+        assert!(!covers.start("a", newer), "now ready at exactly that size");
+    }
+
+    #[test]
+    fn a_cover_already_ready_at_this_very_size_is_not_fetched_again() {
+        let mut covers = Covers::disabled();
+        covers.start("a", C);
+        covers.finish("a".into(), C, ready_outcome());
+        assert!(!covers.start("a", C));
+        assert!(covers.start("a", Size::new(9, 4)), "another size is");
     }
 
     /// A one-request server on a local port: answers with `status` and `body`. Mirrors
@@ -412,27 +575,94 @@ mod tests {
         Picker::halfblocks().font_size()
     }
 
+    /// The pane `cover_size` is handed for a terminal of `width` x `height`.
+    fn pane(width: u16, height: u16) -> Rect {
+        crate::view::content_area(Rect::new(0, 0, width, height))
+    }
+
     #[test]
-    fn the_cover_is_a_third_of_the_height_clamped_and_square_in_pixels() {
-        let area = Rect::new(0, 0, 100, 30);
-        let cells = cover_size(area, font_size()).unwrap();
-        assert_eq!(cells.height, 10, "a third of 30");
-        // 10 rows * 20px tall / 10px wide = 20 columns, to come out square in pixels.
-        assert_eq!(cells.width, 20);
+    fn the_cover_grows_with_the_pane_in_tiers_and_stays_square_in_pixels() {
+        for ((w, h), (cw, ch)) in [
+            ((80, 24), (12, 6)),
+            ((100, 30), (14, 7)),
+            ((120, 40), (22, 11)),
+            ((140, 45), (24, 12)),
+            ((160, 50), (24, 12)),
+            ((200, 60), (32, 16)),
+            ((300, 80), (48, 24)),
+        ] {
+            let cells = cover_size(pane(w, h), font_size()).unwrap();
+            assert_eq!((cells.width, cells.height), (cw, ch), "at {w}x{h}");
+            // 10x20 px cells: twice as many columns as rows is square in pixels.
+            assert_eq!(cells.width, cells.height * 2, "at {w}x{h}");
+        }
+    }
 
-        // Clamped to at most 12 rows, however tall the area is.
-        let tall = Rect::new(0, 0, 100, 90);
-        assert_eq!(cover_size(tall, font_size()).unwrap().height, 12);
+    #[test]
+    fn the_cover_is_the_same_size_as_before_at_eighty_by_twenty_four() {
+        assert_eq!(
+            cover_size(pane(80, 24), font_size()),
+            Some(Size::new(12, 6))
+        );
+    }
 
-        // Clamped to at least 6 rows, as long as that still fits.
-        let short = Rect::new(0, 0, 100, 10);
-        assert_eq!(cover_size(short, font_size()).unwrap().height, 6);
+    #[test]
+    fn the_cover_only_takes_the_ladders_heights_between_the_smallest_and_the_top() {
+        let heights: Vec<u16> = (18..=120)
+            .map(|rows| {
+                cover_size(Rect::new(0, 0, 300, rows), font_size())
+                    .unwrap()
+                    .height
+            })
+            .collect();
+        assert!(
+            heights.windows(2).all(|pair| pair[0] <= pair[1]),
+            "{heights:?}"
+        );
+        let mut distinct = heights.clone();
+        distinct.dedup();
+        assert_eq!(distinct, [6, 7, 8, 9, 10, 11, 12, 16, 20, 24, 30]);
+        // Never more than a third of the pane, except the smallest tier.
+        for rows in 18..=120u16 {
+            let cells = cover_size(Rect::new(0, 0, 300, rows), font_size()).unwrap();
+            assert!(cells.height <= (rows / 3).max(6), "{rows} rows: {cells:?}");
+        }
+    }
+
+    #[test]
+    fn a_pane_too_short_for_the_smallest_tier_shows_no_cover_at_all() {
+        assert_eq!(cover_size(Rect::new(0, 0, 100, 6), font_size()), None);
+        assert!(cover_size(Rect::new(0, 0, 100, 7), font_size()).is_some());
+    }
+
+    #[test]
+    fn a_pane_too_narrow_leaves_the_header_its_twenty_columns() {
+        // The smallest tier is 12 columns wide: 12 + 2 + 20 = 34.
+        assert_eq!(cover_size(Rect::new(0, 0, 33, 30), font_size()), None);
+        assert_eq!(
+            cover_size(Rect::new(0, 0, 34, 30), font_size()),
+            Some(Size::new(12, 6))
+        );
+        // A narrow pane picks a smaller tier rather than none: 14 + 2 + 20 = 36 does not fit in
+        // 35 columns, 12 + 2 + 20 does, so the 7-row tier falls to the 6-row one.
+        assert_eq!(
+            cover_size(Rect::new(0, 0, 35, 30), font_size()),
+            Some(Size::new(12, 6))
+        );
+    }
+
+    #[test]
+    fn the_tallest_tier_never_asks_tidal_for_the_1280_pixel_cover() {
+        let top = cover_size(Rect::new(0, 0, 500, 300), font_size()).unwrap();
+        assert_eq!(top.height, 30);
+        let url = cover_url(&album_header(Some(COVER_ID)), top, font_size()).unwrap();
+        assert!(url.ends_with("640x640.jpg"), "{url}");
     }
 
     #[test]
     fn too_small_an_area_fits_no_cover() {
-        // Not even 6 rows tall.
-        assert_eq!(cover_size(Rect::new(0, 0, 100, 5), font_size()), None);
+        // Not even 6 rows plus the row of gap.
+        assert_eq!(cover_size(Rect::new(0, 0, 100, 6), font_size()), None);
         // Tall enough, but no room left for the header's text beside a cover this wide.
         assert_eq!(cover_size(Rect::new(0, 0, 15, 30), font_size()), None);
     }

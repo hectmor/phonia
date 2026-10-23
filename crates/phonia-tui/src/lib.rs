@@ -62,7 +62,8 @@ async fn event_loop(
     let mut events = EventStream::new();
     let (messages, mut from_daemon) = mpsc::unbounded_channel();
     let (requests, requests_rx) = mpsc::unbounded_channel();
-    let (cover_done, mut cover_results) = mpsc::unbounded_channel::<(String, Outcome)>();
+    let (cover_done, mut cover_results) =
+        mpsc::unbounded_channel::<(String, ratatui::layout::Size, Outcome)>();
     let retry = Arc::new(Notify::new());
     // Stops the connection task however the loop ends.
     let _connection = AbortOnDrop(conn::spawn(
@@ -79,10 +80,10 @@ async fn event_loop(
         let msg = tokio::select! {
             _ = tick.tick() => Msg::Tick,
             Some(msg) = from_daemon.recv() => msg,
-            Some((url, outcome)) = cover_results.recv() => {
+            Some((url, cells, outcome)) = cover_results.recv() => {
                 // Not an `app::Msg`: covers are a resource for drawing, not app state (see
                 // `covers.rs`), so this redraws directly instead of going through `app::update`.
-                covers.finish(url, outcome);
+                covers.finish(url, cells, outcome);
                 terminal.draw(|frame| view::draw(&state, &theme, &covers, frame))?;
                 continue;
             }
@@ -120,32 +121,34 @@ async fn event_loop(
 }
 
 /// Starts fetching the cover the screen now wants, if there is one and it is not already in
-/// flight, ready, or failed. The main panel's own area is approximated from the terminal's full
-/// size (the sidebar and the bar are a fixed size either side of it, and the panel's own border is
-/// a row and a column `cover_size` does not need to the pixel): close enough to decide how big a
-/// cover to ask for, which only needs to be in the right ballpark, not exact.
+/// flight, ready, or failed. The cover is sized against [`view::content_area`], the very rectangle
+/// every draw path measures: the panel's border is load-bearing, not a rounding error, because
+/// `Image` draws nothing at all, rather than clipping, when the encoded cover is larger than its
+/// area, so one row of disagreement here makes the cover vanish. If the bytes of that image are
+/// already held (a resize), they are encoded again instead of downloaded again.
 fn maybe_fetch_cover(
     state: &State,
     covers: &mut Covers,
     terminal_size: ratatui::layout::Size,
-    done: &mpsc::UnboundedSender<(String, Outcome)>,
+    done: &mpsc::UnboundedSender<(String, ratatui::layout::Size, Outcome)>,
 ) {
     let full = ratatui::layout::Rect::new(0, 0, terminal_size.width, terminal_size.height);
-    let main_area = view::areas(full).main;
-    let Some(covers::Wanted { url, cells }) = covers::wanted(state, covers, main_area) else {
+    let Some(covers::Wanted { url, cells }) =
+        covers::wanted(state, covers, view::content_area(full))
+    else {
         return;
     };
     let Some(picker) = covers.picker().cloned() else {
         return;
     };
-    if !covers.start(&url) {
+    if !covers.start(&url, cells) {
         return;
     }
-    let source = covers::http_source();
+    let held = covers.bytes(&url);
     let done = done.clone();
     tokio::spawn(async move {
-        let outcome = covers::fetch(url.clone(), picker, cells, source).await;
-        let _ = done.send((url, outcome));
+        let outcome = covers::fetch(url.clone(), picker, cells, covers::http_source(), held).await;
+        let _ = done.send((url, cells, outcome));
     });
 }
 

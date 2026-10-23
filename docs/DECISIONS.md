@@ -3,8 +3,10 @@
 Why phonia is built the way it is, in the order the decisions were made. Each
 entry is short on purpose: enough for an auditor — human or model — to see
 what was chosen, what the alternative was, and why, without reading the pull
-request that implemented it. `ROADMAP.md` is the companion record of *what*
-is done; this file is only *why*.
+request that implemented it. This file is only *why*. Its companions are
+[`../ROADMAP.md`](../ROADMAP.md) for *what* is done,
+[`../CONTRIBUTING.md`](../CONTRIBUTING.md) for *how* the project is worked on,
+and the [README](../README.md) for what phonia is at all.
 
 New entries go at the bottom, dated, as decisions are made — not batched up
 afterwards. A decision that gets revisited gets a new entry saying so; old
@@ -3225,3 +3227,293 @@ Still out, for want of an album id: Home's recently played rows (`PlayedTrack` h
 track playing, from the Lyrics section.
 
 PR #167, 1 part, closes #166.
+
+## 2026-10-19 — #169: one subject per document, and a README that is an entry point
+
+The three documents had grown into each other. `README.md` was still titled
+"phonia -- phase 0" and still opened with "There's no TUI or daemon yet" — two
+phases out of date — and underneath that it had become an 889-line reference
+manual: every CLI flag, the TUI key by key, the whole config file, the IPC
+protocol, the ALSA and gapless and ReplayGain internals, plus 151 lines
+arguing for each dependency and 77 lines of working process. Nothing on the
+page told a stranger what phonia is. `ROADMAP.md`'s "Right now" section had
+grown to 816 of its 952 lines, narrating what each merged issue decided, part
+by part — the same material `DECISIONS.md` already holds, dated — and it was
+stale (it claimed #160 was in progress, three issues and a release later).
+
+The split: the README keeps only what an entry point needs (what phonia is,
+why it exists, what it does, how to install and start it, and a table pointing
+at everything else), and is forbidden from restating a flag, a config key or a
+protocol field — it links instead, which is the rule that stops it growing
+back. The manual moved out whole, not rewritten, into `docs/USAGE.md`
+(commands, the daemon, the protocol), `docs/CONFIGURATION.md` (the config file
+and where the TIDAL session lives), `docs/AUDIO.md` (bit-perfect verification,
+PipeWire, gapless, ReplayGain, play reporting, MPRIS, shared mode) and
+`CONTRIBUTING.md` (build, tests, process). Moving text verbatim rather than
+rewriting it was deliberate: a rewrite of 650 lines of hard-won detail is
+where facts get quietly lost.
+
+The dependency rationale got its own `docs/TECH_STACK.md` rather than being
+folded into this file or into `CONTRIBUTING.md`. It is genuinely *why*
+material, but it is a reference organized by dependency and revised when a
+dependency changes, whereas this file is append-only and organized by date;
+mixing the two would have forced one of them to break its own rule.
+
+The roadmap's historical narrative was **deleted**, not archived. Each of the
+sixteen issues it covered (#25/#26, #27, #28, #29, #30, #31, #120, #124, #32,
+#39, #33, #139, #144, #34, #159, #160) was checked against this file's own
+entries first; all sixteen were already here. Archiving it to a third file
+would have created a document duplicating this one that nobody would ever
+update — the failure the split is meant to end, not repeat.
+
+[SONE](https://github.com/lullabyX/sone) is credited in the README as the
+project's inspiration, at the owner's request and accurately: using it is what
+made clear that a bit-perfect Linux TIDAL client was both possible and worth
+having, and that the terminal one the owner wanted did not exist. Its README
+shape (hero, tagline, badges, media, grouped features, install, usage, tech
+stack, contributing, disclaimer, license) is the model for phonia's new one.
+
+Four screenshots and the architecture diagram, made earlier for a write-up
+about the project, were committed to `docs/media/` — a TUI that nobody can see
+running is a TUI nobody tries. The diagram's labels were translated; from this
+date on every issue, pull request, commit, tag and file is written in English,
+though the milestone titles and the issues opened before today keep their
+Spanish names on GitHub (translated only where this repository quotes them).
+(#169)
+
+## 2026-10-19 — #173: dual `MIT OR Apache-2.0`, and third-party notices are generated
+
+A licence audit of the dependency tree prompted both halves of this. Of the
+302 third-party crates linked into the Linux binaries, none is GPL and nothing
+conflicts with MIT, but three things came out of it.
+
+**The licence is now `MIT OR Apache-2.0`**, not Apache-2.0 alone. Switching
+outright would have cost compatibility with GPL-2.0-only projects — Apache's
+patent clause is precisely what GPL-2 refuses — and imposed its `NOTICE`
+paperwork on everyone for no gain. Dual is the Rust ecosystem's own convention
+and gives each user the one they want: MIT for brevity, Apache-2.0 for the
+explicit patent grant MIT leaves out. `Copyright (c) 2026 phonia` stays the
+holder in the MIT file, as decided when the licence was first chosen.
+
+It was done now because re-licensing needs every copyright holder to agree,
+and phonia has exactly one. Today it is editing four files; after a few
+contributors it is a correspondence. The argument that it matters at all,
+for an application nobody links against, is `phonia-ipc`: that crate is built
+to be reusable, depending only on `serde` and `tokio` so any client can speak
+the protocol without ALSA or a TIDAL session. If it is ever published, dual is
+what its users will expect.
+
+**Third-party notices will be generated, never hand-written.** MIT, Apache-2.0,
+BSD and ISC all require their copyright notices to be reproduced when binaries
+are distributed, and the repository ships none. Source distribution is fine —
+the notices travel in the builder's own registry — but the packages of #43 and
+#44 are not. `cargo-about` reads the real licence texts rather than trusting
+the `license` field each crate declares, which also catches embedded data
+(fonts, Unicode tables, root certificates) carrying terms of its own.
+`cargo-deny check licenses` in CI, with an explicit allow-list, is what stops a
+GPL dependency arriving unnoticed.
+
+**Three findings worth keeping.** symphonia (12 crates) and `option-ext` are
+MPL-2.0, the only copyleft here, and it is per-file: §3.3 allows the Larger
+Work under other terms so long as the MPL files stay MPL, so using symphonia
+unmodified owes nothing. Vendoring and patching it would — not far-fetched,
+since `tidal.rs` and `dash.rs` exist because `tidlers` fell short. `self_cell`
+is `Apache-2.0 OR GPL-2.0-only`, the one crate where choosing wrong would pull
+GPL-2 in; Apache-2.0 is the choice. `libasound` is LGPL-2.1-or-later and is
+linked dynamically, which satisfies the LGPL by itself — a static binary or an
+AppImage bundling it would not, and that is a packaging decision #43 and #44
+have to state rather than discover. (#173)
+
+## 2026-10-22 — #175 part 1/4: the cover is sized against the very area it is drawn in
+
+The first half of making the TUI responsive turned out to be a bug fix. The
+cover was invisible at twelve terminal heights — 26, 27, 29, 30, 32, 33, 35,
+36, 38, 39, 41 and 42 — and nobody had noticed, because the heights outside
+that band are exactly the ones where the old `clamp(6, 12)` absorbed the
+mistake.
+
+**The fetch and the draw were measuring different rectangles.** The run loop
+sized the request against `areas(full).main`, the main panel's outer area,
+while every draw path sized it against `block.inner(area)`, two rows and two
+columns smaller. `cover_size` divides by three, so the two landed in different
+buckets for most heights in that band, and `ratatui_image::Image::render`
+returns **without drawing anything at all** when the encoded protocol is bigger
+than the area it is given — it does not clip, and `allow_clipping` is not set
+here. The reserved space stayed, blank.
+
+**This reverses the deliberate approximation recorded on 2026-10-01**, which
+said the panel's border was "a row and a column `cover_size` does not need to
+the pixel". That is true for choosing which TIDAL size to download, and false
+for the rectangle an all-or-nothing widget renders into. The two uses were
+conflated. There is now one `view::content_area`, which `lyrics_panel_rows`
+also uses in place of its own hand-rolled `-2`, so the change removes a
+parallel way to compute the layout rather than adding one — the worry the
+original decision was protecting against.
+
+**A resize now re-encodes, and does not re-download.** The ready cache was
+keyed by URL alone, so a resize that stayed inside the same TIDAL pixel bucket
+never re-encoded and the cached protocol, now too big for its area, stopped
+being drawn. One entry per URL carries the size it was encoded for and the
+bytes it came from, so `READY_CAPACITY` still means eight covers rather than
+eight (url, size) pairs, and a re-encode costs no second request.
+
+The two predicates are deliberately different, and the reason is worth keeping:
+**drawing asks whether what we have fits** (`protocol.size()` no bigger than
+the area), **fetching asks whether it is the size we asked for**
+(`ready.cells`). They cannot be the same test, because `Resize::Fit` never
+upscales: a protocol asked for at 40x20 cells can legitimately come back
+smaller, and comparing the encoded size against the requested one would
+re-fetch forever. The "does it fit" rule also buys something: while a resize's
+own re-encode is still running, an older, slightly small cover is drawn instead
+of leaving the space blank.
+
+A late result whose size the screen has already grown out of is now dropped, so
+a slow fetch cannot evict the one that is wanted.
+
+**Why the tests did not catch any of this.** The three cover tests asked
+whether a cell had been drawn with `style.fg.is_some() || style.bg.is_some()`,
+and `Cell::style` builds `fg: Some(self.fg)`, `bg: Some(self.bg)`
+unconditionally — so the predicate was true for every cell on a blank screen.
+All three were vacuous, with a comment asserting the opposite ("the plain
+background everywhere else never is"). They now compare against
+`Color::Reset`. Checking for a non-space glyph would not work either: a
+halfblock image of a uniform colour writes spaces with colours set.
+
+Parts 2 to 4 are the responsive work proper: the cover grows past its 12-row
+cap, each panel fits its hints and tab rows to the room it actually has, and a
+narrow terminal gives the sections list's columns to the panel.
+
+## 2026-10-22 — #175 part 2/4: the cover grows with the terminal, in steps
+
+The 12-row cap decided on 2026-10-01 ("a third of the header's own height,
+clamped to 6-12 rows") is gone. It meant a 60-row terminal showed the same
+cover as a 40-row one, which is the first bullet of #175. A third of the pane
+is still the rule — the list under the cover always keeps the larger share —
+but the ceiling is now the room available rather than a constant.
+
+**The size comes from a ladder, not from the exact third.** Every row up to 12,
+then 16, 20, 24 and 30. Two reasons for the shape:
+
+- *Below 12, every row*, so that no terminal which showed a cover before this
+  change gets a smaller one. This was nearly got wrong: a sparser ladder
+  (6, 7, 9, 11, 12, ...) reads better and is one line shorter, and it quietly
+  shrank the cover by a row at terminal heights 31, 32, 33, 37, 38 and 39 —
+  the heights whose third is 8 or 10. The whole range of thirds from 4 to 29
+  was checked against the old formula before this shipped, not a sample of
+  convenient sizes.
+- *Above 12, steps*, because the size is what the encoded protocol is cached
+  against: a continuous third would re-encode every three rows while a window
+  is being dragged, and on a cover that big two rows either way are invisible.
+
+**The smallest step shows whenever it fits at all**, even when it is more than
+a third of the pane. phonia is designed for 80x24, where the panel is 17 rows
+and a third is five — a strict third-of-the-pane rule would have removed the
+cover at exactly the size the project targets. Keeping it there is the owner's
+explicit decision, and the `or_else` in `cover_size` is that decision, not a
+redundant branch.
+
+**The top step is the download cap.** The requested pixel size is derived from
+the cover's width in cells, so at a typical 10x20 cell the largest request is
+600 px, which resolves to TIDAL's 640 px image (about 150 KB). The 1280 px one
+stays unreachable in practice. On a HiDPI cell it is reachable, which is
+correct: that terminal really has the pixels to fill.
+
+The cover is unchanged at 80x24, 100x30, 120x40, 140x45 and 160x50; at 200x60
+it goes from 12 to 16 rows, and at 300x80 to 24.
+
+## 2026-10-22 — #175 part 3/4: panels measure the room they have, instead of assuming it
+
+Three things assumed more room than they had and were silently clipped. All
+three now measure the area they are actually handed. **No width breakpoints in
+this part, deliberately:** these are content problems, and measuring also works
+for a narrow panel on a wide screen, which a breakpoint on the terminal's own
+width could not. The one real breakpoint belongs to part 4, in `areas()`.
+
+**The bar's key hints were cut at 80 columns** — the size phonia is designed
+for. `KEYS` was a single 88-column string rendered without wrapping or
+truncation, so the last ten characters went over the edge: `q quit`, `? help`,
+and the flags appended after them. Four tiers now, of 88, 59, 36 and 14
+columns, chosen by the room left once the flags have theirs.
+
+**The flags win over the hints**, because the flags are state (what the volume
+is, whether shuffle is on) and the hints are a reminder of what `?` lists in
+full. Four tiers rather than three because three left a cliff from 59 straight
+to 14. Checked against the real `flags()` output at 80 columns: nothing or
+`vol 60%` keeps tier 2, `vol 60%   RG -3.2 dB` drops to tier 3, and everything
+at once — muted volume, replay gain, shuffle, repeat all, autoplay, 63 columns
+of it — leaves twelve, so the hints go to tier 4 and the flags themselves are
+truncated. At that point truncating the flags is unavoidable: they are 63 of
+the 80 columns.
+
+**The hints shrink inside the bar's last row, never beyond it.**
+`BAR_HEIGHT = 5` is the invariant from 2026-10-03 and stays untouched, with its
+own regression test still green and unedited.
+
+**The three tab rows (library, search, artist) built the same row three times**
+and all three clipped. One `tabs_line` helper now, with three tiers: names with
+counts, names alone, then `‹ selected name ›` when even that does not fit, and
+the name truncated with an ellipsis if the arrows tier is still too wide. The
+arrows tier is honest rather than lossy — `h`/`l` already move between tabs,
+which the help lists. Library's labels are the reason it is needed: about 69
+columns with their counts, against a 44-column panel at 60 terminal columns.
+
+A render test was added beyond the helper's own unit tests, because the helper
+being correct is not the thing most likely to be wrong — part 1's bug was a
+correct function handed the wrong area. `draw_tabs` is now pinned to hand it the
+panel's own width, not the terminal's.
+
+**Half a page is half the panel, not half the terminal.** `half_page` halved
+`state.size.1`, which includes the five-row bar and the panel's borders, so
+`ctrl+d` and `ctrl+u` overshot by about three rows. It uses `content_area` now,
+the function part 1 introduced. The existing test could not tell 16 rows from
+20 — it only checked where the cursor landed — so the new test pins the number
+itself.
+
+## 2026-10-22 — #175 part 4/4 (last): one width breakpoint, and a floor — CLOSES #175
+
+**One breakpoint, at 60 columns, and it lives in `areas()`.** Below it the
+sections list gives its 14 columns to the panel. One rather than a ladder
+because the sidebar is the only *pane* worth hiding — there are two — and every
+other narrow-width problem was a content problem, solved in part 3 by measuring
+the area each piece is handed, which also works for a narrow panel on a wide
+screen. Putting the rule in `areas()` keeps a single layout authority:
+`content_area`, `lyrics_panel_rows` and `half_page` all derive from it and
+followed automatically, no second place to keep in step.
+
+Nothing becomes unreachable when the list goes: the panel's own title still
+names the section and the digits 1-5 still switch it, which the help lists.
+
+**The focus cannot land on a list that is not drawn.** `State::sidebar_shown`
+guards three places: `Msg::Resize` forces the focus to the panel when the list
+goes away, and `FocusNext` and `FocusSidebar` refuse to move onto it. Without
+this the focus ring would point at nothing and `j`/`k` would quietly stop
+meaning "next row".
+
+A width of zero counts as "shown", and that is load-bearing rather than
+defensive: `State` derives `Default`, so the size is `(0, 0)` until the first
+`Msg::Resize`, and treating that as narrow would have moved the focus in a
+dozen tests that have nothing to do with this change.
+
+**A floor at 40x10.** Under it the panels would be borders around nothing, so
+`draw` returns a centred message — `Terminal too small.`, the size needed and
+the size there is, and `q quit`, because leaving is the only thing possible.
+The check runs before `areas()` and before the help overlay, so nothing paints
+over it. `help::centered` was reused rather than a second centring helper
+written. 40x10 sits under every size the suite renders at and above the point
+where a bordered panel stops being possible: the bar alone is five rows.
+
+**No existing test had to be changed, and that was checked rather than
+assumed.** The claim is suspicious on its face for the one part that moves the
+panel's origin, so the breakpoint was raised to 200 columns on purpose, to make
+the sidebar vanish at every size the suite renders at: nine tests failed,
+including `the_areas_do_not_overlap_and_fill_the_screen` and
+`the_sections_list_is_still_there_at_sixty_columns`. The suite does see this
+change; it passes at 60 because 60 is genuinely above the line, not because
+nothing is looking. (A first count of two failures was wrong — truncated
+output, not a weak suite.)
+
+This closes #175. What the four parts came to: a cover that was invisible at
+twelve terminal heights now appears and survives a resize; it grows past the
+12-row cap on a tall terminal; the bar's key hints and the three tab rows fit
+the room they are given instead of being clipped at 80 columns; and a narrow
+terminal reflows rather than cramming.

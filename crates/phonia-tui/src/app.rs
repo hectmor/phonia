@@ -147,6 +147,12 @@ pub struct State {
 }
 
 impl State {
+    /// Whether the sections list is on screen at the size last known. A size of zero means nothing
+    /// has told us yet (a fresh `State`, before the first `Msg::Resize`): assume it is there.
+    fn sidebar_shown(&self) -> bool {
+        self.size.0 == 0 || self.size.0 >= crate::view::NARROW_COLUMNS
+    }
+
     pub fn section(&self) -> Section {
         Section::ALL[self.sidebar.selected().min(Section::ALL.len() - 1)]
     }
@@ -162,9 +168,11 @@ impl State {
                 .is_some_and(|server| server.capabilities.iter().any(|c| c == capability))
     }
 
-    /// How many rows half a page is: half the terminal's height, and at least one.
+    /// How many rows half a page is: half the main panel's content height (not the terminal's,
+    /// which also holds the bar and the borders), and at least one.
     fn half_page(&self) -> usize {
-        usize::from(self.size.1 / 2).max(1)
+        let area = ratatui::layout::Rect::new(0, 0, self.size.0, self.size.1);
+        usize::from(crate::view::content_area(area).height / 2).max(1)
     }
 
     /// The cover (or picture) the main panel's current section wants to show: an opened album's
@@ -372,6 +380,9 @@ fn update_now(state: &mut State, msg: Msg) -> Effects {
         Msg::Key(event) => on_key(state, event),
         Msg::Resize(columns, rows) => {
             state.size = (columns, rows);
+            if !state.sidebar_shown() {
+                state.focus = Focus::Main;
+            }
             Effects::redraw()
         }
         Msg::Tick => tick(state),
@@ -1242,11 +1253,12 @@ fn apply(state: &mut State, action: Action) -> Effects {
         Action::FocusNext => {
             state.focus = match state.focus {
                 Focus::Sidebar => Focus::Main,
-                Focus::Main => Focus::Sidebar,
+                Focus::Main if state.sidebar_shown() => Focus::Sidebar,
+                Focus::Main => Focus::Main,
             }
         }
         Action::FocusSidebar => {
-            if !pop_view_if_browsing(state) {
+            if !pop_view_if_browsing(state) && state.sidebar_shown() {
                 state.focus = Focus::Sidebar;
             }
         }
@@ -2810,6 +2822,15 @@ mod tests {
         update(&mut state, Msg::Resize(80, 1));
         ctrl(&mut state, 'd');
         assert_eq!(state.section(), Section::Queue, "one row at least");
+    }
+
+    #[test]
+    fn half_a_page_is_half_the_panel_not_half_the_terminal() {
+        let mut state = State::default();
+        assert_eq!(state.half_page(), 1, "no size yet: still one row");
+        // 40 rows, less the bar (5) and the panel's two borders: 33 rows of content.
+        update(&mut state, Msg::Resize(80, 40));
+        assert_eq!(state.half_page(), 16);
     }
 
     #[test]

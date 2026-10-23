@@ -3,9 +3,9 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 alsa = "0.12.1"
@@ -36,3 +36,9 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 phonia-core = { path = "crates/phonia-core" }
 phonia-ipc = { path = "crates/phonia-ipc" }
 phonia-tui = { path = "crates/phonia-tui" }
+
+# Playback is real time, and unoptimized dependencies cost ~40% of a core where a release build
+# costs ~1%. Optimizing only the dependencies brings a debug build to ~5% and leaves phonia's own
+# crates unoptimized, so it stays debuggable.
+[profile.dev.package."*"]
+opt-level = 3
