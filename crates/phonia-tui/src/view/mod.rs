@@ -2749,7 +2749,7 @@ mod tests {
     }
 
     #[test]
-    fn the_cover_keeps_two_columns_from_its_text_and_two_rows_from_the_list() {
+    fn the_cover_keeps_two_columns_from_its_text_and_a_row_from_the_list() {
         let state = state_with_an_open_album();
         let covers = Covers::new(Some(ratatui_image::picker::Picker::halfblocks()));
         let (width, height) = (100, 30);
@@ -2773,23 +2773,21 @@ mod tests {
 
         // No image has arrived, so the cover's own cells are blank: the first text on its top row
         // is the header's, and it starts past the gap.
-        // Two, spelled out rather than read back from the constant, because two is what #188
-        // asks for: a test that quotes the constant would pass whatever the constant became.
+        // Two columns and one row, spelled out rather than read back from the constants, because
+        // those are what #188 asks for: a test quoting them passes whatever they become.
         assert_eq!(
             first_text_in(inner.y),
             Some(inner.x + cells.width + 2),
             "{screen}"
         );
-        for row in inner.y + cells.height..inner.y + cells.height + 2 {
-            assert_eq!(
-                first_text_in(row),
-                None,
-                "row {row} is not blank:\n{screen}"
-            );
-        }
-        // And the list does start right after those rows, so the gap is a gap, not a short pane.
+        assert_eq!(
+            first_text_in(inner.y + cells.height),
+            None,
+            "the row under the cover is not blank:\n{screen}"
+        );
+        // And the list does start right after it, so the gap is a gap, not a short pane.
         assert!(
-            first_text_in(inner.y + cells.height + 2).is_some(),
+            first_text_in(inner.y + cells.height + 1).is_some(),
             "{screen}"
         );
     }

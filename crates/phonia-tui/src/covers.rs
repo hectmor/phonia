@@ -289,7 +289,7 @@ fn url_at(
 /// Columns left between the cover and the text beside it.
 pub const COVER_GAP_COLS: u16 = 2;
 /// Rows left between the cover and the list beneath it.
-pub const COVER_GAP_ROWS: u16 = 2;
+pub const COVER_GAP_ROWS: u16 = 1;
 
 /// The size, in cells, a cover should be encoded at to fit `area`: the largest tier that is at
 /// most a third of its height, with the width computed from the terminal's own font size so the
@@ -631,8 +631,8 @@ mod tests {
 
     #[test]
     fn a_pane_too_short_for_the_smallest_tier_shows_no_cover_at_all() {
-        assert_eq!(cover_size(Rect::new(0, 0, 100, 7), font_size()), None);
-        assert!(cover_size(Rect::new(0, 0, 100, 8), font_size()).is_some());
+        assert_eq!(cover_size(Rect::new(0, 0, 100, 6), font_size()), None);
+        assert!(cover_size(Rect::new(0, 0, 100, 7), font_size()).is_some());
     }
 
     #[test]
@@ -661,8 +661,8 @@ mod tests {
 
     #[test]
     fn too_small_an_area_fits_no_cover() {
-        // Not even 6 rows plus the 2 of gap.
-        assert_eq!(cover_size(Rect::new(0, 0, 100, 7), font_size()), None);
+        // Not even 6 rows plus the row of gap.
+        assert_eq!(cover_size(Rect::new(0, 0, 100, 6), font_size()), None);
         // Tall enough, but no room left for the header's text beside a cover this wide.
         assert_eq!(cover_size(Rect::new(0, 0, 15, 30), font_size()), None);
     }
