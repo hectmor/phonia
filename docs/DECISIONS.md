@@ -3517,3 +3517,26 @@ twelve terminal heights now appears and survives a resize; it grows past the
 12-row cap on a tall terminal; the bar's key hints and the three tab rows fit
 the room they are given instead of being clipped at 80 columns; and a narrow
 terminal reflows rather than cramming.
+
+## 2026-10-23 — Named palettes in `theme.toml` may use true RGB; the default still uses only the terminal's 16
+
+The 2026-09-26 decision above stands for the *default* theme: with no
+`~/.config/phonia/theme.toml`, or one that doesn't set `palette`, colors are
+still exactly the terminal's own 16 ANSI colors, `NO_COLOR`-aware, unchanged.
+A small, curated set of built-in named palettes (`gruvbox`, `dracula`,
+`nord`) is added as an explicit, scoped exception: selecting one by name
+uses that scheme's real RGB colors, because the point of naming a known
+scheme is to look like it regardless of what the terminal's own 16 slots are
+mapped to. Only foregrounds are set — `text` and `selected` are untouched,
+so no palette paints the frame's background; these are dark-background
+schemes laid over whatever background the terminal already has.
+
+A chosen palette takes priority over `NO_COLOR`: no-color.org says a user's
+own configuration should override the environment variable, so a palette
+is sent as 24-bit escapes regardless, with no fallback yet for a terminal
+without true-color support.
+
+Read once at startup (`Theme::load`, `crates/phonia-tui/src/theme.rs`); no
+hot-reload, no per-role override — restart `phonia tui` to apply a change,
+the same convention `phonia-core`'s `config.toml` already uses. This closes
+#38.

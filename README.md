@@ -69,8 +69,9 @@ exists for headphones and speakers, and it says plainly that it is not bit-perfe
 - **The signal path, always visible**: what is playing, through what format, to which
   device, with the same verdict `phonia ctl status` prints —
   `TIDAL hires 24-bit / 192 kHz → S24_3LE → Fosi Audio DS2 (hw:1,0)  ✔ BIT-PERFECT`.
-- **The terminal's own sixteen colours**, so it follows your palette; `NO_COLOR` is
-  honoured.
+- **The terminal's own sixteen colours** by default, so it follows your palette; `NO_COLOR` is
+  honoured. Or a built-in palette (`gruvbox`, `dracula`, `nord`) chosen in `theme.toml`
+  ([CONFIGURATION.md](docs/CONFIGURATION.md)).
 - **Help that cannot go stale**, generated from the same table the keys are read from.
 - It **reconnects by itself** when the daemon is not there yet or goes away, and says why
   when what answers is not a compatible daemon.

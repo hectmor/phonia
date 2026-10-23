@@ -104,7 +104,8 @@ track is in [AUDIO.md](AUDIO.md). Start at the [README](../README.md).
   through a real graphics protocol (Kitty, Sixel, iTerm2) when the
   terminal has one; `halfblocks` (24-bit colour, `▀`/`▄` characters) only when the
   terminal says it has true colour, so `theme.rs`'s own 16-ANSI-colours rule is never broken by
-  accident; with neither, no cover shows, rather than one that looks wrong. A cover is fetched
+  accident (unless a palette is chosen in `theme.toml`, see [CONFIGURATION.md](CONFIGURATION.md));
+  with neither, no cover shows, rather than one that looks wrong. A cover is fetched
   straight from TIDAL's public image CDN, which needs no TIDAL session, so this is the one thing
   the interface reaches the network for directly (see [DECISIONS.md](DECISIONS.md), 2026-10-01). The bar's
   own **signal path line** (#28) shows what is playing, through what format, to which device, with
