@@ -39,12 +39,15 @@ pub async fn run(socket: PathBuf, cover_mode: graphics::CoverMode) -> Result<()>
     if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
         bail!("phonia tui needs a terminal; use `phonia ctl` for scripts and pipes");
     }
+    // Fails before the terminal is touched at all, so a bad theme.toml never flashes the
+    // alternate screen just to quit right back out of it.
+    let theme = Theme::load()?;
     // Installs a panic hook that restores the terminal before the message is printed.
     let mut terminal = ratatui::init();
     // Queries the terminal for graphics support, per `graphics::setup`'s own requirement: after
     // entering the alternate screen (just above), before reading any terminal event (below).
     let picker = graphics::setup(cover_mode);
-    let result = event_loop(&mut terminal, socket, picker).await;
+    let result = event_loop(&mut terminal, socket, picker, theme).await;
     ratatui::restore();
     result
 }
@@ -53,8 +56,8 @@ async fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     socket: PathBuf,
     picker: Option<ratatui_image::picker::Picker>,
+    theme: Theme,
 ) -> Result<()> {
-    let theme = Theme::detect();
     let mut state = State::default();
     let mut covers = Covers::new(picker);
     let size = terminal.size()?;

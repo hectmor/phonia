@@ -1,8 +1,8 @@
 # Configuration
 
-The complete `config.toml` reference, what every setting does, and where the
-TIDAL login is kept. The commands these settings affect are in
-[USAGE.md](USAGE.md); the audio behaviour they select is in
+The complete `config.toml` reference, what every setting does, the TUI's own
+theme file, and where the TIDAL login is kept. The commands these settings
+affect are in [USAGE.md](USAGE.md); the audio behaviour they select is in
 [AUDIO.md](AUDIO.md). Start at the [README](../README.md).
 
 ## The config file
@@ -164,6 +164,24 @@ autoplay = false        # fetch more tracks from TIDAL when the queue runs dry? 
   `PHONIA_CONFIG` environment variable) selects another file, also for `phoniad`.
 - The daemon reads the file once, at startup: restart it to apply a change. The file holds no
   secrets (the TIDAL session is kept apart, see below).
+
+## The theme file
+
+The TUI's colours live in their own file, `~/.config/phonia/theme.toml`, separate from
+`config.toml` — `phonia-tui` reads it directly and never touches `config.toml` or anything else
+in `phonia-core`. There is one key:
+
+```toml
+palette = "nord"   # "gruvbox", "dracula" or "nord"
+```
+
+With no file, or one that doesn't set `palette`, nothing changes: the TUI still uses only the
+terminal's own 16 colours, `NO_COLOR`-aware, exactly as always. Naming a palette uses that
+scheme's real colours instead, on dark-background foregrounds only — it never paints the frame's
+background, and it takes priority over `NO_COLOR` (sent as 24-bit colour regardless of whether
+the terminal says it supports true colour). An unknown palette name is a startup error that lists
+the three real ones. Like `config.toml`, this is read once at startup: restart `phonia tui` to
+apply a change.
 
 ## Where the TIDAL session is kept
 

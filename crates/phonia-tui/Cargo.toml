@@ -8,13 +8,16 @@ description = "The terminal interface of phonia: a client of the daemon"
 [dependencies]
 anyhow.workspace = true
 crossterm.workspace = true
+dirs.workspace = true
 futures-util.workspace = true
 image.workspace = true
 phonia-ipc.workspace = true
 ratatui.workspace = true
 ratatui-image.workspace = true
 reqwest.workspace = true
+serde.workspace = true
 tokio.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 # The scripted daemon of the connection tests speaks the protocol by hand.

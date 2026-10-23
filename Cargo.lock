@@ -2072,14 +2072,17 @@ version = "1.1.0"
 dependencies = [
  "anyhow",
  "crossterm",
+ "dirs",
  "futures-util",
  "image",
  "phonia-ipc",
  "ratatui",
  "ratatui-image",
  "reqwest",
+ "serde",
  "serde_json",
  "tokio",
+ "toml",
 ]
 
 [[package]]
