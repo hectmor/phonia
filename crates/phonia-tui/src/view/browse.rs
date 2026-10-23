@@ -51,12 +51,18 @@ fn draw_track_list(
     });
     let (cover_area, header_area, list_area) = match reserved {
         Some((url, cells)) => {
-            let [top, list_area] =
-                Layout::vertical([Constraint::Length(cells.height), Constraint::Min(0)])
-                    .areas(area);
-            let [cover_area, header_area] =
-                Layout::horizontal([Constraint::Length(cells.width), Constraint::Min(0)])
-                    .areas(top);
+            let [top, _, list_area] = Layout::vertical([
+                Constraint::Length(cells.height),
+                Constraint::Length(covers::COVER_GAP_ROWS),
+                Constraint::Min(0),
+            ])
+            .areas(area);
+            let [cover_area, _, header_area] = Layout::horizontal([
+                Constraint::Length(cells.width),
+                Constraint::Length(covers::COVER_GAP_COLS),
+                Constraint::Min(0),
+            ])
+            .areas(top);
             (Some((cover_area, url, cells)), header_area, list_area)
         }
         None => {
@@ -233,21 +239,27 @@ fn draw_artist(
     });
     // The bio can run longer than the terminal is wide, so it wraps onto as many lines as it
     // takes, next to the cover when there is one.
-    let header_width = area
-        .width
-        .saturating_sub(reserved.as_ref().map_or(0, |(_, cells)| cells.width));
+    let header_width = area.width.saturating_sub(
+        reserved
+            .as_ref()
+            .map_or(0, |(_, cells)| cells.width + covers::COVER_GAP_COLS),
+    );
     let header = artist_header_lines(view, theme, header_width);
     let (cover_area, header_area, tabs_area, list_area) = match reserved {
         Some((url, cells)) => {
-            let [top, tabs_area, list_area] = Layout::vertical([
+            let [top, _, tabs_area, list_area] = Layout::vertical([
                 Constraint::Length(cells.height.max(header.len() as u16)),
+                Constraint::Length(covers::COVER_GAP_ROWS),
                 Constraint::Length(1),
                 Constraint::Min(0),
             ])
             .areas(area);
-            let [cover_area, header_area] =
-                Layout::horizontal([Constraint::Length(cells.width), Constraint::Min(0)])
-                    .areas(top);
+            let [cover_area, _, header_area] = Layout::horizontal([
+                Constraint::Length(cells.width),
+                Constraint::Length(covers::COVER_GAP_COLS),
+                Constraint::Min(0),
+            ])
+            .areas(top);
             (
                 Some((cover_area, url, cells)),
                 header_area,

@@ -262,12 +262,18 @@ fn draw_queue(
     });
     let (cover_area, header_area, list_area) = match reserved {
         Some((url, cells)) => {
-            let [top, list_area] =
-                Layout::vertical([Constraint::Length(cells.height), Constraint::Min(0)])
-                    .areas(area);
-            let [cover_area, header_area] =
-                Layout::horizontal([Constraint::Length(cells.width), Constraint::Min(0)])
-                    .areas(top);
+            let [top, _, list_area] = Layout::vertical([
+                Constraint::Length(cells.height),
+                Constraint::Length(covers::COVER_GAP_ROWS),
+                Constraint::Min(0),
+            ])
+            .areas(area);
+            let [cover_area, _, header_area] = Layout::horizontal([
+                Constraint::Length(cells.width),
+                Constraint::Length(covers::COVER_GAP_COLS),
+                Constraint::Min(0),
+            ])
+            .areas(top);
             (Some((cover_area, url, cells)), Some(header_area), list_area)
         }
         // No image to size the header by (no picker, no cover, or not enough room for one), but
@@ -2740,6 +2746,52 @@ mod tests {
         assert!(drawn, "{screen}");
         let (drawn, screen) = cover_shows_at(&state, &mut covers, 100, 30);
         assert!(drawn, "{screen}");
+    }
+
+    #[test]
+    fn the_cover_keeps_two_columns_from_its_text_and_two_rows_from_the_list() {
+        let state = state_with_an_open_album();
+        let covers = Covers::new(Some(ratatui_image::picker::Picker::halfblocks()));
+        let (width, height) = (100, 30);
+        let theme = Theme::new(false);
+        let inner = panel("x", false, &theme).inner(areas(Rect::new(0, 0, width, height)).main);
+        let cells = covers::cover_size(inner, covers.picker().unwrap().font_size()).unwrap();
+
+        let screen = screen_with(&state, &covers, width, height);
+        let lines: Vec<&str> = screen.lines().collect();
+        // The first column holding anything inside the pane, counted in cells rather than bytes:
+        // the panel borders on either side are multi-byte, and are not the pane's to read.
+        let first_text_in = |row: u16| {
+            lines[usize::from(row)]
+                .chars()
+                .enumerate()
+                .skip(usize::from(inner.x))
+                .take(usize::from(inner.width))
+                .find(|(_, c)| !c.is_whitespace())
+                .map(|(x, _)| x as u16)
+        };
+
+        // No image has arrived, so the cover's own cells are blank: the first text on its top row
+        // is the header's, and it starts past the gap.
+        // Two, spelled out rather than read back from the constant, because two is what #188
+        // asks for: a test that quotes the constant would pass whatever the constant became.
+        assert_eq!(
+            first_text_in(inner.y),
+            Some(inner.x + cells.width + 2),
+            "{screen}"
+        );
+        for row in inner.y + cells.height..inner.y + cells.height + 2 {
+            assert_eq!(
+                first_text_in(row),
+                None,
+                "row {row} is not blank:\n{screen}"
+            );
+        }
+        // And the list does start right after those rows, so the gap is a gap, not a short pane.
+        assert!(
+            first_text_in(inner.y + cells.height + 2).is_some(),
+            "{screen}"
+        );
     }
 
     #[test]

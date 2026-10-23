@@ -286,6 +286,11 @@ fn url_at(
     phonia_ipc::image::url(kind, id, min_px)
 }
 
+/// Columns left between the cover and the text beside it.
+pub const COVER_GAP_COLS: u16 = 2;
+/// Rows left between the cover and the list beneath it.
+pub const COVER_GAP_ROWS: u16 = 2;
+
 /// The size, in cells, a cover should be encoded at to fit `area`: the largest tier that is at
 /// most a third of its height, with the width computed from the terminal's own font size so the
 /// image comes out square in pixels, not just in character cells (usually about twice as tall as
@@ -312,8 +317,10 @@ pub fn cover_size(area: Rect, font_size: FontSize) -> Option<Size> {
         ((u32::from(height) * u32::from(font_size.height)) / u32::from(font_size.width)).max(1)
             as u16
     };
-    let fits =
-        |height: u16| height <= area.height && width_of(height) + MIN_TEXT_WIDTH <= area.width;
+    let fits = |height: u16| {
+        height + COVER_GAP_ROWS <= area.height
+            && width_of(height) + COVER_GAP_COLS + MIN_TEXT_WIDTH <= area.width
+    };
     // A third of the pane, so the list under it always keeps the larger share -- except for the
     // smallest tier, which shows whenever it fits at all: phonia is designed for 80x24, where a
     // third is only five rows, and losing the cover there would be a regression (#175).
@@ -624,22 +631,22 @@ mod tests {
 
     #[test]
     fn a_pane_too_short_for_the_smallest_tier_shows_no_cover_at_all() {
-        assert_eq!(cover_size(Rect::new(0, 0, 100, 5), font_size()), None);
-        assert!(cover_size(Rect::new(0, 0, 100, 6), font_size()).is_some());
+        assert_eq!(cover_size(Rect::new(0, 0, 100, 7), font_size()), None);
+        assert!(cover_size(Rect::new(0, 0, 100, 8), font_size()).is_some());
     }
 
     #[test]
     fn a_pane_too_narrow_leaves_the_header_its_twenty_columns() {
-        // The smallest tier is 12 columns wide: 12 + 20 = 32.
-        assert_eq!(cover_size(Rect::new(0, 0, 31, 30), font_size()), None);
+        // The smallest tier is 12 columns wide: 12 + 2 + 20 = 34.
+        assert_eq!(cover_size(Rect::new(0, 0, 33, 30), font_size()), None);
         assert_eq!(
-            cover_size(Rect::new(0, 0, 32, 30), font_size()),
+            cover_size(Rect::new(0, 0, 34, 30), font_size()),
             Some(Size::new(12, 6))
         );
-        // A narrow pane picks a smaller tier rather than none: 14 + 20 = 34 does not fit in
-        // 33 columns, 12 + 20 does, so the 7-row tier falls to the 6-row one.
+        // A narrow pane picks a smaller tier rather than none: 14 + 2 + 20 = 36 does not fit in
+        // 35 columns, 12 + 2 + 20 does, so the 7-row tier falls to the 6-row one.
         assert_eq!(
-            cover_size(Rect::new(0, 0, 33, 30), font_size()),
+            cover_size(Rect::new(0, 0, 35, 30), font_size()),
             Some(Size::new(12, 6))
         );
     }
@@ -654,8 +661,8 @@ mod tests {
 
     #[test]
     fn too_small_an_area_fits_no_cover() {
-        // Not even 6 rows tall.
-        assert_eq!(cover_size(Rect::new(0, 0, 100, 5), font_size()), None);
+        // Not even 6 rows plus the 2 of gap.
+        assert_eq!(cover_size(Rect::new(0, 0, 100, 7), font_size()), None);
         // Tall enough, but no room left for the header's text beside a cover this wide.
         assert_eq!(cover_size(Rect::new(0, 0, 15, 30), font_size()), None);
     }
