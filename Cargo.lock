@@ -2075,6 +2075,7 @@ dependencies = [
  "dirs",
  "futures-util",
  "image",
+ "libc",
  "phonia-ipc",
  "ratatui",
  "ratatui-image",

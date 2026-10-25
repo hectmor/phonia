@@ -211,6 +211,13 @@ phonia ctl shutdown
   daemon that was killed is replaced.
 - `phoniad --verbose` prints the library's own notes and warnings; by default it prints nothing to
   stdout.
+- **`phonia tui` starts its own `phoniad`** when nothing answers yet on the socket (same `--socket`,
+  and `--config` if one was given), and stops only that one -- on quit, on SIGTERM, or when the
+  terminal closes -- never a daemon it didn't start. Its output goes to
+  `~/.local/state/phonia/phoniad.log`. Running `phoniad` yourself (by hand, or later as a systemd
+  user service) keeps working exactly as above; the TUI never touches it. If a second TUI attaches
+  to the first TUI's self-started daemon, it loses that daemon when the first TUI quits -- run
+  `phoniad` yourself first if it should outlive any one TUI session.
 
 ### The protocol
 
