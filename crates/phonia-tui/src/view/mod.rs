@@ -3690,6 +3690,8 @@ mod tests {
                         duration_ms: None,
                         cover: None,
                         played_at_ms: 1_000,
+                        artist_id: None,
+                        album_id: None,
                     }],
                 }),
             },

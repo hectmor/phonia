@@ -346,6 +346,7 @@ impl Daemon {
         let changed = match event {
             engine::Event::TrackStarted { meta, .. } => {
                 let (_, source) = convert::entry_of(&meta.track, queue);
+                let (artist_id, album_id) = convert::artist_and_album_id(&meta.track, queue);
                 recent.started(source.map(|source| PlayedTrack {
                     source,
                     title: meta.title.clone(),
@@ -353,6 +354,8 @@ impl Daemon {
                     duration_ms: meta.duration.map(convert::ms),
                     cover: meta.cover.clone(),
                     played_at_ms: now,
+                    artist_id,
+                    album_id,
                 }));
                 false
             }

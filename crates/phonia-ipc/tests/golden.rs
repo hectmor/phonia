@@ -301,7 +301,7 @@ fn the_server_banner() {
                 CAP_AUTOPLAY.into(),
             ],
         }),
-        r#"{"type":"hello","protocol":{"major":1,"minor":17},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","recently_played","catalog","lyrics","autoplay"]}"#,
+        r#"{"type":"hello","protocol":{"major":1,"minor":18},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","recently_played","catalog","lyrics","autoplay"]}"#,
     );
 }
 
@@ -1145,7 +1145,7 @@ fn versions_are_compatible_across_minors_but_not_majors() {
     assert!(v(1, 0).compatible_with(v(1, 7)));
     assert!(v(1, 7).compatible_with(v(1, 0)));
     assert!(!v(1, 0).compatible_with(v(2, 0)));
-    assert_eq!(PROTOCOL, v(1, 17));
+    assert_eq!(PROTOCOL, v(1, 18));
 }
 
 #[test]
@@ -1293,13 +1293,15 @@ fn the_recently_played_request_response_and_event_since_1_15() {
         duration_ms: Some(271_000),
         cover: None,
         played_at_ms: 1_700_000_000_000,
+        artist_id: Some("780".into()),
+        album_id: None,
     };
     response(
         2,
         Reply::Ok(Payload::RecentlyPlayed {
             items: vec![played.clone()],
         }),
-        r#"{"type":"response","id":2,"ok":{"type":"recently_played","items":[{"source":"tidal:33723914","title":"Here to Stay","artist":"Korn","duration_ms":271000,"cover":null,"played_at_ms":1700000000000}]}}"#,
+        r#"{"type":"response","id":2,"ok":{"type":"recently_played","items":[{"source":"tidal:33723914","title":"Here to Stay","artist":"Korn","duration_ms":271000,"cover":null,"played_at_ms":1700000000000,"artist_id":"780","album_id":null}]}}"#,
     );
     let json = serde_json::to_string(&ServerMessage::Event {
         seq: 1,
