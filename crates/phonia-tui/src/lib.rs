@@ -10,6 +10,7 @@ pub mod browse;
 pub mod conn;
 pub mod covers;
 pub mod cursor;
+pub mod daemon;
 pub mod graphics;
 pub mod home;
 pub mod input;
@@ -21,34 +22,62 @@ pub mod search;
 pub mod theme;
 pub mod view;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use app::{Cmd, Msg, State, TICK};
 use covers::{Covers, Outcome};
 use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures_util::StreamExt;
 use phonia_ipc::{Client, ClientInfo};
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use theme::Theme;
+use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::{Notify, mpsc};
 
 /// Runs the interface until the user quits. Takes over the terminal, and gives it back whatever
 /// happens: on an error, and on a panic too.
-pub async fn run(socket: PathBuf, cover_mode: graphics::CoverMode) -> Result<()> {
+pub async fn run(
+    socket: PathBuf,
+    config: Option<&Path>,
+    cover_mode: graphics::CoverMode,
+) -> Result<()> {
     if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
         bail!("phonia tui needs a terminal; use `phonia ctl` for scripts and pipes");
     }
     // Fails before the terminal is touched at all, so a bad theme.toml never flashes the
     // alternate screen just to quit right back out of it.
     let theme = Theme::load()?;
+    // Installed before starting (or not) a daemon of our own, so a signal arriving mid-startup
+    // can't slip past before there is anywhere to catch it.
+    let mut hangup = signal(SignalKind::hangup()).context("installing the SIGHUP handler")?;
+    let mut terminate =
+        signal(SignalKind::terminate()).context("installing the SIGTERM handler")?;
+    let owned = daemon::start_if_absent(&socket, config).await?;
     // Installs a panic hook that restores the terminal before the message is printed.
     let mut terminal = ratatui::init();
     // Queries the terminal for graphics support, per `graphics::setup`'s own requirement: after
     // entering the alternate screen (just above), before reading any terminal event (below).
     let picker = graphics::setup(cover_mode);
-    let result = event_loop(&mut terminal, socket, picker, theme).await;
-    ratatui::restore();
+    let result = event_loop(
+        &mut terminal,
+        socket,
+        picker,
+        theme,
+        &mut hangup,
+        &mut terminate,
+    )
+    .await;
+    // Before restore: after a hangup the terminal may already be gone, and ratatui::restore()'s
+    // own eprintln on failure must not skip stopping a daemon we own.
+    if let Some(owned) = owned {
+        owned.stop().await;
+    }
+    // Not `ratatui::restore()`: on a real hangup the tty is gone, so its own failed-restore
+    // `eprintln!` would also fail to write, panic, and abort the process via the panic hook's
+    // second failing `restore()` -- a crash that only became reachable once SIGHUP stopped being
+    // instantly fatal.
+    let _ = ratatui::try_restore();
     result
 }
 
@@ -57,6 +86,8 @@ async fn event_loop(
     socket: PathBuf,
     picker: Option<ratatui_image::picker::Picker>,
     theme: Theme,
+    hangup: &mut Signal,
+    terminate: &mut Signal,
 ) -> Result<()> {
     let mut state = State::default();
     let mut covers = Covers::new(picker);
@@ -81,6 +112,8 @@ async fn event_loop(
 
     while !state.quit {
         let msg = tokio::select! {
+            _ = hangup.recv() => break,
+            _ = terminate.recv() => break,
             _ = tick.tick() => Msg::Tick,
             Some(msg) = from_daemon.recv() => msg,
             Some((url, cells, outcome)) = cover_results.recv() => {

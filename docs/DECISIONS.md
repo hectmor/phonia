@@ -3540,3 +3540,66 @@ Read once at startup (`Theme::load`, `crates/phonia-tui/src/theme.rs`); no
 hot-reload, no per-role override — restart `phonia tui` to apply a change,
 the same convention `phonia-core`'s `config.toml` already uses. This closes
 #38.
+
+## 2026-10-24 — `phonia tui` starts and stops its own `phoniad`
+
+No new flag chooses between "start my own daemon" and "use the one already
+there": `phonia tui` just probes whether anything answers on the socket at
+startup, and that single fact decides everything. This is what lets a
+by-hand `phoniad`, and later a systemd user service managing it for the AUR
+package (#44), coexist with this feature without the user picking a mode:
+either way, something already answers, so the TUI never spawns and never
+owns a daemon it didn't start. Ownership is tracked only for a child this
+process itself spawned (`daemon::Owned`, `crates/phonia-tui/src/daemon.rs`);
+an inherited daemon is never touched, on quit or otherwise.
+
+The owned child is stopped with `SIGTERM` to its own pid, not by reusing the
+IPC `Request::Shutdown` that `phonia ctl shutdown` sends. `phoniad` makes a
+network call (`auth::load_client`) before it binds its socket
+(`crates/phoniad/src/main.rs`), so for a moment after it's spawned there is
+a live process but no socket yet to send an IPC request to safely — and if
+two daemons were ever racing to bind, an IPC stop could in principle land on
+the wrong one once it does bind. A signal to a pid this process holds and
+hasn't reaped has no such ambiguity, at any point in startup, and once
+`phoniad` has bound its socket this is the exact signal its own
+`terminate.recv()` branch already handles with its usual graceful
+`request_shutdown` → `stop_engine` → socket-cleanup sequence. A 3-second
+timeout falls back to `SIGKILL`, which skips that graceful device release —
+accepted as a rare, logged shortcut rather than something to engineer around
+up front.
+
+The child is spawned with `process_group(0)`, so the terminal's own SIGHUP
+reaches only the TUI, not an unprotected `phoniad` racing to handle it on
+its own; the TUI decides when to stop its child instead. The TUI now catches
+SIGTERM on itself too, not only SIGHUP, so being killed directly doesn't
+orphan its daemon either — flagged as worth doing once the SIGHUP handling
+existed at all, since without it a direct SIGTERM to the TUI would leave the
+daemon running with nothing left to stop it. The child's stderr (it still
+`eprintln!`s a few status lines) goes to `~/.local/state/phonia/phoniad.log`
+instead of the alternate screen.
+
+**A real tty loss during cleanup surfaced a latent fragility in ratatui
+itself, left as a known, invisible caveat rather than fixed further.**
+Testing the SIGHUP path against a pty that is fully closed (not just
+signalled) showed the process ending in `SIGABRT` instead of a clean exit:
+`ratatui::restore()`'s own `eprintln!` on a failed restore can itself fail
+to write to a tty that's already gone, which panics; that panic reaches the
+panic hook `ratatui::init()` installs, which calls the library's internal
+`restore()` again — on the same dead tty, triggering the same failing
+`eprintln!` a second time, this time *while already panicking*, which Rust
+turns into a process abort. `phonia`'s own explicit restore call in
+`crates/phonia-tui/src/lib.rs` was changed to `try_restore()` (whose error is
+just ignored) to remove one occurrence of this, but `ratatui::init()`'s own
+panic hook still calls the panic-prone `restore()` internally, as does a
+`Drop for Terminal` cursor-restore attempt in `ratatui-core` — neither is
+something this crate can change short of overriding ratatui's panic hook
+outright. Left as-is because the daemon is always stopped *before* any of
+this runs (confirmed by testing), so the one guarantee this feature makes
+is unaffected either way, and because nobody is left to see the abort: by
+the time it could happen, the terminal that would have shown it is gone.
+
+Confirmed by hand: quit (`q`), SIGTERM to the TUI's own pid, and a closed
+terminal (SIGHUP, including a pty closed outright) each stop only a
+self-started daemon, every time, before the process itself exits; a
+hand-started `phoniad` survives a TUI connecting to it and quitting
+normally, unchanged. This closes #192.

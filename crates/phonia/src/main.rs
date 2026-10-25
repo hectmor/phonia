@@ -252,7 +252,7 @@ async fn main() -> ExitCode {
         }
         Command::Ctl(args) => ctl::run(args, cli.config.as_deref()).await,
         Command::Tui { socket, covers } => match ctl::socket_path(cli.config.as_deref(), socket) {
-            Ok(socket) => phonia_tui::run(socket, covers).await,
+            Ok(socket) => phonia_tui::run(socket, cli.config.as_deref(), covers).await,
             Err(error) => Err(error),
         },
         Command::Devices => run_devices().await,
