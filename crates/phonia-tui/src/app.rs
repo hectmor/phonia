@@ -1796,6 +1796,11 @@ fn act_on_library_result(state: &mut State, action: Action) -> Effects {
                 track.artists.first().cloned(),
                 track.album.clone(),
             ),
+            // `gr` here would be a no-op anyway (it's already the album); only `ga` does
+            // anything, and only if TIDAL credited an artist.
+            library::Selected::Album(album) => {
+                open_artist_or_album(state, action, album.artists.first().cloned(), None)
+            }
             _ => Effects::default(),
         };
     }
@@ -2473,6 +2478,21 @@ fn act_on_home_result(state: &mut State, action: Action) -> Effects {
                 action,
                 track.artists.first().cloned(),
                 track.album.clone(),
+            ),
+            // A played row only has ids from a daemon new enough to have sent them (#194); an
+            // older one, or a track with nothing credited, makes this a no-op either way.
+            home::Selected::Played(played) => open_artist_or_album(
+                state,
+                action,
+                played.artist_id.clone().map(|id| phonia_ipc::ArtistRef {
+                    id,
+                    name: played.artist.clone().unwrap_or_default(),
+                }),
+                played.album_id.clone().map(|id| phonia_ipc::AlbumRef {
+                    id,
+                    title: "Album".to_string(),
+                    cover: played.cover.clone(),
+                }),
             ),
             _ => Effects::default(),
         };
@@ -5596,6 +5616,8 @@ mod tests {
             duration_ms: None,
             cover: None,
             played_at_ms: 1_000,
+            artist_id: None,
+            album_id: None,
         }
     }
 
@@ -5622,6 +5644,8 @@ mod tests {
                             duration_ms: None,
                             cover: None,
                             played_at_ms: 500,
+                            artist_id: None,
+                            album_id: None,
                         },
                     ],
                 }),
@@ -5685,6 +5709,62 @@ mod tests {
             ch(&mut state, 'o').commands.is_empty(),
             "a local file has no radio"
         );
+    }
+
+    fn played_row_with_ids() -> State {
+        let mut state = State::default();
+        // `catalog` is needed too: opening the artist/album page is gated on it, same as `ga`/`gr`
+        // anywhere else (`require_browsable`).
+        update(&mut state, connected_msg(&["recently_played", "catalog"]));
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::RecentlyPlayed,
+                result: Ok(Payload::RecentlyPlayed {
+                    items: vec![phonia_ipc::PlayedTrack {
+                        source: "tidal:1".into(),
+                        title: Some("Here to Stay".into()),
+                        artist: Some("Korn".into()),
+                        duration_ms: None,
+                        cover: None,
+                        played_at_ms: 1_000,
+                        artist_id: Some("780".into()),
+                        album_id: Some("223382003".into()),
+                    }],
+                }),
+            },
+        );
+        ch(&mut state, 'l'); // Home
+        ch(&mut state, 'j'); // the played row
+        state
+    }
+
+    #[test]
+    fn ga_on_a_recently_played_row_opens_its_artist_when_a_new_enough_daemon_sent_the_id() {
+        let mut state = played_row_with_ids();
+        ch(&mut state, 'g');
+        let (tag, request) = tagged(ch(&mut state, 'a'));
+        assert!(matches!(tag, Tag::View { .. }));
+        assert!(matches!(request, Request::Artist { ref id, .. } if id == "780"));
+    }
+
+    #[test]
+    fn gr_on_a_recently_played_row_opens_its_album_when_a_new_enough_daemon_sent_the_id() {
+        let mut state = played_row_with_ids();
+        ch(&mut state, 'g');
+        let (tag, request) = tagged(ch(&mut state, 'r'));
+        assert!(matches!(tag, Tag::View { .. }));
+        assert!(matches!(request, Request::Album { ref id, .. } if id == "223382003"));
+    }
+
+    #[test]
+    fn ga_and_gr_on_a_recently_played_row_do_nothing_without_an_older_daemons_ids() {
+        let mut state = with_recently_played();
+        ch(&mut state, 'j'); // "tidal:1", played by a daemon that sent no ids
+        ch(&mut state, 'g');
+        assert!(ch(&mut state, 'a').commands.is_empty());
+        ch(&mut state, 'g');
+        assert!(ch(&mut state, 'r').commands.is_empty());
     }
 
     /// Connected, with the catalog, left on Home (the default section) with its library already
@@ -6302,6 +6382,62 @@ mod tests {
         assert!(matches!(tag, Tag::View { .. }));
         assert!(matches!(request, Request::Artist { ref id, .. } if id == "77"));
         assert!(!state.library_views.is_empty());
+    }
+
+    #[test]
+    fn ga_on_a_favorite_album_opens_its_artist() {
+        let (mut state, tag, _, _) = opening_library();
+        let mut album = library_album("9", "Issues");
+        album.artists = vec![phonia_ipc::ArtistRef {
+            id: "780".into(),
+            name: "Korn".into(),
+        }];
+        update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Ok(Payload::Library {
+                    favorite_tracks: phonia_ipc::Page {
+                        items: vec![],
+                        total: 0,
+                        offset: 0,
+                    },
+                    favorite_albums: phonia_ipc::Page {
+                        items: vec![album],
+                        total: 1,
+                        offset: 0,
+                    },
+                    my_playlists: phonia_ipc::Page {
+                        items: vec![],
+                        total: 0,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
+        ch(&mut state, 'l'); // the list, not the sidebar
+        ch(&mut state, ']'); // favorite albums
+        ch(&mut state, 'g');
+        let (tag, request) = tagged(ch(&mut state, 'a'));
+        assert!(matches!(tag, Tag::View { .. }));
+        assert!(matches!(request, Request::Artist { ref id, .. } if id == "780"));
+    }
+
+    #[test]
+    fn ga_on_a_favorite_album_with_no_credited_artist_does_nothing() {
+        let mut state = with_library();
+        ch(&mut state, ']'); // favorite albums; `library_album` credits nobody
+        ch(&mut state, 'g');
+        assert!(ch(&mut state, 'a').commands.is_empty());
+    }
+
+    #[test]
+    fn gr_on_a_favorite_album_does_nothing() {
+        // Already on that album; nothing sensible to open.
+        let mut state = with_library();
+        ch(&mut state, ']');
+        ch(&mut state, 'g');
+        assert!(ch(&mut state, 'r').commands.is_empty());
     }
 
     #[test]
