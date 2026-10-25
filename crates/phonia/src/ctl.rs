@@ -2506,6 +2506,8 @@ mod tests {
                 duration_ms: Some(271_000),
                 cover: None,
                 played_at_ms: 1_700_000_000_000,
+                artist_id: None,
+                album_id: None,
             }],
         };
         let text = format_recent(&payload);

@@ -3603,3 +3603,39 @@ terminal (SIGHUP, including a pty closed outright) each stop only a
 self-started daemon, every time, before the process itself exits; a
 hand-started `phoniad` survives a TUI connecting to it and quitting
 normally, unchanged. This closes #192.
+
+## 2026-10-25 — #194: `ga`/`gr` reach Home's recently played rows and Library's favorite albums
+
+`ga` (open artist) and `gr` (open album) already worked on any row carrying
+a `TrackSummary` (#156, #164, #166): search, Home's other blocks, Library's
+Favorite Tracks, inside an opened album/playlist/artist/radio, and the
+queue. Two rows were left out, for different reasons.
+
+**Library's Favorite Albums rows** needed no new data: `AlbumSummary`
+already carries `artists: Vec<ArtistRef>` (it just wasn't wired up). `ga`
+there now opens the first credited artist via the same `open_artist_or_album`
+helper everything else uses; `gr` stays a no-op, since you're already on
+that album.
+
+**Home's recently played rows** needed a new id, since `PlayedTrack` (both
+the wire DTO in `phonia-ipc::dto` and the daemon-local one in
+`phonia-core::recent`) carried only the artist's *name*, no id, and no
+album at all. Added `artist_id: Option<String>` and `album_id:
+Option<String>` to both, `#[serde(default)]` on each (the core one for an
+on-disk `recently_played.json` saved by an older daemon; the wire one for
+an older client or daemon, same as every optional field before it), and
+bumped the protocol to 1.18. The daemon fills them in
+`Daemon::note_recently_played` (`crates/phoniad/src/daemon.rs`) from the
+matching queue entry's own `artist_id`/`album_id` (already resolved there
+for `QueueItem`, via a new `convert::artist_and_album_id` reading the same
+queue snapshot `convert::entry_of` already searches for the entry's
+source) — not from `engine::TrackMeta`, which carries neither. `gr` on such
+a row opens the album with a placeholder "Album" title and the row's own
+cover, the same way `gr` on a queue entry already does (`open_queue_album`),
+since the id is all that's known until the real answer arrives.
+
+Both gaps, and the fix for each, were already spelled out precisely when
+#194 was filed — this just carries out that plan. A played row from an
+older daemon (no ids sent) or an untagged local file makes `ga`/`gr` a
+no-op, exactly like a favorite album nobody credited an artist to; neither
+is an error, just nothing to open. This closes #194.

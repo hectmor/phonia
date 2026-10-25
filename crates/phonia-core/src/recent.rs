@@ -41,6 +41,14 @@ pub struct PlayedTrack {
     pub cover: Option<String>,
     /// When this play started, milliseconds since the epoch.
     pub played_at_ms: u64,
+    /// The id of the track's first credited artist; `None` for a local file, a TIDAL track with
+    /// no artist credited, or a log saved before this field existed.
+    #[serde(default)]
+    pub artist_id: Option<String>,
+    /// The id of the track's album; `None` for a local file, a TIDAL track with no album, or a
+    /// log saved before this field existed.
+    #[serde(default)]
+    pub album_id: Option<String>,
 }
 
 /// The log itself: most recent first, deduplicated by source (playing something again moves it
@@ -196,6 +204,8 @@ mod tests {
             duration_ms: Some(200_000),
             cover: None,
             played_at_ms,
+            artist_id: None,
+            album_id: None,
         }
     }
 
