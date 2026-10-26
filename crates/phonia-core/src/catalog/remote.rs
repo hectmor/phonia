@@ -47,7 +47,8 @@ impl TidalCatalog {
         path: &str,
         query: Vec<(&'static str, String)>,
     ) -> Result<String, CatalogError> {
-        self.get_from(&self.base, path, query).await
+        self.request_from(&self.base, reqwest::Method::GET, path, query, &[])
+            .await
     }
 
     /// The same, against TIDAL's v2 API (so far only `/my-collection/playlists/folders`, which
@@ -57,14 +58,19 @@ impl TidalCatalog {
         path: &str,
         query: Vec<(&'static str, String)>,
     ) -> Result<String, CatalogError> {
-        self.get_from(&self.base_v2, path, query).await
+        self.request_from(&self.base_v2, reqwest::Method::GET, path, query, &[])
+            .await
     }
 
-    async fn get_from(
+    /// One request of any method, with the login's token and country, against the given base.
+    /// `form` is sent as the body when not empty (a GET never has one).
+    async fn request_from(
         &self,
         base: &str,
+        method: reqwest::Method,
         path: &str,
         query: Vec<(&'static str, String)>,
+        form: &[(&'static str, String)],
     ) -> Result<String, CatalogError> {
         let (token, country) = {
             let client = self.session.fresh().await.map_err(session_error)?;
@@ -75,7 +81,7 @@ impl TidalCatalog {
             token: &token,
             country: &country,
         };
-        get(&self.http, &account, path, &query).await
+        send(&self.http, &account, method, path, &query, form).await
     }
 
     /// The id of the logged-in user, for the endpoints that are theirs specifically.
@@ -119,17 +125,25 @@ fn classify_status(status: StatusCode, body: &str) -> CatalogError {
     }
 }
 
-async fn get(
+/// `form` is sent as the request body (form-encoded) when not empty; a plain GET never passes
+/// one.
+async fn send(
     http: &reqwest::Client,
     account: &Account<'_>,
+    method: reqwest::Method,
     path: &str,
     query: &[(&'static str, String)],
+    form: &[(&'static str, String)],
 ) -> Result<String, CatalogError> {
-    let response = http
-        .get(format!("{}{path}", account.base))
+    let mut request = http
+        .request(method, format!("{}{path}", account.base))
         .bearer_auth(account.token)
         .query(&[("countryCode", account.country)])
-        .query(query)
+        .query(query);
+    if !form.is_empty() {
+        request = request.form(form);
+    }
+    let response = request
         .send()
         .await
         .map_err(|error| CatalogError::Unavailable(format!("{error}")))?;
@@ -459,6 +473,58 @@ impl Catalog for TidalCatalog {
                     .get(&format!("/tracks/{id}/lyrics"), Vec::new())
                     .await,
             )
+        })
+    }
+
+    fn set_favorite(
+        &self,
+        kind: Kind,
+        id: String,
+        favorite: bool,
+    ) -> BoxFuture<'static, Result<(), CatalogError>> {
+        let catalog = self.clone();
+        Box::pin(async move {
+            check_id(&id)?;
+            // Confirmed against the real API shape `tidlers` uses for the same endpoints (this
+            // catalog otherwise avoids `tidlers`' own catalog calls -- see this module's own doc
+            // comment -- but there's no reason to doubt its add/remove-favorite shape, which it
+            // does call into production): `POST .../favorites/{kind}` with one id as a form
+            // param to add, `DELETE .../favorites/{kind}/{id}` to remove.
+            let (path, param) = match kind {
+                Kind::Tracks => ("tracks", "trackIds"),
+                Kind::Albums => ("albums", "albumIds"),
+                Kind::Artists => ("artists", "artistIds"),
+                // shortcut: following a playlist needs its own, unverified endpoint -- see #196
+                // part 2.
+                Kind::Playlists => {
+                    return Err(CatalogError::Invalid(
+                        "following a playlist is not supported yet".to_string(),
+                    ));
+                }
+            };
+            let user_id = catalog.user_id().await?;
+            if favorite {
+                catalog
+                    .request_from(
+                        &catalog.base,
+                        reqwest::Method::POST,
+                        &format!("/users/{user_id}/favorites/{path}"),
+                        Vec::new(),
+                        &[(param, id)],
+                    )
+                    .await?;
+            } else {
+                catalog
+                    .request_from(
+                        &catalog.base,
+                        reqwest::Method::DELETE,
+                        &format!("/users/{user_id}/favorites/{path}/{id}"),
+                        Vec::new(),
+                        &[],
+                    )
+                    .await?;
+            }
+            Ok(())
         })
     }
 }
@@ -1723,11 +1789,13 @@ mod tests {
             country: "MX",
         };
         let http = reqwest::Client::new();
-        let body = get(
+        let body = send(
             &http,
             &account,
+            reqwest::Method::GET,
             "/search",
             &search_query("nu metal", &[Kind::Tracks], 50, 25),
+            &[],
         )
         .await
         .unwrap();
@@ -1757,6 +1825,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn adding_a_favorite_posts_the_id_as_a_form_param() {
+        let (base, received) = serve_once(200, "").await;
+        let account = Account {
+            base: &base,
+            token: "t",
+            country: "US",
+        };
+        send(
+            &reqwest::Client::new(),
+            &account,
+            reqwest::Method::POST,
+            "/users/7/favorites/albums",
+            &[],
+            &[("albumIds", "99".to_string())],
+        )
+        .await
+        .unwrap();
+        let request = received.await.unwrap();
+        let first = request.lines().next().unwrap();
+        assert!(
+            first.starts_with("POST /users/7/favorites/albums?countryCode=US"),
+            "{first}"
+        );
+        assert!(request.contains("albumIds=99"), "{request}");
+    }
+
+    #[tokio::test]
+    async fn removing_a_favorite_deletes_with_the_id_in_the_path_and_no_body() {
+        let (base, received) = serve_once(200, "").await;
+        let account = Account {
+            base: &base,
+            token: "t",
+            country: "US",
+        };
+        send(
+            &reqwest::Client::new(),
+            &account,
+            reqwest::Method::DELETE,
+            "/users/7/favorites/albums/99",
+            &[],
+            &[],
+        )
+        .await
+        .unwrap();
+        let request = received.await.unwrap();
+        let first = request.lines().next().unwrap();
+        assert!(
+            first.starts_with("DELETE /users/7/favorites/albums/99?countryCode=US"),
+            "{first}"
+        );
+        assert!(
+            !request
+                .to_lowercase()
+                .contains("content-type: application/x-www-form-urlencoded"),
+            "a DELETE with nothing to send should carry no form body: {request}"
+        );
+    }
+
+    #[tokio::test]
     async fn an_error_status_becomes_the_matching_catalog_error() {
         for (status, matches) in [
             (404, CatalogError::NotFound),
@@ -1768,9 +1895,16 @@ mod tests {
                 token: "t",
                 country: "US",
             };
-            let error = get(&reqwest::Client::new(), &account, "/albums/1/items", &[])
-                .await
-                .unwrap_err();
+            let error = send(
+                &reqwest::Client::new(),
+                &account,
+                reqwest::Method::GET,
+                "/albums/1/items",
+                &[],
+                &[],
+            )
+            .await
+            .unwrap_err();
             assert_eq!(error, matches, "status {status}");
         }
         let account = Account {
@@ -1778,9 +1912,16 @@ mod tests {
             token: "t",
             country: "US",
         };
-        let error = get(&reqwest::Client::new(), &account, "/search", &[])
-            .await
-            .unwrap_err();
+        let error = send(
+            &reqwest::Client::new(),
+            &account,
+            reqwest::Method::GET,
+            "/search",
+            &[],
+            &[],
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(error, CatalogError::Unavailable(_)),
             "nobody listens: {error:?}"
@@ -1999,6 +2140,126 @@ mod tests {
             artists.total,
             artists.items.iter().map(|a| &a.name).collect::<Vec<_>>()
         );
+    }
+
+    /// Adding and removing a real favorite, for each of tracks/albums/artists. Never touches one
+    /// already favorited: each kind is skipped (with a message, not a failure) if the chosen item
+    /// is already in that favorites list's first page, so a run never un-favorites something the
+    /// account actually had. Uses a real search to pick an item, since a fixed hard-coded id could
+    /// itself already be a favorite on whichever account runs this. Run with
+    /// `--ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "needs a TIDAL login and network"]
+    async fn a_real_favorite_round_trip() {
+        use crate::auth::{Interaction, open_store};
+        use crate::config::SessionStoreKind;
+        use crate::openers::TidalOpener;
+
+        let store = open_store(SessionStoreKind::default(), Interaction::Allow).unwrap();
+        let opener =
+            TidalOpener::from_store(tidal::build_http_client().unwrap(), store, Quality::Hires);
+        let catalog = opener.catalog();
+
+        let results = catalog
+            .search("Opeth".to_string(), vec![], 0, 10)
+            .await
+            .unwrap();
+
+        if let Some(track) = results.tracks.as_ref().and_then(|p| p.items.first()) {
+            let already = catalog
+                .favorite_tracks(0, 50)
+                .await
+                .unwrap()
+                .items
+                .iter()
+                .any(|t| t.id == track.id);
+            if already {
+                println!(
+                    "track {} ({}) is already a favorite, skipping",
+                    track.title, track.id
+                );
+            } else {
+                catalog
+                    .set_favorite(Kind::Tracks, track.id.clone(), true)
+                    .await
+                    .unwrap();
+                let after_add = catalog.favorite_tracks(0, 50).await.unwrap();
+                println!("added track {} ({})", track.title, track.id);
+                assert!(after_add.items.iter().any(|t| t.id == track.id));
+
+                catalog
+                    .set_favorite(Kind::Tracks, track.id.clone(), false)
+                    .await
+                    .unwrap();
+                let after_remove = catalog.favorite_tracks(0, 50).await.unwrap();
+                println!("removed track {} ({})", track.title, track.id);
+                assert!(!after_remove.items.iter().any(|t| t.id == track.id));
+            }
+        }
+
+        if let Some(album) = results.albums.as_ref().and_then(|p| p.items.first()) {
+            let already = catalog
+                .favorite_albums(0, 50)
+                .await
+                .unwrap()
+                .items
+                .iter()
+                .any(|a| a.id == album.id);
+            if already {
+                println!(
+                    "album {} ({}) is already a favorite, skipping",
+                    album.title, album.id
+                );
+            } else {
+                catalog
+                    .set_favorite(Kind::Albums, album.id.clone(), true)
+                    .await
+                    .unwrap();
+                let after_add = catalog.favorite_albums(0, 50).await.unwrap();
+                println!("added album {} ({})", album.title, album.id);
+                assert!(after_add.items.iter().any(|a| a.id == album.id));
+
+                catalog
+                    .set_favorite(Kind::Albums, album.id.clone(), false)
+                    .await
+                    .unwrap();
+                let after_remove = catalog.favorite_albums(0, 50).await.unwrap();
+                println!("removed album {} ({})", album.title, album.id);
+                assert!(!after_remove.items.iter().any(|a| a.id == album.id));
+            }
+        }
+
+        if let Some(artist) = results.artists.as_ref().and_then(|p| p.items.first()) {
+            let already = catalog
+                .favorite_artists(0, 50)
+                .await
+                .unwrap()
+                .items
+                .iter()
+                .any(|a| a.id == artist.id);
+            if already {
+                println!(
+                    "artist {} ({}) is already a favorite, skipping",
+                    artist.name, artist.id
+                );
+            } else {
+                catalog
+                    .set_favorite(Kind::Artists, artist.id.clone(), true)
+                    .await
+                    .unwrap();
+                let after_add = catalog.favorite_artists(0, 50).await.unwrap();
+                println!("added artist {} ({})", artist.name, artist.id);
+                assert!(after_add.items.iter().any(|a| a.id == artist.id));
+
+                catalog
+                    .set_favorite(Kind::Artists, artist.id.clone(), false)
+                    .await
+                    .unwrap();
+                let after_remove = catalog.favorite_artists(0, 50).await.unwrap();
+                println!("removed artist {} ({})", artist.name, artist.id);
+                assert!(!after_remove.items.iter().any(|a| a.id == artist.id));
+            }
+        }
     }
 
     /// Against the real TIDAL: confirms the `subtitles` field is genuinely LRC text (not assumed

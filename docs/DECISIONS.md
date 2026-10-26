@@ -3639,3 +3639,63 @@ Both gaps, and the fix for each, were already spelled out precisely when
 older daemon (no ids sent) or an untagged local file makes `ga`/`gr` a
 no-op, exactly like a favorite album nobody credited an artist to; neither
 is an error, just nothing to open. This closes #194.
+
+## 2026-10-25 — #196 part 1: `fas`/`far`/`faa`/`fal` add, `fds`/`fdr`/`fda`/`fdl` remove TIDAL favorites
+
+`phonia` could only read favorites (`favorite_tracks`/`favorite_albums`/
+`favorite_artists`, all GET); there was no way to add or remove one without
+leaving the app. New wire request `Request::SetFavorite { kind: CatalogKind,
+id: String, favorite: bool }` (protocol → 1.19), answered with `Ack`;
+`Catalog::set_favorite` resolves to the real endpoint shape confirmed
+against the vendored `tidlers` crate (not called into, same as every other
+catalog call — see `remote.rs`'s own module doc): add is `POST
+/users/{user_id}/favorites/{tracks|albums|artists}` with form
+`trackIds`/`albumIds`/`artistIds` = one id; remove is `DELETE
+/users/{user_id}/favorites/{tracks|albums|artists}/{id}`.
+
+No row anywhere carries an "is this already a favorite" flag, and a first
+pass of this issue (planned with Opus) built a *context-based* toggle: the
+same `fs`/`fr`/`fa` keys removed when the row was already on a favorites
+list of that kind, added otherwise, mirroring how `Enter` already behaves
+differently by screen. The project owner rejected that shape after trying it
+live and asked for explicit, direction-carrying keys instead: `fas`/`far`/
+`faa`/`fal` always add (track/album/artist/playlist), `fds`/`fdr`/`fda`/
+`fdl` always remove — the direction is the key's, never the screen's. This
+is simpler, not just different: every dispatch site now resolves a row to a
+target id exactly once (the same `track_target`/`album_target` helpers
+`ga`/`gr` already used), with no per-screen branching on whether the row
+happens to already be a favorite. `Action::Favorite(CatalogKind, bool)`
+carries the direction from the key table itself.
+
+Both the chords and the leader key moved during review. The owner first
+asked for `fa`→`aa`, `fr`→`ad`, `fl`→`al`, `fs`→`as` (an `a`/`d` *leader*
+for add/delete), but `a` and `d` are already single-key bindings
+(`AddToQueue`, `RemoveEntry`) — `keymap::resolve` matches an exact key
+sequence before it looks for a longer one, so with `[a]` bound, `as` could
+never be typed. Moving those two to `aq`/`dd` was the fix an Opus-planned
+pass proposed, but it changes two keys used constantly for an unrelated
+reason, so the owner chose instead to keep the favorites keys three deep,
+under the otherwise-unused `f` leader (freed up now that the context-based
+`fs`/`fr`/`fa` are gone): `f` then `a`/`d` for the direction, then
+`s`/`r`/`a`/`l` for the kind. `a` and `d` alone are untouched.
+
+`fal`/`fdl` are bound now, but only resolve a target id from a search
+result's own `Selected::Playlist` row — following/unfollowing a playlist has
+no implemented endpoint yet (`Kind::Playlists` answers
+`CatalogError::Invalid`), so pressing them there reaches the daemon and
+surfaces that as `last_error`, honestly, rather than being a silent no-op.
+Every other playlist row (Library's Playlists tab, Home's folder block, an
+opened folder) stays a no-op for both chords, same as before: those rows are
+already in "My Collection", owned or followed indistinguishably, so adding
+again would do nothing and removing needs a distinction (`owned: bool`) that
+does not exist yet. No `Event::FavoriteChanged` either — nothing would
+consume it, since no DTO field shows favorite status anywhere; the client
+that made the change already gets the `Ack`. On a successful `Ack`, the TUI
+bumps the library's generation and refetches it (keeping the current tab),
+the same send-then-react-to-the-answer shape every other mutating action in
+this codebase already uses — no optimistic update.
+
+This is part 1 of 2. Part 2 needs a live-verified follow/unfollow playlist
+endpoint (none of `tidlers`, this repo, or TIDAL's documented API has one
+confirmed yet) before `fal`/`fdl` do anything on a real playlist; #196
+stays open until then.

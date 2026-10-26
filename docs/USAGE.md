@@ -94,7 +94,12 @@ track is in [AUDIO.md](AUDIO.md). Start at the [README](../README.md).
   search result does (`Library › Issues`), with the same `Enter`/`a`/`A` and closing behaviour; a
   favorite track is the one exception to how a track inside an opened list behaves elsewhere:
   `Enter` plays just that one track, without queuing the rest of the list too, since a list of
-  favorites has no natural order and can run into the thousands. **`--covers
+  favorites has no natural order and can run into the thousands. A track, album, artist or
+  playlist under the cursor -- in a search result, a Library tab, a Home block, an opened view or
+  the queue -- can be added to or removed from TIDAL's favorites: `fas`/`far`/`faa`/`fal` add the
+  track, album, artist or playlist; `fds`/`fdr`/`fda`/`fdl` remove it. The direction is the key's,
+  not the screen's, and nothing changes on screen until the daemon answers (#196); following or
+  unfollowing a playlist (`fal`/`fdl`) is not implemented yet and comes back as an error. **`--covers
   auto|halfblocks|off`** (default `auto`) controls its covers (#24): an opened album's or
   playlist's header, an opened artist's own page, and the **Queue** section's own currently
   playing track show their cover or picture beside their text (the

@@ -159,6 +159,14 @@ autoplay = false        # fetch more tracks from TIDAL when the queue runs dry? 
   Saved to `$XDG_STATE_HOME/phonia/recently_played.json` (atomically, a temp file then a rename)
   whenever it changes, and loaded back the next time `phoniad` starts, so it survives a restart;
   a missing or unreadable file is simply an empty log, never a reason `phoniad` fails to start.
+- **Changing favorites** (#196; the request `set_favorite` of protocol 1.19, under the existing
+  `catalog` capability): adds or removes a track, album or artist from the logged-in user's TIDAL
+  favorites -- `POST /users/{id}/favorites/{tracks|albums|artists}` to add, `DELETE
+  /users/{id}/favorites/{tracks|albums|artists}/{id}` to remove. No standalone `ctl` command yet.
+  In the TUI: `fas`/`far`/`faa` add the track/album/artist under the cursor, `fds`/`fdr`/`fda`
+  remove it, wherever one is shown (a search result, a Library tab, a Home block, an opened view
+  or the queue). Following or unfollowing a playlist (`fal`/`fdl`) answers `CatalogError::Invalid`
+  for now -- no endpoint for it has been verified yet (see `docs/DECISIONS.md`, 2026-10-25).
 - `phonia config path` prints which file is used, and `phonia config show` prints every setting
   with where its value comes from (the file or the default). `--config <file>` (or the
   `PHONIA_CONFIG` environment variable) selects another file, also for `phoniad`.

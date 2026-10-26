@@ -338,4 +338,14 @@ pub trait Catalog: Send + Sync {
 
     /// A track's lyrics; `None` when TIDAL has none for it at all.
     fn track_lyrics(&self, id: String) -> BoxFuture<'static, Result<Option<Lyrics>, CatalogError>>;
+
+    /// Adds (`favorite: true`) or removes one item from the logged-in user's favorites. For
+    /// playlists this would be following/unfollowing, not implemented yet (see #196 part 2):
+    /// `Kind::Playlists` always fails with `CatalogError::Invalid`.
+    fn set_favorite(
+        &self,
+        kind: Kind,
+        id: String,
+        favorite: bool,
+    ) -> BoxFuture<'static, Result<(), CatalogError>>;
 }

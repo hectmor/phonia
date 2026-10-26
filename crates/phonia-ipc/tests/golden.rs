@@ -252,6 +252,15 @@ fn queue_editing_requests() {
         Request::SetAutoplay { autoplay: true },
         r#"{"id":8,"request":{"type":"set_autoplay","autoplay":true}}"#,
     );
+    request(
+        9,
+        Request::SetFavorite {
+            kind: CatalogKind::Albums,
+            id: "7".to_string(),
+            favorite: false,
+        },
+        r#"{"id":9,"request":{"type":"set_favorite","kind":"albums","id":"7","favorite":false}}"#,
+    );
 }
 
 // ---- responses -----------------------------------------------------------------------------
@@ -301,7 +310,7 @@ fn the_server_banner() {
                 CAP_AUTOPLAY.into(),
             ],
         }),
-        r#"{"type":"hello","protocol":{"major":1,"minor":18},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","recently_played","catalog","lyrics","autoplay"]}"#,
+        r#"{"type":"hello","protocol":{"major":1,"minor":19},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","recently_played","catalog","lyrics","autoplay"]}"#,
     );
 }
 
@@ -1145,7 +1154,7 @@ fn versions_are_compatible_across_minors_but_not_majors() {
     assert!(v(1, 0).compatible_with(v(1, 7)));
     assert!(v(1, 7).compatible_with(v(1, 0)));
     assert!(!v(1, 0).compatible_with(v(2, 0)));
-    assert_eq!(PROTOCOL, v(1, 18));
+    assert_eq!(PROTOCOL, v(1, 19));
 }
 
 #[test]

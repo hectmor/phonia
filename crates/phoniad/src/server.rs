@@ -215,7 +215,8 @@ impl Connection {
             | Request::Artist { .. }
             | Request::Tracks { .. }
             | Request::Albums { .. }
-            | Request::Lyrics { .. }) => self.run_beside(id, request).await,
+            | Request::Lyrics { .. }
+            | Request::SetFavorite { .. }) => self.run_beside(id, request).await,
             request => {
                 let reply = self.daemon.handle(request).await;
                 self.respond(id, reply).await;

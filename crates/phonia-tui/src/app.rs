@@ -305,6 +305,9 @@ pub enum Tag {
     /// The request that loads the recently played log, fired once a connection with the
     /// capability exists; see `maybe_load_recently_played`.
     RecentlyPlayed,
+    /// A `SetFavorite` request; `favorite` says which direction it asked for, to pick the right
+    /// notice (and because the id isn't needed again on the way back).
+    Favorite { favorite: bool },
 }
 
 /// What [`update`] decided.
@@ -341,18 +344,7 @@ pub fn update(state: &mut State, msg: Msg) -> Effects {
     let mut effects = update_now(state, msg);
     if let Some(request) = maybe_load_library(state) {
         effects.redraw = true;
-        effects.commands.push(Cmd::Request {
-            tag: Tag::Library { generation: 0 },
-            request,
-        });
-        effects.commands.push(Cmd::Request {
-            tag: Tag::LibraryPlaylists { generation: 0 },
-            request: LibraryState::playlist_request(),
-        });
-        effects.commands.push(Cmd::Request {
-            tag: Tag::LibraryArtists { generation: 0 },
-            request: LibraryState::artists_request(),
-        });
+        effects.commands.extend(library_commands(0, request));
     }
     if maybe_load_recently_played(state) {
         effects.redraw = true;
@@ -448,6 +440,26 @@ fn maybe_load_library(state: &mut State) -> Option<Request> {
     let (library, request) = LibraryState::new();
     state.library = Some(library);
     Some(request)
+}
+
+/// The three requests that load (or reload) the library's favorite tracks/albums, the root of
+/// "My Collection" and favorite artists, tagged for `generation` so a stale answer from a
+/// previous load is told apart from the current one.
+fn library_commands(generation: u64, request: Request) -> Vec<Cmd> {
+    vec![
+        Cmd::Request {
+            tag: Tag::Library { generation },
+            request,
+        },
+        Cmd::Request {
+            tag: Tag::LibraryPlaylists { generation },
+            request: LibraryState::playlist_request(),
+        },
+        Cmd::Request {
+            tag: Tag::LibraryArtists { generation },
+            request: LibraryState::artists_request(),
+        },
+    ]
 }
 
 /// Fetched once a connection with the capability exists, whatever section is showing (unlike the
@@ -612,6 +624,7 @@ fn on_response(state: &mut State, tag: Tag, result: Result<Payload, String>) -> 
             // there is nothing to show, and no retry until the next reconnect.
             Effects::redraw()
         }
+        Tag::Favorite { favorite } => on_favorited(state, favorite, result),
         Tag::LibraryMore { tab, generation } => {
             let Some(library) = &mut state.library else {
                 return Effects::default();
@@ -670,6 +683,47 @@ fn on_added(state: &mut State, result: Result<Payload, String>, play_at: Option<
             Effects::redraw()
         }
     }
+}
+
+/// The answer to `fas`/`far`/`faa`/`fal`/`fds`/`fdr`/`fda`/`fdl` (#196): no optimistic update, so
+/// nothing changes until this lands. On success, reloads the library so Library's tabs and
+/// Home's blocks (both read
+/// `state.library`) pick up the change -- there is otherwise no moment that asks again on its
+/// own, since the library loads once per session. Left alone if the library was never loaded at
+/// all (favorited from search, before ever visiting Library or Home): nothing to refresh yet.
+fn on_favorited(state: &mut State, favorite: bool, result: Result<Payload, String>) -> Effects {
+    match result {
+        Ok(_) => {}
+        Err(reason) => {
+            state.last_error = Some(reason);
+            return Effects::redraw();
+        }
+    }
+    state.notice = Some(
+        if favorite {
+            "Added to favorites"
+        } else {
+            "Removed from favorites"
+        }
+        .to_string(),
+    );
+    let mut effects = Effects::redraw();
+    if let Some(library) = &mut state.library {
+        library.generation += 1;
+        library.phase = browse::Phase::Loading;
+        library.playlists_phase = browse::Phase::Loading;
+        library.artists_phase = browse::Phase::Loading;
+        // shortcut: the cursor resets to the top of each list once the reload lands, rather than
+        // following the row that was favorited; upgrade to a local retain-by-id if pruning lists
+        // turns out to be common.
+        effects.commands.extend(library_commands(
+            library.generation,
+            Request::Library {
+                limit: Some(library::PAGE_SIZE),
+            },
+        ));
+    }
+    effects
 }
 
 /// The answer to opening a view, or to asking it for more tracks: the same request either way, so
@@ -1334,7 +1388,7 @@ fn apply(state: &mut State, action: Action) -> Effects {
         Action::RemoveEntry | Action::MoveEntryDown | Action::MoveEntryUp | Action::ClearQueue => {
             return edit_queue(state, action);
         }
-        Action::OpenArtist | Action::OpenAlbum => {
+        Action::OpenArtist | Action::OpenAlbum | Action::Favorite(..) => {
             return match state.section() {
                 Section::Search if state.search_views.is_empty() => act_on_result(state, action),
                 Section::Search => act_in_view(state, action),
@@ -1344,8 +1398,11 @@ fn apply(state: &mut State, action: Action) -> Effects {
                 Section::Library => act_in_view(state, action),
                 Section::Home if state.home_views.is_empty() => act_on_home_result(state, action),
                 Section::Home => act_in_view(state, action),
-                Section::Queue if action == Action::OpenArtist => open_queue_artist(state),
-                Section::Queue => open_queue_album(state),
+                Section::Queue => match action {
+                    Action::Favorite(kind, favorite) => favorite_queue_entry(state, kind, favorite),
+                    Action::OpenArtist => open_queue_artist(state),
+                    _ => open_queue_album(state),
+                },
                 Section::Lyrics => Effects::default(),
             };
         }
@@ -1670,6 +1727,24 @@ fn act_on_result(state: &mut State, action: Action) -> Effects {
             _ => Effects::default(),
         };
     }
+    // The direction is the key's (#196): `fa.` adds, `fd.` removes.
+    if let Action::Favorite(kind, favorite) = action {
+        let id = match selected {
+            Selected::Track(track) => track_target(kind, track),
+            Selected::Album(album) => album_target(kind, album),
+            Selected::Artist(artist) if kind == phonia_ipc::CatalogKind::Artists => {
+                Some(artist.id.clone())
+            }
+            Selected::Artist(_) => None,
+            // Following/unfollowing a playlist is not implemented yet (#196 part 2): this reaches
+            // the daemon and comes back as an error, from a search result only.
+            Selected::Playlist(playlist) if kind == phonia_ipc::CatalogKind::Playlists => {
+                Some(playlist.id.clone())
+            }
+            Selected::Playlist(_) => None,
+        };
+        return send_favorite(state, kind, id, favorite);
+    }
     if action == Action::OpenRadio {
         return match selected {
             Selected::Track(track) => {
@@ -1811,6 +1886,20 @@ fn act_on_library_result(state: &mut State, action: Action) -> Effects {
             }
             _ => Effects::default(),
         };
+    }
+    // The direction is the key's (#196): `fa.` adds, `fd.` removes. A Playlists-tab row is left
+    // to the Entry-delegation branch below, which already no-ops for anything but Enter/`a`/`A`
+    // -- following/unfollowing a playlist needs #196 part 2.
+    if let Action::Favorite(kind, favorite) = action {
+        let id = match selected {
+            library::Selected::Track(track) => track_target(kind, track),
+            library::Selected::Album(album) => album_target(kind, album),
+            library::Selected::Artist(artist) if kind == phonia_ipc::CatalogKind::Artists => {
+                Some(artist.id.clone())
+            }
+            library::Selected::Artist(_) | library::Selected::Entry(_) => None,
+        };
+        return send_favorite(state, kind, id, favorite);
     }
     // A row of the Playlists tab (now the root of TIDAL's own folder tree) is handled on its
     // own: a sub-folder opens into the stack, a playlist opens or adds exactly like elsewhere.
@@ -2133,6 +2222,83 @@ fn open_queue_album(state: &mut State) -> Effects {
     open_album_view(state, id, "Album".to_string(), cover)
 }
 
+/// `faa`/`fas`/`far`/`fda`/`fds`/`fdr` in the queue: the direction is the key's. `fal`/`fdl` have
+/// no playlist id to act on there and are left to the caller's own
+/// `_ => open_queue_album(state)` fallback, which itself is a no-op without one -- same shape as
+/// `far`/`faa`/`fdr`/`fda` on a row with nothing credited.
+fn favorite_queue_entry(
+    state: &mut State,
+    kind: phonia_ipc::CatalogKind,
+    favorite: bool,
+) -> Effects {
+    if !in_queue(state) {
+        return Effects::default();
+    }
+    let Some(item) = state
+        .queue
+        .as_ref()
+        .and_then(|queue| queue.items.get(state.queue_cursor.selected()))
+    else {
+        return Effects::default();
+    };
+    let id = match kind {
+        phonia_ipc::CatalogKind::Tracks => item.source.strip_prefix("tidal:").map(str::to_string),
+        phonia_ipc::CatalogKind::Albums => item.album_id.clone(),
+        phonia_ipc::CatalogKind::Artists => item.artist_id.clone(),
+        phonia_ipc::CatalogKind::Playlists | phonia_ipc::CatalogKind::Unknown => None,
+    };
+    send_favorite(state, kind, id, favorite)
+}
+
+/// The id `fas`/`far`/`faa`/`fds`/`fdr`/`fda` would act on for a track row, for the kind pressed;
+/// `None` when the track carries nothing of that kind (no album, no artist credited, or
+/// `fal`/`fdl`/`Unknown`, which never apply to a track row).
+fn track_target(kind: phonia_ipc::CatalogKind, track: &phonia_ipc::TrackSummary) -> Option<String> {
+    match kind {
+        phonia_ipc::CatalogKind::Tracks => Some(track.id.clone()),
+        phonia_ipc::CatalogKind::Albums => track.album.as_ref().map(|album| album.id.clone()),
+        phonia_ipc::CatalogKind::Artists => track.artists.first().map(|artist| artist.id.clone()),
+        phonia_ipc::CatalogKind::Playlists | phonia_ipc::CatalogKind::Unknown => None,
+    }
+}
+
+/// The same, for an album row: only the album itself (`far`/`fdr`) and its first credited artist
+/// (`faa`/`fda`) ever apply.
+fn album_target(kind: phonia_ipc::CatalogKind, album: &phonia_ipc::AlbumSummary) -> Option<String> {
+    match kind {
+        phonia_ipc::CatalogKind::Albums => Some(album.id.clone()),
+        phonia_ipc::CatalogKind::Artists => album.artists.first().map(|artist| artist.id.clone()),
+        phonia_ipc::CatalogKind::Tracks
+        | phonia_ipc::CatalogKind::Playlists
+        | phonia_ipc::CatalogKind::Unknown => None,
+    }
+}
+
+/// `fas`/`far`/`faa`/`fal`/`fds`/`fdr`/`fda`/`fdl` wherever a row of the matching kind is shown
+/// (#196): `id` is `None` when the row has nothing of that kind to act on (same silent no-op as
+/// `ga`/`gr`). No optimistic update -- nothing changes until `on_favorited` sees the answer.
+fn send_favorite(
+    state: &mut State,
+    kind: phonia_ipc::CatalogKind,
+    id: Option<String>,
+    favorite: bool,
+) -> Effects {
+    let Some(id) = id else {
+        return Effects::default();
+    };
+    if !require_browsable(state, "favorites") {
+        return Effects::redraw();
+    }
+    state.last_error = None;
+    Effects {
+        redraw: true,
+        commands: vec![Cmd::Request {
+            tag: Tag::Favorite { favorite },
+            request: Request::SetFavorite { kind, id, favorite },
+        }],
+    }
+}
+
 /// `ga` and `gr` on a track row, wherever the row is: the page of the track's first credited
 /// artist, or of the album it is on. A track without the one asked for does nothing.
 fn open_artist_or_album(
@@ -2335,15 +2501,15 @@ fn act_in_view(state: &mut State, action: Action) -> Effects {
     }
     match browsed_row(state) {
         Some(Row::Track { of, track, index }) => act_on_track_row(state, action, of, track, index),
-        Some(Row::Album(album)) if action == Action::Activate => open_track_list(
-            state,
-            phonia_ipc::CatalogRef::Album {
-                id: album.id.clone(),
-            },
-            Header::Album(album),
-        ),
-        Some(Row::Album(album)) if matches!(action, Action::AddToQueue | Action::AddNext) => {
-            send_add(
+        Some(Row::Album(album)) => match action {
+            Action::Activate => open_track_list(
+                state,
+                phonia_ipc::CatalogRef::Album {
+                    id: album.id.clone(),
+                },
+                Header::Album(album),
+            ),
+            Action::AddToQueue | Action::AddNext => send_add(
                 state,
                 Request::QueueAddFrom {
                     from: phonia_ipc::CatalogRef::Album { id: album.id },
@@ -2354,9 +2520,16 @@ fn act_in_view(state: &mut State, action: Action) -> Effects {
                     },
                 },
                 false,
-            )
-        }
-        Some(Row::Album(_)) | None => Effects::default(),
+            ),
+            // `far`/`faa`/`fdr`/`fda` on an album row of an artist's page (#196); the playlist and
+            // track chords make no sense here (an album is neither), so they fall through to the
+            // default no-op.
+            Action::Favorite(kind, favorite) => {
+                send_favorite(state, kind, album_target(kind, &album), favorite)
+            }
+            _ => Effects::default(),
+        },
+        None => Effects::default(),
     }
 }
 
@@ -2424,6 +2597,11 @@ fn act_on_track_row(
                 |album| !matches!(&of, phonia_ipc::CatalogRef::Album { id } if *id == album.id),
             );
             open_artist_or_album(state, action, track.artists.first().cloned(), album)
+        }
+        // Unlike `gr` just above, no same-album filter: favoriting the album a track inside it
+        // belongs to is a real, distinct action, not a no-op (#196).
+        Action::Favorite(kind, favorite) => {
+            send_favorite(state, kind, track_target(kind, &track), favorite)
         }
         _ => Effects::default(),
     }
@@ -2496,6 +2674,31 @@ fn act_on_home_result(state: &mut State, action: Action) -> Effects {
             ),
             _ => Effects::default(),
         };
+    }
+    // The direction is the key's (#196), everywhere, including a Played row (recently played):
+    // it resolves to whichever id a new enough daemon sent (#194) -- an older one or a `file:`
+    // source makes this a no-op.
+    if let Action::Favorite(kind, favorite) = action {
+        let id = match selected {
+            home::Selected::Track(track) => track_target(kind, &track),
+            home::Selected::Album(album) => album_target(kind, &album),
+            home::Selected::Artist(artist) if kind == phonia_ipc::CatalogKind::Artists => {
+                Some(artist.id.clone())
+            }
+            home::Selected::Played(played) => match kind {
+                phonia_ipc::CatalogKind::Tracks => {
+                    played.source.strip_prefix("tidal:").map(str::to_string)
+                }
+                phonia_ipc::CatalogKind::Albums => played.album_id.clone(),
+                phonia_ipc::CatalogKind::Artists => played.artist_id.clone(),
+                phonia_ipc::CatalogKind::Playlists | phonia_ipc::CatalogKind::Unknown => None,
+            },
+            home::Selected::Artist(_)
+            | home::Selected::Continue(_)
+            | home::Selected::Entry(_)
+            | home::Selected::SeeAll(_) => None,
+        };
+        return send_favorite(state, kind, id, favorite);
     }
     if action == Action::OpenRadio {
         return match selected {
@@ -3646,6 +3849,31 @@ mod tests {
         assert!(effects.commands.is_empty());
     }
 
+    #[test]
+    fn faa_in_the_queue_favorites_the_entrys_artist() {
+        let mut state = in_the_queue(2);
+        state
+            .server
+            .as_mut()
+            .unwrap()
+            .capabilities
+            .push("catalog".into());
+        state.queue.as_mut().unwrap().items[1].artist_id = Some("77".to_string());
+        ch(&mut state, 'j');
+        ch(&mut state, 'f');
+        ch(&mut state, 'a');
+        let (tag, request) = tagged(ch(&mut state, 'a'));
+        assert_eq!(tag, Tag::Favorite { favorite: true });
+        assert_eq!(
+            request,
+            Request::SetFavorite {
+                kind: phonia_ipc::CatalogKind::Artists,
+                id: "77".into(),
+                favorite: true,
+            }
+        );
+    }
+
     fn id(n: u64) -> phonia_ipc::ItemId {
         phonia_ipc::ItemId(n)
     }
@@ -4353,6 +4581,24 @@ mod tests {
         assert!(state.search_views.is_empty(), "nothing was opened either");
     }
 
+    #[test]
+    fn fas_on_a_search_track_adds_it_to_favorites() {
+        // The direction is the key's: `fas` always adds (#196).
+        let mut state = with_results(vec![track_row(11)], 1);
+        ch(&mut state, 'f');
+        ch(&mut state, 'a');
+        let (tag, request) = tagged(ch(&mut state, 's'));
+        assert_eq!(tag, Tag::Favorite { favorite: true });
+        assert_eq!(
+            request,
+            Request::SetFavorite {
+                kind: phonia_ipc::CatalogKind::Tracks,
+                id: "11".into(),
+                favorite: true,
+            }
+        );
+    }
+
     fn on_album(mut track: phonia_ipc::TrackSummary, id: &str) -> phonia_ipc::TrackSummary {
         track.album = Some(phonia_ipc::AlbumRef {
             id: id.into(),
@@ -5045,6 +5291,40 @@ mod tests {
     }
 
     #[test]
+    fn far_on_a_track_inside_its_own_open_album_still_favorites_that_album() {
+        // Unlike `gr`, there is no same-album filter: favoriting the album you're browsing is a
+        // real, distinct action, not a no-op (#196).
+        let mut state = with_results(vec![track_row(11)], 1);
+        ch(&mut state, ']'); // Albums
+        let serial = open_album(&mut state);
+        let track = on_album(track_row(1), "33723912");
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::View { serial },
+                result: Ok(Payload::Tracks {
+                    from: phonia_ipc::CatalogRef::Album {
+                        id: "33723912".into(),
+                    },
+                    page: page_of(vec![track], 1, 0).unwrap(),
+                }),
+            },
+        );
+        ch(&mut state, 'f');
+        ch(&mut state, 'a');
+        let (tag, request) = tagged(ch(&mut state, 'r'));
+        assert_eq!(tag, Tag::Favorite { favorite: true });
+        assert_eq!(
+            request,
+            Request::SetFavorite {
+                kind: phonia_ipc::CatalogKind::Albums,
+                id: "33723912".into(),
+                favorite: true,
+            }
+        );
+    }
+
+    #[test]
     fn ga_opens_the_artist_of_a_track_tidal_will_not_stream_here() {
         // Browsing away from a track is not playing it: an unavailable track still has an artist.
         let (mut state, _) = in_an_open_album(false);
@@ -5711,6 +5991,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fas_on_a_recently_played_row_adds_it_but_not_a_local_files() {
+        let mut state = with_recently_played();
+        ch(&mut state, 'j'); // "tidal:1"
+        ch(&mut state, 'f');
+        ch(&mut state, 'a');
+        let (tag, request) = tagged(ch(&mut state, 's'));
+        assert_eq!(tag, Tag::Favorite { favorite: true });
+        assert_eq!(
+            request,
+            Request::SetFavorite {
+                kind: phonia_ipc::CatalogKind::Tracks,
+                id: "1".into(),
+                favorite: true,
+            }
+        );
+
+        ch(&mut state, 'j'); // "file:/home/x/b.flac"
+        ch(&mut state, 'f');
+        ch(&mut state, 'a');
+        assert!(
+            ch(&mut state, 's').commands.is_empty(),
+            "a local file has no track id to favorite"
+        );
+    }
+
     fn played_row_with_ids() -> State {
         let mut state = State::default();
         // `catalog` is needed too: opening the artist/album page is gated on it, same as `ga`/`gr`
@@ -5765,6 +6071,66 @@ mod tests {
         assert!(ch(&mut state, 'a').commands.is_empty());
         ch(&mut state, 'g');
         assert!(ch(&mut state, 'r').commands.is_empty());
+    }
+
+    #[test]
+    fn far_and_faa_on_a_recently_played_row_use_its_album_and_artist_ids() {
+        let mut state = played_row_with_ids();
+        ch(&mut state, 'f');
+        ch(&mut state, 'a');
+        let (tag, request) = tagged(ch(&mut state, 'r'));
+        assert_eq!(tag, Tag::Favorite { favorite: true });
+        assert_eq!(
+            request,
+            Request::SetFavorite {
+                kind: phonia_ipc::CatalogKind::Albums,
+                id: "223382003".into(),
+                favorite: true,
+            }
+        );
+
+        ch(&mut state, 'f');
+        ch(&mut state, 'a');
+        let (tag, request) = tagged(ch(&mut state, 'a'));
+        assert_eq!(tag, Tag::Favorite { favorite: true });
+        assert_eq!(
+            request,
+            Request::SetFavorite {
+                kind: phonia_ipc::CatalogKind::Artists,
+                id: "780".into(),
+                favorite: true,
+            }
+        );
+    }
+
+    #[test]
+    fn fdr_and_fda_on_a_recently_played_row_remove_its_album_and_artist() {
+        let mut state = played_row_with_ids();
+        ch(&mut state, 'f');
+        ch(&mut state, 'd');
+        let (tag, request) = tagged(ch(&mut state, 'r'));
+        assert_eq!(tag, Tag::Favorite { favorite: false });
+        assert_eq!(
+            request,
+            Request::SetFavorite {
+                kind: phonia_ipc::CatalogKind::Albums,
+                id: "223382003".into(),
+                favorite: false,
+            }
+        );
+
+        ch(&mut state, 'f');
+        ch(&mut state, 'd');
+        let (tag, request) = tagged(ch(&mut state, 'a'));
+        assert_eq!(tag, Tag::Favorite { favorite: false });
+        assert_eq!(
+            request,
+            Request::SetFavorite {
+                kind: phonia_ipc::CatalogKind::Artists,
+                id: "780".into(),
+                favorite: false,
+            }
+        );
     }
 
     /// Connected, with the catalog, left on Home (the default section) with its library already
@@ -5914,6 +6280,44 @@ mod tests {
             }
         );
         assert!(state.home_views.is_empty(), "added, not opened");
+    }
+
+    #[test]
+    fn fds_on_homes_favorite_track_block_removes_it_and_fas_still_adds_it() {
+        let mut state = with_home_library();
+        // Rows, in order, each block's items followed by its own "See all": the album (1), its
+        // See all (2), the artist (3), its See all (4), the "Moods" folder entry (5), its See
+        // all (6), then the two favorite tracks start at (7).
+        for _ in 0..6 {
+            ch(&mut state, 'j');
+        }
+        ch(&mut state, 'j'); // "Freak On a Leash"
+        ch(&mut state, 'f');
+        ch(&mut state, 'd');
+        let (tag, request) = tagged(ch(&mut state, 's'));
+        assert_eq!(tag, Tag::Favorite { favorite: false });
+        assert_eq!(
+            request,
+            Request::SetFavorite {
+                kind: phonia_ipc::CatalogKind::Tracks,
+                id: "1".into(),
+                favorite: false,
+            }
+        );
+
+        // The direction is the key's, not the screen's: `fas` on that same row still adds.
+        ch(&mut state, 'f');
+        ch(&mut state, 'a');
+        let (tag, request) = tagged(ch(&mut state, 's'));
+        assert_eq!(tag, Tag::Favorite { favorite: true });
+        assert_eq!(
+            request,
+            Request::SetFavorite {
+                kind: phonia_ipc::CatalogKind::Tracks,
+                id: "1".into(),
+                favorite: true,
+            }
+        );
     }
 
     #[test]
@@ -6266,6 +6670,62 @@ mod tests {
     }
 
     #[test]
+    fn an_ack_on_favorite_reloads_the_library_keeping_the_current_tab() {
+        let mut state = with_library();
+        ch(&mut state, ']'); // favorite albums
+        let generation_before = state.library.as_ref().unwrap().generation;
+        let effects = update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::Favorite { favorite: false },
+                result: Ok(Payload::Ack),
+            },
+        );
+        assert_eq!(state.notice.as_deref(), Some("Removed from favorites"));
+        let library = state.library.as_ref().unwrap();
+        assert_eq!(library.tab, LibraryTab::FavoriteAlbums);
+        assert_eq!(library.generation, generation_before + 1);
+        assert_eq!(effects.commands.len(), 3, "the three library requests");
+        assert!(effects.commands.iter().any(|cmd| matches!(
+            cmd,
+            Cmd::Request {
+                request: Request::Library { .. },
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn an_err_on_favorite_sets_last_error_and_reloads_nothing() {
+        let mut state = with_library();
+        let effects = update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::Favorite { favorite: true },
+                result: Err("TIDAL said no".to_string()),
+            },
+        );
+        assert_eq!(state.last_error.as_deref(), Some("TIDAL said no"));
+        assert!(effects.commands.is_empty());
+    }
+
+    #[test]
+    fn an_ack_on_favorite_before_the_library_ever_loaded_is_a_quiet_no_op() {
+        // The library hasn't loaded at all yet (no connection): nothing to refresh.
+        let mut state = State::default();
+        let effects = update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::Favorite { favorite: true },
+                result: Ok(Payload::Ack),
+            },
+        );
+        assert_eq!(state.notice.as_deref(), Some("Added to favorites"));
+        assert!(state.library.is_none());
+        assert!(effects.commands.is_empty());
+    }
+
+    #[test]
     fn losing_the_connection_fails_the_library_if_it_was_still_loading() {
         let (mut state, _, _, _) = opening_library();
         disconnected(&mut state, Duration::from_secs(1));
@@ -6421,6 +6881,167 @@ mod tests {
         let (tag, request) = tagged(ch(&mut state, 'a'));
         assert!(matches!(tag, Tag::View { .. }));
         assert!(matches!(request, Request::Artist { ref id, .. } if id == "780"));
+    }
+
+    #[test]
+    fn fds_removes_a_favorite_track_and_far_still_adds_its_album() {
+        let (mut state, tag, _, _) = opening_library();
+        let track = on_album(library_track("1", "Freak On a Leash"), "9");
+        update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Ok(Payload::Library {
+                    favorite_tracks: phonia_ipc::Page {
+                        items: vec![track],
+                        total: 1,
+                        offset: 0,
+                    },
+                    favorite_albums: phonia_ipc::Page {
+                        items: vec![],
+                        total: 0,
+                        offset: 0,
+                    },
+                    my_playlists: phonia_ipc::Page {
+                        items: vec![],
+                        total: 0,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
+        ch(&mut state, 'l');
+
+        ch(&mut state, 'f');
+        ch(&mut state, 'd');
+        let (tag, request) = tagged(ch(&mut state, 's'));
+        assert_eq!(tag, Tag::Favorite { favorite: false });
+        assert_eq!(
+            request,
+            Request::SetFavorite {
+                kind: phonia_ipc::CatalogKind::Tracks,
+                id: "1".into(),
+                favorite: false,
+            }
+        );
+
+        ch(&mut state, 'f');
+        ch(&mut state, 'a');
+        let (tag, request) = tagged(ch(&mut state, 'r'));
+        assert_eq!(tag, Tag::Favorite { favorite: true });
+        assert_eq!(
+            request,
+            Request::SetFavorite {
+                kind: phonia_ipc::CatalogKind::Albums,
+                id: "9".into(),
+                favorite: true,
+            }
+        );
+    }
+
+    #[test]
+    fn fdr_removes_a_favorite_album_and_faa_still_adds_its_artist() {
+        let (mut state, tag, _, _) = opening_library();
+        let mut album = library_album("9", "Issues");
+        album.artists = vec![phonia_ipc::ArtistRef {
+            id: "780".into(),
+            name: "Korn".into(),
+        }];
+        update(
+            &mut state,
+            Msg::Response {
+                tag,
+                result: Ok(Payload::Library {
+                    favorite_tracks: phonia_ipc::Page {
+                        items: vec![],
+                        total: 0,
+                        offset: 0,
+                    },
+                    favorite_albums: phonia_ipc::Page {
+                        items: vec![album],
+                        total: 1,
+                        offset: 0,
+                    },
+                    my_playlists: phonia_ipc::Page {
+                        items: vec![],
+                        total: 0,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
+        ch(&mut state, 'l');
+        ch(&mut state, ']'); // favorite albums
+
+        ch(&mut state, 'f');
+        ch(&mut state, 'd');
+        let (tag, request) = tagged(ch(&mut state, 'r'));
+        assert_eq!(tag, Tag::Favorite { favorite: false });
+        assert_eq!(
+            request,
+            Request::SetFavorite {
+                kind: phonia_ipc::CatalogKind::Albums,
+                id: "9".into(),
+                favorite: false,
+            }
+        );
+
+        ch(&mut state, 'f');
+        ch(&mut state, 'a');
+        let (tag, request) = tagged(ch(&mut state, 'a'));
+        assert_eq!(tag, Tag::Favorite { favorite: true });
+        assert_eq!(
+            request,
+            Request::SetFavorite {
+                kind: phonia_ipc::CatalogKind::Artists,
+                id: "780".into(),
+                favorite: true,
+            }
+        );
+    }
+
+    #[test]
+    fn fda_removes_a_favorite_artist() {
+        let mut state = with_library();
+        ch(&mut state, ']'); // favorite albums
+        ch(&mut state, ']'); // favorite artists
+        ch(&mut state, 'f');
+        ch(&mut state, 'd');
+        let (tag, request) = tagged(ch(&mut state, 'a'));
+        assert_eq!(tag, Tag::Favorite { favorite: false });
+        assert_eq!(
+            request,
+            Request::SetFavorite {
+                kind: phonia_ipc::CatalogKind::Artists,
+                id: "780".into(),
+                favorite: false,
+            }
+        );
+    }
+
+    #[test]
+    fn fas_on_a_library_playlists_entry_does_nothing() {
+        let mut state = with_library();
+        ch(&mut state, ']'); // favorite albums
+        ch(&mut state, ']'); // favorite artists
+        ch(&mut state, ']'); // playlists
+        ch(&mut state, 'f');
+        ch(&mut state, 'a');
+        assert!(ch(&mut state, 's').commands.is_empty());
+    }
+
+    #[test]
+    fn fal_and_fdl_on_a_library_playlists_entry_do_nothing() {
+        let mut state = with_library();
+        ch(&mut state, ']'); // favorite albums
+        ch(&mut state, ']'); // favorite artists
+        ch(&mut state, ']'); // playlists
+        ch(&mut state, 'f');
+        ch(&mut state, 'a');
+        assert!(ch(&mut state, 'l').commands.is_empty());
+        ch(&mut state, 'f');
+        ch(&mut state, 'd');
+        assert!(ch(&mut state, 'l').commands.is_empty());
     }
 
     #[test]
