@@ -1566,9 +1566,9 @@ mod tests {
     #[test]
     fn on_a_tall_terminal_the_whole_help_shows_without_scrolling() {
         let mut state = State::default();
-        update(&mut state, Msg::Resize(100, 70));
+        update(&mut state, Msg::Resize(100, 76));
         press(&mut state, '?');
-        let text = screen(&state, 100, 70);
+        let text = screen(&state, 100, 76);
         assert!(!text.contains("j/k scroll"), "{text}");
         for wanted in [
             "General",

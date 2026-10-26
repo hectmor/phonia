@@ -77,6 +77,11 @@ pub enum Call {
     Lyrics {
         id: String,
     },
+    SetFavorite {
+        kind: Kind,
+        id: String,
+        favorite: bool,
+    },
 }
 
 /// What a [`FakeCatalog`] knows of one artist.
@@ -516,6 +521,16 @@ impl Catalog for FakeCatalog {
     fn track_lyrics(&self, id: String) -> BoxFuture<'static, Result<Option<Lyrics>, CatalogError>> {
         let call = Call::Lyrics { id: id.clone() };
         self.answer(call, move |state| Ok(state.lyrics.get(&id).cloned()))
+    }
+
+    fn set_favorite(
+        &self,
+        kind: Kind,
+        id: String,
+        favorite: bool,
+    ) -> BoxFuture<'static, Result<(), CatalogError>> {
+        let call = Call::SetFavorite { kind, id, favorite };
+        self.answer(call, |_| Ok(()))
     }
 }
 

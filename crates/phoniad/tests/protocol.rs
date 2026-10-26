@@ -2850,6 +2850,56 @@ async fn without_a_catalog_lyrics_cannot_be_answered() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn setting_a_favorite_acks_and_reaches_the_catalog() {
+    let catalog = FakeCatalog::new();
+    let f = fixture_with_catalog("favorite-ok", Some(Arc::new(catalog))).await;
+    let client = f.client().await;
+    let reply = client
+        .request(Request::SetFavorite {
+            kind: CatalogKind::Albums,
+            id: "7".into(),
+            favorite: true,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(reply, Payload::Ack));
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failing_catalog_reports_its_own_error_for_set_favorite() {
+    let catalog = FakeCatalog::new().failing(CatalogError::NotLoggedIn("no session".into()));
+    let f = fixture_with_catalog("favorite-nologin", Some(Arc::new(catalog))).await;
+    let client = f.client().await;
+    let error = client
+        .request(Request::SetFavorite {
+            kind: CatalogKind::Tracks,
+            id: "1".into(),
+            favorite: false,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(protocol_code(error), ErrorCode::NotLoggedIn);
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn without_a_catalog_favorites_cannot_be_changed() {
+    let f = fixture_with_catalog("favorite-nocatalog", None).await;
+    let client = f.client().await;
+    let error = client
+        .request(Request::SetFavorite {
+            kind: CatalogKind::Tracks,
+            id: "1".into(),
+            favorite: true,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(protocol_code(error), ErrorCode::Unsupported);
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_daemon_with_a_catalog_announces_the_lyrics_capability() {
     let f = fixture_with_catalog("lyrics-hello", Some(Arc::new(FakeCatalog::new()))).await;
     let client = f.client().await;

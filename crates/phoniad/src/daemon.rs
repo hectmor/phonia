@@ -521,6 +521,9 @@ impl Daemon {
                 limit,
             } => self.playlists(from, offset, limit).await,
             Request::Library { limit } => self.library(limit).await,
+            Request::SetFavorite { kind, id, favorite } => {
+                self.set_favorite(kind, id, favorite).await
+            }
             Request::RecentlyPlayed => {
                 let items = self.recent.lock().unwrap().recent().items().to_vec();
                 Reply::Ok(Payload::RecentlyPlayed {
@@ -649,6 +652,21 @@ impl Daemon {
                     .insert(id.clone(), dto.clone());
                 Reply::Ok(Payload::Lyrics { id, lyrics: dto })
             }
+            Err(failure) => catalog_failure(&failure),
+        }
+    }
+
+    /// Adds or removes one TIDAL favorite.
+    async fn set_favorite(&self, kind: ipc::CatalogKind, id: String, favorite: bool) -> Reply {
+        let catalog = match self.catalog_or_refuse("change favorites in") {
+            Ok(catalog) => catalog,
+            Err(reply) => return reply,
+        };
+        let Some(kind) = convert::catalog_kind(kind) else {
+            return self::error(ErrorCode::BadRequest, "unknown kind");
+        };
+        match catalog.set_favorite(kind, id, favorite).await {
+            Ok(()) => Reply::Ok(Payload::Ack),
             Err(failure) => catalog_failure(&failure),
         }
     }

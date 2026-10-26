@@ -88,6 +88,8 @@ done — it is its own product decision, not a leftover.
 | #156 | `ga` on a queue entry opens its artist | Closed |
 | #164 | `ga` on any track row: search results, track rows, inside an opened album | Closed |
 | #166 | `gr` opens the album of the track under the cursor | Closed |
+| #194 | `ga`/`gr` reach Home's recently played rows and Library's favorite albums | Closed |
+| #196 | Add/remove TIDAL favorites from the TUI (`fas`/`far`/`faa`/`fal`, `fds`/`fdr`/`fda`/`fdl`) | In progress (part 1 of 2) |
 | #35 | Scrobbling to Last.fm and ListenBrainz | Open, not scoped |
 | #36 | Discord Rich Presence | Open, not scoped |
 | #37 | Persistent queue and state across restarts | Open, not scoped |

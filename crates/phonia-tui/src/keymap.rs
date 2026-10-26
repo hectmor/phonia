@@ -62,6 +62,11 @@ pub enum Action {
     OpenArtist,
     /// Opens the album page of the track under the cursor.
     OpenAlbum,
+    /// Adds (`true`) or removes (`false`) a track/album/artist/playlist from TIDAL's favorites
+    /// (#196). The direction is the key's, not the screen's: `fas`/`far`/`faa`/`fal` always add,
+    /// `fds`/`fdr`/`fda`/`fdl` always remove. Following/unfollowing a playlist is not implemented
+    /// yet (see #196 part 2); `fal`/`fdl` reach the daemon and come back as an error until then.
+    Favorite(phonia_ipc::CatalogKind, bool),
     /// Leaves the album or the playlist open, back to what it was opened from.
     Back,
 }
@@ -389,6 +394,62 @@ pub const BINDINGS: &[Binding] = &[
         Group::Search,
     ),
     bind(
+        &[c('f'), c('a'), c('s')],
+        "fas",
+        Action::Favorite(phonia_ipc::CatalogKind::Tracks, true),
+        "add the track to favorites",
+        Group::Search,
+    ),
+    bind(
+        &[c('f'), c('a'), c('r')],
+        "far",
+        Action::Favorite(phonia_ipc::CatalogKind::Albums, true),
+        "add the album to favorites",
+        Group::Search,
+    ),
+    bind(
+        &[c('f'), c('a'), c('a')],
+        "faa",
+        Action::Favorite(phonia_ipc::CatalogKind::Artists, true),
+        "add the artist to favorites",
+        Group::Search,
+    ),
+    bind(
+        &[c('f'), c('a'), c('l')],
+        "fal",
+        Action::Favorite(phonia_ipc::CatalogKind::Playlists, true),
+        "add the playlist to favorites",
+        Group::Search,
+    ),
+    bind(
+        &[c('f'), c('d'), c('s')],
+        "fds",
+        Action::Favorite(phonia_ipc::CatalogKind::Tracks, false),
+        "remove the track from favorites",
+        Group::Search,
+    ),
+    bind(
+        &[c('f'), c('d'), c('r')],
+        "fdr",
+        Action::Favorite(phonia_ipc::CatalogKind::Albums, false),
+        "remove the album from favorites",
+        Group::Search,
+    ),
+    bind(
+        &[c('f'), c('d'), c('a')],
+        "fda",
+        Action::Favorite(phonia_ipc::CatalogKind::Artists, false),
+        "remove the artist from favorites",
+        Group::Search,
+    ),
+    bind(
+        &[c('f'), c('d'), c('l')],
+        "fdl",
+        Action::Favorite(phonia_ipc::CatalogKind::Playlists, false),
+        "remove the playlist from favorites",
+        Group::Search,
+    ),
+    bind(
         &[Key::plain(KeyCode::Backspace)],
         "Backspace",
         Action::Back,
@@ -519,6 +580,62 @@ mod tests {
         assert_eq!(
             resolve(&[c('g')], c('a')),
             Resolution::Action(Action::OpenArtist)
+        );
+    }
+
+    #[test]
+    fn f_then_a_or_d_wait_for_a_third_key_and_resolve_all_four_kinds() {
+        use phonia_ipc::CatalogKind::{Albums, Artists, Playlists, Tracks};
+
+        assert_eq!(resolve(&[], c('f')), Resolution::Pending);
+        assert_eq!(resolve(&[c('f')], c('a')), Resolution::Pending);
+        assert_eq!(resolve(&[c('f')], c('d')), Resolution::Pending);
+
+        assert_eq!(
+            resolve(&[c('f'), c('a')], c('s')),
+            Resolution::Action(Action::Favorite(Tracks, true))
+        );
+        assert_eq!(
+            resolve(&[c('f'), c('a')], c('r')),
+            Resolution::Action(Action::Favorite(Albums, true))
+        );
+        assert_eq!(
+            resolve(&[c('f'), c('a')], c('a')),
+            Resolution::Action(Action::Favorite(Artists, true))
+        );
+        assert_eq!(
+            resolve(&[c('f'), c('a')], c('l')),
+            Resolution::Action(Action::Favorite(Playlists, true))
+        );
+        assert_eq!(resolve(&[c('f'), c('a')], c('x')), Resolution::None);
+
+        assert_eq!(
+            resolve(&[c('f'), c('d')], c('s')),
+            Resolution::Action(Action::Favorite(Tracks, false))
+        );
+        assert_eq!(
+            resolve(&[c('f'), c('d')], c('r')),
+            Resolution::Action(Action::Favorite(Albums, false))
+        );
+        assert_eq!(
+            resolve(&[c('f'), c('d')], c('a')),
+            Resolution::Action(Action::Favorite(Artists, false))
+        );
+        assert_eq!(
+            resolve(&[c('f'), c('d')], c('l')),
+            Resolution::Action(Action::Favorite(Playlists, false))
+        );
+        assert_eq!(resolve(&[c('f'), c('d')], c('x')), Resolution::None);
+
+        assert_eq!(resolve(&[c('f')], c('x')), Resolution::None);
+    }
+
+    #[test]
+    fn plain_a_and_d_still_control_the_queue() {
+        assert_eq!(resolve(&[], c('a')), Resolution::Action(Action::AddToQueue));
+        assert_eq!(
+            resolve(&[], c('d')),
+            Resolution::Action(Action::RemoveEntry)
         );
     }
 
