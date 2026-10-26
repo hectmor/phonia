@@ -31,7 +31,8 @@ track is in [AUDIO.md](AUDIO.md). Start at the [README](../README.md).
   -- Decodes and plays local files (FLAC or fMP4), one after another, through the same playback
   engine and ALSA output, without touching TIDAL. Useful for testing the DAC in isolation.
 
-- **`phonia tui [--socket <path>]`** -- the terminal interface, a client of a running `phoniad`. It
+- **`phonia tui [--socket <path>]`** -- the terminal interface, a client of `phoniad`: one you
+  started, or one it starts itself when nothing answers yet (#192, see "The daemon" below). It
   has a sidebar (Home, Queue, Search, Library, Lyrics), a main panel and a bar at the bottom. It
   opens on Home (#139). Its first row, "Continue", picks up whatever the queue was doing: resumes
   a paused track at its exact position, replays a stopped one from the start, or starts the queue
@@ -121,9 +122,19 @@ track is in [AUDIO.md](AUDIO.md). Start at the [README](../README.md).
   natively; ...`, #25's own precise reason) in place of `phonia`'s otherwise bare "Stopped", until
   the next track actually starts or a fresh verdict arrives. Other keys
   are vim-like: `j`/`k` (or the arrows) move, `gg` and `G` go to the ends, `Ctrl-d`/`Ctrl-u` move
-  half a page, `h`/`l`/`Tab` change panel, `1`-`3` jump to a section, `?` shows the keys (and
+  half a page, `h`/`l`/`Tab` change panel, `1`-`5` jump to a section, `?` shows the keys (and
   scrolls with `j`/`k` when the terminal is too short for it) and `q` (or `Ctrl-c`) quits. The help
-  is drawn from the same table the keys are read from, so it cannot go out of date. It needs a
+  is drawn from the same table the keys are read from, so it cannot go out of date. The whole
+  layout follows the terminal it is given (#175): every panel measures the area it is really drawn
+  in rather than assuming the 80x24 phonia targets, so the bar's key hints fall back through
+  tiers of 88, 59, 36 and 14 columns as the state flags take theirs (the flags win: they are
+  state, the hints only a reminder of what `?` lists in full), and a row of tabs shows names with
+  counts, then names alone, then `< selected name >`. Below 60 columns the sidebar is not drawn at
+  all and the main panel takes its 14 columns -- the panel's title still names the section and
+  `1`-`5` still switch it, so nothing becomes unreachable. Below 40x10 the panels would be borders
+  around nothing, so it draws a centred message with the size it needs, the size there is, and how
+  to quit. A scrolling list holds its window still until the cursor reaches the edge (#198), the
+  way an editor does, instead of recentring on every move. It needs a
   terminal, and says so when it is run from a pipe.
 
 - **`--shuffle` / `--repeat`** (on `play` and `play-file`): the tracks form a queue. `--shuffle`
@@ -230,7 +241,7 @@ One connection carries requests, their responses and, once subscribed, events, a
 JSON, so `socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/phonia/phoniad.sock` is a working client:
 
 ```
-< {"type":"hello","protocol":{"major":1,"minor":6},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","catalog"]}
+< {"type":"hello","protocol":{"major":1,"minor":19},"server":{"name":"phoniad","version":"1.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","recently_played","catalog","lyrics","autoplay"]}
 > {"id":1,"request":{"type":"hello","protocol":{"major":1,"minor":0},"client":{"name":"me","version":"0"}}}
 < {"type":"response","id":1,"ok":{"type":"ack"}}
 > {"id":2,"request":{"type":"subscribe"}}

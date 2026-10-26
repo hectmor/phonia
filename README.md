@@ -28,6 +28,11 @@ Unix socket: the TUI, the `phonia ctl` command line, the MPRIS service your medi
 already speak. Closing the interface does not stop the music, and a crash in the drawing
 code cannot interrupt a note.
 
+Split in two, but not two things to launch: `phonia tui` starts a `phoniad` itself when
+nothing answers on the socket yet, and stops only that one when you quit. Start the
+daemon yourself, by hand or under systemd, and the TUI leaves it alone — the music then
+outlives every client.
+
 The audio path has one rule, and the whole stack exists to keep it: **in exclusive mode a
 sample reaches the DAC exactly as it was decoded, or the track is refused with a message
 saying why.** Never resampled, never dithered, never routed through a float. Shared mode
@@ -73,6 +78,14 @@ exists for headphones and speakers, and it says plainly that it is not bit-perfe
   honoured. Or a built-in palette (`gruvbox`, `dracula`, `nord`) chosen in `theme.toml`
   ([CONFIGURATION.md](docs/CONFIGURATION.md)).
 - **Help that cannot go stale**, generated from the same table the keys are read from.
+- **It fits the terminal it is given.** Every panel measures the room it actually has
+  instead of assuming 80 columns: covers grow with the window in steps, the bar's key
+  hints fall back through shorter tiers, a row of tabs drops its counts and then all but
+  the selected name, and under 60 columns the sidebar folds away — the panel's title still
+  names the section and the digits still switch it. Under 40×10 it says what size it needs
+  instead of drawing borders around nothing.
+- **It brings its own daemon.** With nothing answering on the socket, `phonia tui` starts
+  `phoniad` and stops only that one, so a daemon you started yourself is never touched.
 - It **reconnects by itself** when the daemon is not there yet or goes away, and says why
   when what answers is not a compatible daemon.
 
@@ -85,6 +98,10 @@ exists for headphones and speakers, and it says plainly that it is not bit-perfe
 - Album, artist and playlist pages; an artist's bio, top tracks, albums, and EPs and
   singles.
 - Your favorites — tracks, albums, artists — and the playlists you made.
+- **Favorite from the keyboard**: `fas`, `far`, `faa` add the track, album or artist under
+  the cursor to your TIDAL favorites, and `fds`, `fdr`, `fda` remove it. The direction is
+  the key's, not the screen's, so nothing toggles out from under you. (Following a
+  playlist is wired but not implemented yet, and answers with an error.)
 - TIDAL's real **playlist folder** tree, browsable as it is in TIDAL's own app.
 - **Track radio** and **autoplay**: when the queue runs dry, phonia follows the music.
 - **Synced lyrics**, following the line being sung.
@@ -132,17 +149,29 @@ That leaves two binaries in `target/release/`: `phonia` (the CLI and the TUI) an
 ## Quick start
 
 ```sh
-phonia devices                              # find your card: use its id, not its number
-phonia login                                # opens TIDAL in your browser (PKCE)
-phoniad --output exclusive:hw:DS2,0         # the daemon; leave it running
-phonia tui                                  # in another terminal
+phonia devices    # find your card: use its id, not its number
+phonia login      # opens TIDAL in your browser (PKCE)
+phonia tui        # starts phoniad itself if nothing answers yet
 ```
 
 `phonia devices` prints the exact text to use — name the card by its **id**
-(`hw:DS2,0`), never its number, because ALSA renumbers cards between boots.
+(`hw:DS2,0`), never its number, because ALSA renumbers cards between boots. Put it in
+`~/.config/phonia/config.toml` (below): a daemon the TUI starts inherits only its
+`--socket` and `--config`, so the config file is where the device has to come from.
+
+The TUI stops only the daemon it started — on quit, on SIGTERM, or when the terminal
+closes — and that daemon's own output goes to `~/.local/state/phonia/phoniad.log`. To
+keep playing after the TUI is gone, or to pass flags, start it yourself first and every
+TUI simply attaches:
+
+```sh
+phoniad --output exclusive:hw:DS2,0 &
+phonia tui
+```
 
 No DAC connected, or on Bluetooth headphones? Exclusive mode needs the card itself, so
-start the daemon in shared mode instead and ask for a tier it can carry:
+ask for shared mode and a tier it can carry — `mode = "shared"` in the config file, or on
+a daemon of your own:
 
 ```sh
 phoniad --output shared:default --quality lossless
@@ -186,7 +215,8 @@ from the same table the keys are read from.
 | `/` | search TIDAL; `[` `]` step between the result lists |
 | `a` / `A` | queue it at the end / right after the track playing |
 | `o` | open the track's radio |
-| `ga` / `gr` | open the artist / the album of the track under the cursor |
+| `ga` / `gr` | open the artist / the album of whatever is under the cursor |
+| `fas` `far` `faa` | favorite the track / album / artist; `fds` `fdr` `fda` unfavorite it |
 | `Space` | play or pause |
 | `n` / `p` | next / previous track; `<` `>` seek 10 s |
 | `+` `-` / `m` | volume / mute |
