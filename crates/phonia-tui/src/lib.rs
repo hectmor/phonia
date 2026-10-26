@@ -4,6 +4,10 @@
 //! The shape is a small Elm: [`app::update`] turns a message into a change of the [`app::State`]
 //! and a list of things to do, and [`view::draw`] paints a state. Both are pure, so they are
 //! tested with plain values and ratatui's `TestBackend`; only [`run`] talks to the terminal.
+//! `draw` also returns the scroll offset it drew the main panel's list at (see
+//! [`view::keep_in_view`]), which `paint` below stores back onto `State` with
+//! [`app::State::remember_scroll`] right after drawing -- the one place outside `update` allowed
+//! to change `State`, and only ever with what the frame just drawn already shows.
 
 pub mod app;
 pub mod browse;
@@ -107,7 +111,7 @@ async fn event_loop(
         requests_rx,
     ));
     let mut tick = tokio::time::interval(TICK);
-    terminal.draw(|frame| view::draw(&state, &theme, &covers, frame))?;
+    paint(terminal, &mut state, &theme, &covers)?;
     maybe_fetch_cover(&state, &mut covers, terminal.size()?, &cover_done);
 
     while !state.quit {
@@ -120,7 +124,7 @@ async fn event_loop(
                 // Not an `app::Msg`: covers are a resource for drawing, not app state (see
                 // `covers.rs`), so this redraws directly instead of going through `app::update`.
                 covers.finish(url, cells, outcome);
-                terminal.draw(|frame| view::draw(&state, &theme, &covers, frame))?;
+                paint(terminal, &mut state, &theme, &covers)?;
                 continue;
             }
             event = events.next() => match event {
@@ -150,8 +154,24 @@ async fn event_loop(
         maybe_fetch_cover(&state, &mut covers, terminal.size()?, &cover_done);
         // Painting is the expensive part: only when something changed.
         if effects.redraw && !state.quit {
-            terminal.draw(|frame| view::draw(&state, &theme, &covers, frame))?;
+            paint(terminal, &mut state, &theme, &covers)?;
         }
+    }
+    Ok(())
+}
+
+/// Draws one frame and stores back where it left the main panel's list scrolled to, so the next
+/// one picks up from there instead of recomputing the window from nothing (see the module doc).
+fn paint(
+    terminal: &mut ratatui::DefaultTerminal,
+    state: &mut State,
+    theme: &Theme,
+    covers: &Covers,
+) -> Result<()> {
+    let mut shown = None;
+    terminal.draw(|frame| shown = view::draw(state, theme, covers, frame))?;
+    if let Some(scroll) = shown {
+        state.remember_scroll(scroll);
     }
     Ok(())
 }
