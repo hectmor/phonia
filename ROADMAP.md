@@ -120,6 +120,7 @@ description each and are to be scoped with Opus when their turn comes.
 | #159 | Highlight the track playing in search, and the album it belongs to | Closed (PR #161) |
 | #160 | `Enter` inside an opened album queues it at the end of the queue | Closed |
 | #175 | Making the TUI responsive: the cover and the whole interface fit the terminal | Closed (all four parts) |
+| #198 | Scrolling lists jump with every cursor move instead of staying put until the edge | Closed |
 
 Started right after #120. The owner's concrete ask, from a screenshot of
 TIDAL's own web player: a visually bigger, bolder track title with the artist

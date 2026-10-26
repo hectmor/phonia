@@ -3699,3 +3699,59 @@ This is part 1 of 2. Part 2 needs a live-verified follow/unfollow playlist
 endpoint (none of `tidlers`, this repo, or TIDAL's documented API has one
 confirmed yet) before `fal`/`fdl` do anything on a real playlist; #196
 stays open until then.
+
+## 2026-10-26 — #198: scrolling lists remember their own window instead of recomputing it from nothing
+
+`view::first_visible(cursor, rows)` decided which row a list's window started at purely from the
+cursor's current position and the rows available -- it had no memory of where the window was a
+moment ago. Once the cursor was at `rows - 1` or past it, this pinned the cursor to the window's
+*last* row and recomputed the window from scratch on every move: a queue of 100 tracks with a
+10-row window, sitting on the last track, lost that track from view on the very first "up" press,
+because the window moved by one row for every single cursor step instead of staying put until the
+cursor actually reached its edge. The same function backed every scrollable list in the TUI
+(Queue, Home, Search, Library, and an opened album/playlist/artist page), so it was one bug, not
+five.
+
+The fix gives each list a persisted scroll offset, instead of a stateless recomputation, so the
+window only moves the minimum needed when the cursor would actually leave it:
+```
+scroll = if cursor < scroll { cursor }
+         else if cursor >= scroll + rows { cursor + 1 - rows }
+         else { scroll };
+scroll.min(len.saturating_sub(rows))   // never shows past the end of a shorter/shrunk list
+```
+(`view::keep_in_view`, replacing `first_visible`).
+
+The offset lives on `Cursor` itself (a new private `scroll` field, alongside `selected`), since
+every scrollable list already owns exactly one `Cursor` -- the queue's, Home's, each search tab's,
+each library tab's, and every browse view's (`TrackListView`/`ArtistView`/`FolderView`) -- so one
+field covers every list at every depth of every stack for free, and a freshly built `Cursor`
+(a new search, a newly pushed view) starts at scroll 0 with no extra code.
+
+The harder question was *where* the offset gets written back, given `view::draw(state: &State, ...)`
+is a pure read of `State` (by design -- it is what lets it be tested with plain values and
+ratatui's `TestBackend`) and the exact row count a given list renders at is a layout detail (cover
+sizes, wrapped bios, variable headers) that only `draw` itself actually knows. Making `draw` take
+`&mut State` was tried and rejected: `browse::draw` borrows a view stack out of the very `State` it
+also holds, so threading a mutable borrow through breaks down the first level in. Interior
+mutability (`Cell`) does not fit either: `Cursor` is `Copy` and copied by value in several places
+(`search.rs`'s `rows`, for one), and `Cell` is not `Copy`.
+
+What `draw` does instead: it stays a pure read, but now returns the scroll offset it drew the main
+panel's one visible list at (`Option<usize>`, `None` on Lyrics, which has no list, or when the
+terminal is too small to draw anything). The run loop (`lib.rs`'s new `paint` helper, wrapping the
+three places that used to call `terminal.draw(|frame| view::draw(...))` directly) takes that value
+and calls a new `State::remember_scroll(scroll)`, which writes it onto whichever `Cursor` `draw`
+just rendered -- found by the same section/stack rule `draw_main` itself uses, so it can never land
+on the wrong list. This is the one place besides `app::update` allowed to mutate `State`, and it
+only ever writes back what the frame just drawn already shows, so it needed no `Msg`, no redraw,
+and does not interact with `update`'s own before/after `Snapshot` comparison that decides whether
+to redraw at all (that snapshot is taken entirely within one `update` call, which never touches
+`scroll`).
+
+One visible side effect, deliberately kept, approved before implementing: the queue's window used
+to snap back to the top whenever the queue lost the focus (`draw_queue` passed `cursor: None` when
+unfocused, and the old stateless `first_visible` treated that as cursor 0). Now the window always
+tracks `queue_cursor`'s own position and stored scroll regardless of focus -- only the highlight
+still depends on it -- so switching focus away from the queue and back leaves it exactly where it
+was. This closes #198.

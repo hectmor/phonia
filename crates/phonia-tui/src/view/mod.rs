@@ -79,19 +79,26 @@ pub fn content_area(area: Rect) -> Rect {
     Block::bordered().inner(areas(area).main)
 }
 
-pub fn draw(state: &State, theme: &Theme, covers: &Covers, frame: &mut Frame) {
+/// Paints `state` onto `frame`, and returns the scroll offset the main panel's list was drawn
+/// at, if it has one (`None` on Lyrics, which has no list, and when the terminal is too small to
+/// draw at all) -- the caller stores it back onto the matching `Cursor` with
+/// `State::remember_scroll`, so the next render starts from where this one left off rather than
+/// recomputing the window from nothing. Still a pure read of `state`: drawing itself never
+/// mutates it.
+pub fn draw(state: &State, theme: &Theme, covers: &Covers, frame: &mut Frame) -> Option<usize> {
     let screen = frame.area();
     if screen.width < MIN_COLUMNS || screen.height < MIN_ROWS {
         draw_too_small(theme, frame);
-        return;
+        return None;
     }
     let areas = areas(screen);
     draw_sidebar(state, theme, frame, areas.sidebar);
-    draw_main(state, theme, covers, frame, areas.main);
+    let shown = draw_main(state, theme, covers, frame, areas.main);
     draw_bar(state, theme, frame, areas.bar);
     if state.help {
         help::draw(theme, state.help_scroll, frame);
     }
+    shown
 }
 
 fn draw_too_small(theme: &Theme, frame: &mut Frame) {
@@ -148,7 +155,13 @@ fn draw_sidebar(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
     );
 }
 
-fn draw_main(state: &State, theme: &Theme, covers: &Covers, frame: &mut Frame, area: Rect) {
+fn draw_main(
+    state: &State,
+    theme: &Theme,
+    covers: &Covers,
+    frame: &mut Frame,
+    area: Rect,
+) -> Option<usize> {
     let focused = state.focus == Focus::Main;
     // Home, likewise, may have an album, a playlist or a folder opened from one of its blocks.
     if state.section() == Section::Home {
@@ -160,12 +173,11 @@ fn draw_main(state: &State, theme: &Theme, covers: &Covers, frame: &mut Frame, a
         let block = panel(&title, focused, theme);
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        if state.home_views.is_empty() {
-            home::draw(state, theme, focused, frame, inner);
+        return if state.home_views.is_empty() {
+            home::draw(state, theme, focused, frame, inner)
         } else {
-            browse::draw(state, &state.home_views, theme, covers, frame, inner);
-        }
-        return;
+            browse::draw(state, &state.home_views, theme, covers, frame, inner)
+        };
     }
     // The search has its own layout inside the panel: the line, the tabs and the results, or an
     // album or a playlist opened from one of them.
@@ -178,12 +190,11 @@ fn draw_main(state: &State, theme: &Theme, covers: &Covers, frame: &mut Frame, a
         let block = panel(&title, focused, theme);
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        if state.search_views.is_empty() {
-            search::draw(state, theme, frame, inner);
+        return if state.search_views.is_empty() {
+            search::draw(state, theme, frame, inner)
         } else {
-            browse::draw(state, &state.search_views, theme, covers, frame, inner);
-        }
-        return;
+            browse::draw(state, &state.search_views, theme, covers, frame, inner)
+        };
     }
     // The library, likewise, may have an album or a playlist opened from it.
     if state.section() == Section::Library {
@@ -195,12 +206,11 @@ fn draw_main(state: &State, theme: &Theme, covers: &Covers, frame: &mut Frame, a
         let block = panel(&title, focused, theme);
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        if state.library_views.is_empty() {
-            library::draw(state, theme, frame, inner);
+        return if state.library_views.is_empty() {
+            library::draw(state, theme, frame, inner)
         } else {
-            browse::draw(state, &state.library_views, theme, covers, frame, inner);
-        }
-        return;
+            browse::draw(state, &state.library_views, theme, covers, frame, inner)
+        };
     }
     if state.section() == Section::Lyrics {
         let title = match state
@@ -218,7 +228,7 @@ fn draw_main(state: &State, theme: &Theme, covers: &Covers, frame: &mut Frame, a
         let inner = block.inner(area);
         frame.render_widget(block, area);
         lyrics::draw(state, theme, frame, inner);
-        return;
+        return None;
     }
     // The queue: the currently playing track's own cover, when there is one, above the list.
     let title = match &state.queue {
@@ -228,7 +238,7 @@ fn draw_main(state: &State, theme: &Theme, covers: &Covers, frame: &mut Frame, a
     let block = panel(&title, focused, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    draw_queue(state, theme, covers, frame, inner, focused);
+    draw_queue(state, theme, covers, frame, inner, focused)
 }
 
 /// The queue's entries, in play order; the currently playing track's own cover shows above the
@@ -240,13 +250,13 @@ fn draw_queue(
     frame: &mut Frame,
     area: Rect,
     focused: bool,
-) {
+) -> Option<usize> {
     let Some(queue) = &state.queue else {
         frame.render_widget(
             Paragraph::new(vec![Line::styled("Not connected yet.", theme.dim)]),
             area,
         );
-        return;
+        return None;
     };
     let track = state
         .status
@@ -299,11 +309,20 @@ fn draw_queue(
         );
     }
     let rows = usize::from(list_area.height);
+    // The window tracks the cursor whether or not the queue has the focus, so switching focus
+    // away and back never moves it; only the highlight depends on focus.
+    let start = keep_in_view(
+        state.queue_cursor.scroll(),
+        state.queue_cursor.selected(),
+        queue.items.len(),
+        rows,
+    );
     let cursor = focused.then(|| state.queue_cursor.selected());
     frame.render_widget(
-        Paragraph::new(queue_lines(queue, cursor, rows, theme)),
+        Paragraph::new(queue_lines(queue, cursor, start, rows, theme)),
         list_area,
     );
+    Some(start)
 }
 
 /// The currently playing track: its title (bold, the thing to look at), the artist on its own
@@ -337,27 +356,34 @@ fn now_playing_header<'a>(state: &State, theme: &Theme) -> Vec<Line<'a>> {
     lines
 }
 
-/// The first row to show so that `cursor` is on screen among `rows`: the top of the list until the
-/// cursor would fall off the bottom, then just enough scrolled for it to be the last row.
-pub fn first_visible(cursor: usize, rows: usize) -> usize {
-    if rows == 0 {
-        return 0;
-    }
-    (cursor + 1).saturating_sub(rows)
+/// Where the window should start so `cursor` stays on screen among `rows`, moving as little as
+/// possible from `scroll` (where it was last drawn): held while the cursor is still inside it,
+/// moved by exactly enough to bring it back in view when it crosses the top or the bottom edge.
+/// Never leaves the window showing past the end of a `len`-long list.
+pub fn keep_in_view(scroll: usize, cursor: usize, len: usize, rows: usize) -> usize {
+    let rows = rows.max(1);
+    let scroll = if cursor < scroll {
+        cursor
+    } else if cursor >= scroll + rows {
+        cursor + 1 - rows
+    } else {
+        scroll
+    };
+    scroll.min(len.saturating_sub(rows))
 }
 
-/// The queue in queue order, as many rows as fit, with the entry playing marked and, when the
-/// list has the focus, the one under the cursor highlighted.
+/// The queue in queue order, as many rows as fit starting at `start`, with the entry playing
+/// marked and, when the list has the focus, the one under the cursor highlighted.
 fn queue_lines<'a>(
     queue: &phonia_ipc::Queue,
     cursor: Option<usize>,
+    start: usize,
     rows: usize,
     theme: &Theme,
 ) -> Vec<Line<'a>> {
     if queue.items.is_empty() {
         return vec![Line::styled("The queue is empty.", theme.dim)];
     }
-    let start = first_visible(cursor.unwrap_or(0), rows);
     queue
         .items
         .iter()
@@ -765,8 +791,34 @@ mod tests {
     pub(crate) fn screen(state: &State, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| draw(state, &Theme::new(false), &Covers::disabled(), frame))
+            .draw(|frame| {
+                draw(state, &Theme::new(false), &Covers::disabled(), frame);
+            })
             .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The screen as text, the same as `screen`, but also storing the scroll offset drawn back
+    /// onto `state` -- the same thing `lib.rs`'s own `paint` does after every real frame, so a
+    /// test can press a key, call this, and see the window stay where the previous call to this
+    /// left it instead of recomputing from nothing each time.
+    fn screen_live(state: &mut State, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut shown = None;
+        terminal
+            .draw(|frame| shown = draw(state, &Theme::new(false), &Covers::disabled(), frame))
+            .unwrap();
+        if let Some(scroll) = shown {
+            state.remember_scroll(scroll);
+        }
         let buffer = terminal.backend().buffer().clone();
         (0..height)
             .map(|y| {
@@ -1615,12 +1667,42 @@ mod tests {
     }
 
     #[test]
-    fn the_first_visible_row_keeps_the_cursor_on_screen() {
-        assert_eq!(first_visible(0, 10), 0);
-        assert_eq!(first_visible(9, 10), 0, "the last row that fits");
-        assert_eq!(first_visible(10, 10), 1);
-        assert_eq!(first_visible(25, 10), 16);
-        assert_eq!(first_visible(5, 0), 0, "no rows: nothing to scroll");
+    fn keep_in_view_holds_the_window_while_the_cursor_stays_inside_it() {
+        // The issue's own example (#198): scrolled to 90 already, the cursor moving to 98 (still
+        // inside the window of 10) must not move it.
+        assert_eq!(keep_in_view(90, 98, 100, 10), 90);
+    }
+
+    #[test]
+    fn keep_in_view_moves_by_exactly_one_at_each_edge() {
+        assert_eq!(keep_in_view(0, 10, 100, 10), 1, "crossing the bottom edge");
+        assert_eq!(keep_in_view(90, 89, 100, 10), 89, "crossing the top edge");
+    }
+
+    #[test]
+    fn keep_in_view_follows_a_jump_to_either_end() {
+        assert_eq!(keep_in_view(0, 99, 100, 10), 90, "G");
+        assert_eq!(keep_in_view(90, 0, 100, 10), 0, "gg");
+    }
+
+    #[test]
+    fn keep_in_view_never_scrolls_a_list_shorter_than_the_window() {
+        assert_eq!(keep_in_view(5, 3, 4, 10), 0);
+    }
+
+    #[test]
+    fn keep_in_view_pulls_a_shrunk_list_back_so_nothing_shows_past_its_end() {
+        assert_eq!(keep_in_view(90, 49, 50, 10), 40);
+    }
+
+    #[test]
+    fn keep_in_view_leaves_no_dead_space_when_the_window_grows() {
+        assert_eq!(keep_in_view(90, 95, 100, 20), 80);
+    }
+
+    #[test]
+    fn keep_in_view_treats_zero_rows_as_one() {
+        assert_eq!(keep_in_view(0, 5, 10, 0), 5);
     }
 
     #[test]
@@ -1644,13 +1726,129 @@ mod tests {
     }
 
     #[test]
+    fn the_queue_window_holds_while_the_cursor_moves_inside_it() {
+        let mut state = long_queue(40);
+        press(&mut state, 'l');
+        press(&mut state, 'G');
+        let bottom = screen_live(&mut state, 80, 12);
+        assert!(bottom.contains("Track 40"), "{bottom}");
+        press(&mut state, 'k');
+        let after = screen_live(&mut state, 80, 12);
+        assert!(
+            after.contains("Track 40"),
+            "the window must not move while the cursor is still inside it:\n{after}"
+        );
+    }
+
+    #[test]
+    fn the_queue_window_scrolls_by_one_at_each_edge() {
+        let mut state = long_queue(40);
+        press(&mut state, 'l');
+        let top = screen_live(&mut state, 80, 12); // establishes the window at the top, scroll 0
+        assert!(
+            top.contains("Track 1 ") && top.contains("Track 5 "),
+            "{top}"
+        );
+        assert!(
+            !top.contains("Track 6 "),
+            "5 rows fit at this height:\n{top}"
+        );
+
+        for _ in 0..5 {
+            press(&mut state, 'j');
+        }
+        // The cursor (now on row 5, Track 6) has just crossed the bottom edge of the 5-row
+        // window that showed rows 0-4: the window must move by exactly one, not jump to keep the
+        // cursor pinned to the bottom row the way the old `first_visible` did.
+        let scrolled = screen_live(&mut state, 80, 12);
+        assert!(scrolled.contains("Track 2 "), "{scrolled}");
+        assert!(scrolled.contains("Track 6 "), "{scrolled}");
+        assert!(!scrolled.contains("Track 1 "), "{scrolled}");
+
+        press(&mut state, 'k'); // row 4 (Track 5): still inside the window, must not move it
+        let held = screen_live(&mut state, 80, 12);
+        assert!(held.contains("Track 2 "), "{held}");
+
+        for _ in 0..4 {
+            press(&mut state, 'k');
+        }
+        // The cursor (now on row 0, Track 1) has crossed the window's top edge: moves by one.
+        let back = screen_live(&mut state, 80, 12);
+        assert!(back.contains("Track 1 "), "{back}");
+    }
+
+    #[test]
+    fn a_taller_terminal_shows_more_above_not_dead_space_below() {
+        let mut state = long_queue(40);
+        press(&mut state, 'l');
+        press(&mut state, 'G');
+        screen_live(&mut state, 80, 12); // window at the end: Track 36-40 (5 rows fit)
+        // At the same scroll, a much taller panel (23 rows) would run 18 rows past the end of
+        // the 40-track queue -- `keep_in_view`'s own clamp must pull the window back up so the
+        // last track still lands on the last row, instead of leaving that much dead space below
+        // it the way a window that only ever grows downward would.
+        let taller = screen_live(&mut state, 80, 30);
+        assert!(taller.contains("Track 40"), "{taller}");
+        assert!(
+            taller.contains("Track 18"),
+            "the window grew upward to fill the taller panel:\n{taller}"
+        );
+    }
+
+    #[test]
+    fn removing_entries_pulls_the_window_back() {
+        use phonia_ipc::{Queue, Repeat};
+        let mut state = long_queue(40);
+        press(&mut state, 'l');
+        press(&mut state, 'G');
+        screen_live(&mut state, 80, 12);
+        let shorter: Vec<_> = state.queue.as_ref().unwrap().items[..10].to_vec();
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::QueueChanged {
+                queue: Queue {
+                    version: 3,
+                    order: shorter.iter().map(|item| item.id).collect(),
+                    items: shorter,
+                    current: None,
+                    shuffle: false,
+                    repeat: Repeat::Off,
+                    autoplay: false,
+                },
+            }),
+        );
+        let after = screen_live(&mut state, 80, 12);
+        assert!(
+            after.contains("Track 10"),
+            "the last remaining track is on screen, no gap below it:\n{after}"
+        );
+    }
+
+    #[test]
+    fn the_queue_keeps_its_window_when_focus_leaves() {
+        let mut state = long_queue(40);
+        press(&mut state, 'l');
+        press(&mut state, 'G');
+        let focused = screen_live(&mut state, 80, 12);
+        assert!(focused.contains("Track 40"), "{focused}");
+        press(&mut state, 'h'); // focus back to the sidebar
+        let unfocused = screen_live(&mut state, 80, 12);
+        assert!(
+            unfocused.contains("Track 40"),
+            "losing focus must not snap the window back to the top:\n{unfocused}"
+        );
+    }
+
+    #[test]
     fn the_cursor_row_is_highlighted_only_while_the_list_has_the_focus() {
         let mut state = long_queue(3);
         let theme = Theme::new(false);
         let has_reverse_row = |state: &State| {
             let mut terminal = Terminal::new(TestBackend::new(60, 14)).unwrap();
             terminal
-                .draw(|frame| draw(state, &theme, &Covers::disabled(), frame))
+                .draw(|frame| {
+                    draw(state, &theme, &Covers::disabled(), frame);
+                })
                 .unwrap();
             let buffer = terminal.backend().buffer().clone();
             (0..14).any(|y| {
@@ -1905,7 +2103,9 @@ mod tests {
         }
         let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
         terminal
-            .draw(|frame| draw(&state, &Theme::new(false), &Covers::disabled(), frame))
+            .draw(|frame| {
+                draw(&state, &Theme::new(false), &Covers::disabled(), frame);
+            })
             .unwrap();
         let cursor = terminal.get_cursor_position().unwrap();
         // The sidebar (14) and the panel's border (1), then "/ " and four letters, on the first
@@ -1959,12 +2159,16 @@ mod tests {
         let theme = Theme::new(true);
         let mut terminal = Terminal::new(TestBackend::new(120, 14)).unwrap();
         terminal
-            .draw(|frame| draw(&state, &theme, &Covers::disabled(), frame))
+            .draw(|frame| {
+                draw(&state, &theme, &Covers::disabled(), frame);
+            })
             .unwrap();
         press(&mut state, 'l');
         press(&mut state, 'j');
         terminal
-            .draw(|frame| draw(&state, &theme, &Covers::disabled(), frame))
+            .draw(|frame| {
+                draw(&state, &theme, &Covers::disabled(), frame);
+            })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
         let (x, y) = (0..14)
@@ -1999,7 +2203,9 @@ mod tests {
         let theme = Theme::new(true);
         let mut terminal = Terminal::new(TestBackend::new(120, 14)).unwrap();
         terminal
-            .draw(|frame| draw(&state, &theme, &Covers::disabled(), frame))
+            .draw(|frame| {
+                draw(&state, &theme, &Covers::disabled(), frame);
+            })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
         let row_fg = |needle: &str| {
@@ -2396,7 +2602,9 @@ mod tests {
         let reversed_rows = |state: &State| {
             let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
             terminal
-                .draw(|frame| draw(state, &theme, &Covers::disabled(), frame))
+                .draw(|frame| {
+                    draw(state, &theme, &Covers::disabled(), frame);
+                })
                 .unwrap();
             let buffer = terminal.backend().buffer().clone();
             (0..14)
@@ -2582,7 +2790,9 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| draw(&state, &theme, &covers, frame))
+            .draw(|frame| {
+                draw(&state, &theme, &covers, frame);
+            })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
 
@@ -2671,7 +2881,9 @@ mod tests {
         }
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| draw(state, &Theme::new(false), covers, frame))
+            .draw(|frame| {
+                draw(state, &Theme::new(false), covers, frame);
+            })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
         // The rectangle the draw reserved for the cover (from its own measure, not the fetch's),
@@ -2846,7 +3058,9 @@ mod tests {
     fn screen_with(state: &State, covers: &Covers, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| draw(state, &Theme::new(false), covers, frame))
+            .draw(|frame| {
+                draw(state, &Theme::new(false), covers, frame);
+            })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
         (0..height)
@@ -2878,7 +3092,9 @@ mod tests {
         let reversed_rows = |state: &State| {
             let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
             terminal
-                .draw(|frame| draw(state, &theme, &Covers::disabled(), frame))
+                .draw(|frame| {
+                    draw(state, &theme, &Covers::disabled(), frame);
+                })
                 .unwrap();
             let buffer = terminal.backend().buffer().clone();
             (0..14)
@@ -3083,7 +3299,9 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| draw(&state, &theme, &covers, frame))
+            .draw(|frame| {
+                draw(&state, &theme, &covers, frame);
+            })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
 
@@ -3197,7 +3415,9 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| draw(&state, &theme, &covers, frame))
+            .draw(|frame| {
+                draw(&state, &theme, &covers, frame);
+            })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
 
@@ -3723,7 +3943,9 @@ mod tests {
         let reversed_row = |state: &State| {
             let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
             terminal
-                .draw(|frame| draw(state, &theme, &Covers::disabled(), frame))
+                .draw(|frame| {
+                    draw(state, &theme, &Covers::disabled(), frame);
+                })
                 .unwrap();
             let buffer = terminal.backend().buffer().clone();
             (0..30).find(|y| {

@@ -214,6 +214,33 @@ impl State {
             browse::View::Folder(_) => None,
         }
     }
+
+    /// Stores where `view::draw` just drew the main panel's one visible list, onto the `Cursor`
+    /// it drew it from -- the same list `draw_main` picks, by the same section/stack rules, so
+    /// the next render starts from here instead of recomputing the window from nothing (#198).
+    /// Called right after a draw, with no `update` in between, so it can never land on the wrong
+    /// list. Lyrics has no list to remember one for.
+    pub fn remember_scroll(&mut self, scroll: usize) {
+        if let Some(view) = active_stack_mut(self).and_then(Stack::top_mut) {
+            view_list_mut(view).1.set_scroll(scroll);
+            return;
+        }
+        match self.section() {
+            Section::Lyrics => {}
+            Section::Queue => self.queue_cursor.set_scroll(scroll),
+            Section::Home => self.home_cursor.set_scroll(scroll),
+            Section::Search => {
+                let tab = self.search.tab;
+                self.search.list_of(tab).0.set_scroll(scroll);
+            }
+            Section::Library => {
+                if let Some(library) = &mut self.library {
+                    let tab = library.tab;
+                    library.list_of(tab).0.set_scroll(scroll);
+                }
+            }
+        }
+    }
 }
 
 /// Something that happened.
@@ -1283,13 +1310,21 @@ fn active_stack_mut(state: &mut State) -> Option<&mut Stack> {
 /// The cursor of whatever is open on top of the current section's stack: an album's or a
 /// playlist's tracks, or one of an artist's three lists.
 fn browsing_cursor(state: &mut State) -> Option<Cursor> {
-    match active_stack_mut(state)?.top_mut()? {
-        browse::View::TrackList(view) => Some(view.tracks.cursor),
-        browse::View::Artist(artist) => Some(match artist.tracks_or_albums() {
-            browse::ListRef::Tracks(found) => found.cursor,
-            browse::ListRef::Albums(found) => found.cursor,
-        }),
-        browse::View::Folder(folder) => Some(folder.entries.cursor),
+    let (_, cursor) = view_list_mut(active_stack_mut(state)?.top_mut()?);
+    Some(*cursor)
+}
+
+/// The list a view holds, whichever of its three shapes it is: its length, and a mutable
+/// reference to its own cursor (which also carries where it was last scrolled to, see
+/// `view::keep_in_view`).
+fn view_list_mut(view: &mut browse::View) -> (usize, &mut Cursor) {
+    match view {
+        browse::View::TrackList(view) => (view.tracks.items.len(), &mut view.tracks.cursor),
+        browse::View::Artist(artist) => match artist.tracks_or_albums() {
+            browse::ListRef::Tracks(found) => (found.items.len(), &mut found.cursor),
+            browse::ListRef::Albums(found) => (found.items.len(), &mut found.cursor),
+        },
+        browse::View::Folder(folder) => (folder.entries.items.len(), &mut folder.entries.cursor),
     }
 }
 
@@ -2088,16 +2123,7 @@ fn move_cursor(state: &mut State, action: Action) {
         let Some(view) = active_stack_mut(state).and_then(Stack::top_mut) else {
             return;
         };
-        match view {
-            browse::View::TrackList(view) => (view.tracks.items.len(), &mut view.tracks.cursor),
-            browse::View::Artist(artist) => match artist.tracks_or_albums() {
-                browse::ListRef::Tracks(found) => (found.items.len(), &mut found.cursor),
-                browse::ListRef::Albums(found) => (found.items.len(), &mut found.cursor),
-            },
-            browse::View::Folder(folder) => {
-                (folder.entries.items.len(), &mut folder.entries.cursor)
-            }
-        }
+        view_list_mut(view)
     } else {
         match (state.focus, state.section()) {
             (Focus::Sidebar, _) => (Section::ALL.len(), &mut state.sidebar),
@@ -7970,5 +7996,47 @@ mod tests {
         ch(&mut state, 'l');
         assert!(ch(&mut state, 'a').commands.is_empty());
         assert!(press(&mut state, KeyCode::Enter).commands.is_empty());
+    }
+
+    // --- Remembering where the main panel's list was scrolled to (#198) --------------------
+
+    #[test]
+    fn remember_scroll_writes_the_scroll_onto_whichever_list_is_on_screen() {
+        let mut state = in_the_queue(5);
+        state.remember_scroll(3);
+        assert_eq!(state.queue_cursor.scroll(), 3);
+
+        let mut state = with_home_library();
+        state.remember_scroll(2);
+        assert_eq!(state.home_cursor.scroll(), 2);
+
+        // No view open on top: the current tab's own cursor.
+        let mut state = with_results(vec![track_row(11)], 1);
+        state.remember_scroll(4);
+        assert_eq!(state.search.tracks.cursor.scroll(), 4);
+
+        let mut state = with_library();
+        state.remember_scroll(1);
+        assert_eq!(state.library.unwrap().favorite_tracks.cursor.scroll(), 1);
+
+        // A view open on top of the stack: its own cursor, not the search tab underneath it.
+        let (mut state, _) = in_an_open_album(true);
+        state.remember_scroll(5);
+        let Some(browse::View::TrackList(view)) = state.search_views.top() else {
+            panic!("no album open")
+        };
+        assert_eq!(view.tracks.cursor.scroll(), 5);
+        assert_eq!(
+            state.search.tracks.cursor.scroll(),
+            0,
+            "the tab underneath is untouched"
+        );
+    }
+
+    #[test]
+    fn remember_scroll_does_nothing_on_lyrics() {
+        let mut state = connected_on_tidal_track("9");
+        ch(&mut state, '5');
+        state.remember_scroll(7); // must not panic, and there is nothing to check it against
     }
 }
