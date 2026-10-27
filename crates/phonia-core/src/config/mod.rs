@@ -148,7 +148,7 @@ impl<T> Sourced<T> {
 #[derive(Debug, Clone, Default)]
 pub struct Overrides {
     pub device: Option<String>,
-    /// `shared` or `exclusive`, when the command line says (`--output`).
+    /// `auto`, `shared` or `exclusive`, when the command line says (`--output`).
     pub mode: Option<OutputMode>,
     /// The output in shared mode, when the command line names one.
     pub sink: Option<String>,
@@ -310,16 +310,38 @@ impl Overrides {
 
 impl Settings {
     /// Where to play: the card in exclusive mode (which must be named), the sound server's output
-    /// in shared mode.
+    /// in shared mode, or, in auto mode, the device if one is named, else the DAC if one is
+    /// plugged in (#157), else shared.
     pub fn output(&self) -> Result<OutputSpec> {
+        self.output_in(Path::new(crate::output::device::ASOUND))
+    }
+
+    /// [`Settings::output`], reading the sound cards from `asound` instead of the real
+    /// `/proc/asound` (so a test can hand in a made-up tree).
+    pub fn output_in(&self, asound: &Path) -> Result<OutputSpec> {
         Ok(match self.mode.value {
             OutputMode::Exclusive => OutputSpec::Exclusive {
                 device: self.require_device()?.to_string(),
             },
-            OutputMode::Shared => OutputSpec::Shared {
-                sink: (self.sink.value != "default").then(|| self.sink.value.clone()),
+            OutputMode::Shared => self.shared(),
+            OutputMode::Auto => match self
+                .device
+                .value
+                .clone()
+                .or_else(|| crate::output::device::usb_dac(asound))
+            {
+                Some(device) => OutputSpec::Exclusive { device },
+                None => self.shared(),
             },
         })
+    }
+
+    /// The shared-mode output the settings name, regardless of `mode`. Used when falling back
+    /// from a lost exclusive output (#157).
+    pub fn shared(&self) -> OutputSpec {
+        OutputSpec::Shared {
+            sink: (self.sink.value != "default").then(|| self.sink.value.clone()),
+        }
     }
 
     /// The device to play on, or an explanation of how to name one.
@@ -485,7 +507,7 @@ mod tests {
         assert_eq!(
             settings.mode,
             Sourced {
-                value: OutputMode::Exclusive,
+                value: OutputMode::Auto,
                 origin: Origin::Default
             }
         );
@@ -771,7 +793,13 @@ mod tests {
 
     #[test]
     fn exclusive_mode_needs_a_device_and_shared_mode_does_not() {
-        let mut file = ConfigFile::default();
+        let mut file = ConfigFile {
+            output: Output {
+                mode: Some(OutputMode::Exclusive),
+                ..Output::default()
+            },
+            ..ConfigFile::default()
+        };
         assert!(resolve(Overrides::default(), &file).output().is_err());
 
         file.output.device = Some("hw:DS2,0".into());
@@ -925,5 +953,107 @@ mod tests {
             }
         );
         assert!(Overrides::default().with_output_id("nonsense").is_err());
+    }
+
+    /// A made-up `/proc/asound` with one USB DAC (card id `DS2`, one playback device), for
+    /// `output_in` tests that must not depend on what is really plugged into this machine.
+    fn fake_dac_tree(name: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("phonia-config-test-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let card = root.join("card1");
+        std::fs::create_dir_all(card.join("pcm0p")).unwrap();
+        std::fs::write(card.join("id"), "DS2\n").unwrap();
+        std::fs::write(card.join("usbid"), "262a:0001\n").unwrap();
+        root
+    }
+
+    #[test]
+    fn auto_takes_the_dac_when_one_is_plugged_in() {
+        let root = fake_dac_tree("plugged-in");
+        let settings = resolve(Overrides::default(), &ConfigFile::default());
+        assert_eq!(
+            settings.output_in(&root).unwrap(),
+            OutputSpec::Exclusive {
+                device: "hw:DS2,0".into()
+            }
+        );
+    }
+
+    #[test]
+    fn auto_without_a_dac_is_shared_on_the_configured_sink() {
+        let no_dac = std::env::temp_dir().join("phonia-config-test-no-such-asound-dir");
+        let settings = resolve(Overrides::default(), &ConfigFile::default());
+        assert_eq!(
+            settings.output_in(&no_dac).unwrap(),
+            OutputSpec::Shared { sink: None }
+        );
+
+        let bt = ConfigFile {
+            output: Output {
+                sink: Some("bt".into()),
+                ..Output::default()
+            },
+            ..ConfigFile::default()
+        };
+        assert_eq!(
+            resolve(Overrides::default(), &bt)
+                .output_in(&no_dac)
+                .unwrap(),
+            OutputSpec::Shared {
+                sink: Some("bt".into())
+            }
+        );
+    }
+
+    #[test]
+    fn auto_with_a_device_named_plays_on_it_as_before() {
+        let root = fake_dac_tree("named-device");
+        let file = ConfigFile {
+            output: Output {
+                device: Some("hw:X,0".into()),
+                ..Output::default()
+            },
+            ..ConfigFile::default()
+        };
+        assert_eq!(
+            resolve(Overrides::default(), &file)
+                .output_in(&root)
+                .unwrap(),
+            OutputSpec::Exclusive {
+                device: "hw:X,0".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_pinned_mode_is_never_overridden() {
+        let root = fake_dac_tree("pinned");
+        let shared = ConfigFile {
+            output: Output {
+                mode: Some(OutputMode::Shared),
+                ..Output::default()
+            },
+            ..ConfigFile::default()
+        };
+        assert_eq!(
+            resolve(Overrides::default(), &shared)
+                .output_in(&root)
+                .unwrap(),
+            OutputSpec::Shared { sink: None }
+        );
+
+        let exclusive = ConfigFile {
+            output: Output {
+                mode: Some(OutputMode::Exclusive),
+                ..Output::default()
+            },
+            ..ConfigFile::default()
+        };
+        assert!(
+            resolve(Overrides::default(), &exclusive)
+                .output_in(&root)
+                .is_err()
+        );
     }
 }

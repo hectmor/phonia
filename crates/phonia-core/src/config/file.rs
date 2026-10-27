@@ -74,8 +74,10 @@ impl FromStr for Quality {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputMode {
-    /// phonia opens the card itself, with nothing mixing or resampling in between: bit-perfect.
+    /// The device if one is named, else the first USB card that plays (the DAC), else shared.
     #[default]
+    Auto,
+    /// phonia opens the card itself, with nothing mixing or resampling in between: bit-perfect.
     Exclusive,
     /// phonia plays through the desktop's sound server (PipeWire, PulseAudio), which mixes and
     /// resamples: not bit-perfect, but any output works, Bluetooth included.
@@ -85,6 +87,7 @@ pub enum OutputMode {
 impl fmt::Display for OutputMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            OutputMode::Auto => "auto",
             OutputMode::Exclusive => "exclusive",
             OutputMode::Shared => "shared",
         })
@@ -433,6 +436,14 @@ autoplay = true
         let file = parse("[output]\nmode = \"shared\"\nsink = \"bluez_output.AA\"\n").unwrap();
         assert_eq!(file.output.mode, Some(OutputMode::Shared));
         assert_eq!(file.output.sink.as_deref(), Some("bluez_output.AA"));
+    }
+
+    #[test]
+    fn auto_mode_is_read_and_is_the_default() {
+        let file = parse("[output]\nmode = \"auto\"\n").unwrap();
+        assert_eq!(file.output.mode, Some(OutputMode::Auto));
+        assert_eq!(OutputMode::default(), OutputMode::Auto);
+        assert_eq!(OutputMode::Auto.to_string(), "auto");
     }
 
     #[test]

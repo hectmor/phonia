@@ -169,9 +169,8 @@ phoniad --output exclusive:hw:DS2,0 &
 phonia tui
 ```
 
-No DAC connected, or on Bluetooth headphones? Exclusive mode needs the card itself, so
-ask for shared mode and a tier it can carry — `mode = "shared"` in the config file, or on
-a daemon of your own:
+No DAC connected, or on Bluetooth headphones? By default phonia detects this itself (see
+below) and falls back to shared mode. To force it from the command line instead:
 
 ```sh
 phoniad --output shared:default --quality lossless
@@ -183,13 +182,14 @@ Everything is also reachable without the TUI — `phonia ctl play`, `pause`, `qu
 
 ## Configuration
 
-Settings live in `~/.config/phonia/config.toml`. Nothing is required except the device,
-in exclusive mode:
+Settings live in `~/.config/phonia/config.toml`. Nothing is required: with no `[output]`
+section, phonia plays bit-perfect on the DAC if one is plugged in, otherwise through the
+desktop's default output. Pin `mode` yourself to choose instead:
 
 ```toml
 [output]
-device = "hw:DS2,0"       # `phonia devices` prints this exact text
-mode = "exclusive"        # exclusive: phonia owns the card, bit-perfect. shared: through PipeWire
+device = "hw:DS2,0"       # `phonia devices` prints this exact text; optional even in auto mode
+mode = "auto"             # auto (default): the DAC if plugged in, else shared. exclusive/shared pin it
 
 [tidal]
 max_quality = "hires"     # the best tier to ask TIDAL for
