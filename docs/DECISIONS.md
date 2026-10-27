@@ -3944,3 +3944,26 @@ still loads, `album: None` (new `recent.rs` test), and a client on an older prot
 wire message that already has `album` -- or a daemon stuck on this version answering a client built
 after it -- both just see `None`/the field is additive, pinned by a new golden compatibility test
 alongside the existing 1.x ones.
+
+## 2026-10-27 — #207 part 2, PR 2 (last): the queue and recently played actually show the album
+
+New `phonia_ipc::fmt::track_name_and_album` sits next to `track_name`: the same artist/title/
+source fallback chain, with the album appended only when both the title and the album are known
+(appending an album to a bare source id like `tidal:12345`, before a title ever arrives, would
+read as if the album were the title) and the album is not an empty string.
+
+Row formats approved earlier (part 1's entry) now actually land:
+- **Queue** (`view/mod.rs::queue_lines`, and `phonia ctl queue`'s own `format_queue`, decided
+  along with it for the same reason part 1 gave the TUI and the CLI the same rule) keeps its own
+  numbered, bracketed-duration style: `12. Korn - Here to Stay - Untouchables  [4:31]`.
+- **Home's recently played** (`view/home.rs`'s `Row::Played` arm) switches to
+  `Korn - Here to Stay - Untouchables - 4:31`, matching the favorites rows right next to it on the
+  same screen -- and, since it was a one-line addition right there, also shows the row's duration
+  for the first time (noticed missing while investigating part 1, approved as in-scope then).
+
+`phonia ctl recently_played`'s own `format_recent` was deliberately left untouched: unlike the
+queue, it already shows the raw source id on every line instead of an album, a different and
+older design choice this issue never asked to revisit.
+
+**#207 is now fully done, both parts, all 2+2 PRs merged.** Issue still open on GitHub as usual --
+close by hand.

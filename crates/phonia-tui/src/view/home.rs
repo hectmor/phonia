@@ -50,11 +50,18 @@ fn line_for(row: &Row, selected: bool, theme: &Theme) -> Line<'static> {
         Row::Artist(artist) => fmt::artist(artist),
         Row::Entry(entry) => folder_entry_text(entry),
         Row::Track(track) => fmt::track(track),
-        Row::Played(played) => fmt::track_name(
-            played.title.as_deref(),
-            played.artist.as_deref(),
-            Some(&played.source),
-        ),
+        Row::Played(played) => {
+            let name = fmt::track_name_and_album(
+                played.title.as_deref(),
+                played.artist.as_deref(),
+                played.album.as_deref(),
+                Some(&played.source),
+            );
+            match played.duration_ms {
+                Some(ms) => format!("{name} - {}", fmt::ms(ms)),
+                None => name,
+            }
+        }
         Row::SeeAll { total, .. } => format!("See all ({total}) \u{2192}"),
     };
     let style = if selected {
