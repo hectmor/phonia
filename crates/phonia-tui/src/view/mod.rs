@@ -2699,7 +2699,14 @@ mod tests {
                     from: phonia_ipc::CatalogRef::Album { id: "9".into() },
                     page: phonia_ipc::Page {
                         items: vec![
-                            track("1", "Dead", 1, true),
+                            phonia_ipc::TrackSummary {
+                                album: Some(phonia_ipc::AlbumRef {
+                                    id: "9".into(),
+                                    title: "Life Is Peachy".into(),
+                                    cover: None,
+                                }),
+                                ..track("1", "Dead", 1, true)
+                            },
                             track("2", "Trash", 2, false),
                             track("3", "4U", 3, true),
                         ],
@@ -3132,6 +3139,20 @@ mod tests {
     }
 
     #[test]
+    fn an_albums_own_tracks_do_not_repeat_its_title_or_the_one_artist() {
+        let state = open_album_view();
+        let text = screen(&state, 100, 14);
+        let dead_line = text
+            .lines()
+            .find(|line| line.contains("1. Dead"))
+            .expect("the first track's line");
+        assert!(
+            !dead_line.contains("Life Is Peachy"),
+            "the album is already the header: {dead_line}"
+        );
+    }
+
+    #[test]
     fn a_narrow_terminal_does_not_break_the_album_view() {
         let state = open_album_view();
         for (w, h) in [(0, 0), (1, 1), (16, 4), (20, 5), (40, 8)] {
@@ -3198,7 +3219,17 @@ mod tests {
                     },
                     bio: Some("A nu metal band.\nMore about it.".into()),
                     top_tracks: phonia_ipc::Page {
-                        items: vec![track("1", "Freak On a Leash"), track("2", "Blind")],
+                        items: vec![
+                            phonia_ipc::TrackSummary {
+                                album: Some(phonia_ipc::AlbumRef {
+                                    id: "9".into(),
+                                    title: "Issues".into(),
+                                    cover: None,
+                                }),
+                                ..track("1", "Freak On a Leash")
+                            },
+                            track("2", "Blind"),
+                        ],
                         total: 300,
                         offset: 0,
                     },
@@ -3245,6 +3276,16 @@ mod tests {
         assert!(text.contains("Albums (35)"), "{text}");
         assert!(text.contains("EPs & singles (0)"), "{text}");
         assert!(text.contains("Freak On a Leash"), "{text}");
+    }
+
+    #[test]
+    fn top_tracks_show_their_album_since_they_span_more_than_one() {
+        let state = open_artist_view();
+        let text = screen(&state, 100, 14);
+        assert!(
+            text.contains("Freak On a Leash - Issues - 1:15 - hires"),
+            "{text}"
+        );
     }
 
     #[test]

@@ -34,7 +34,7 @@ first tag where the tag, `main` and `Cargo.toml` agree.
 | 3 — Audio quality | [Fase 3](https://github.com/hectmor/phonia/milestone/4) | Done (#25–#31) |
 | 4 — SONE-like features | [Fase 4](https://github.com/hectmor/phonia/milestone/5) | In progress (#196 part 2; #35, #36, #37 unscoped) |
 | 5 — Extras and packaging | [Fase 5](https://github.com/hectmor/phonia/milestone/6) | In progress (CI, licensing, the process rules and #192 done; packaging open) |
-| 6 — Layout and appearance | [Fase 6](https://github.com/hectmor/phonia/milestone/7) | Done (#124, #159, #160, #175, #188, #198) |
+| 6 — Layout and appearance | [Fase 6](https://github.com/hectmor/phonia/milestone/7) | In progress (#124, #159, #160, #175, #188, #198 done; #207 part 1 of 2) |
 | 7 — Home screen and discovery | [Fase 7](https://github.com/hectmor/phonia/milestone/8) | Done (#139, #144, #169, #171, #194) |
 
 Phases 0 and 1 delivered: TIDAL PKCE login, HiRes/DASH streaming, bit-perfect
@@ -129,6 +129,7 @@ their turn comes.
 | #175 | Making the TUI responsive: the cover and the whole interface fit the terminal | Closed (all four parts) |
 | #188 | Give the cover room to breathe: columns beside it, a floor under it | Closed (two columns, one row) |
 | #198 | Scrolling lists jump with every cursor move instead of staying put until the edge | Closed |
+| #207 | Show artist and album in every track list, not just title and duration | In progress (part 1 of 2: an opened playlist, radio and an artist's top tracks; the queue and recently played are part 2) |
 
 Started right after #120. The owner's concrete ask, from a screenshot of
 TIDAL's own web player: a visually bigger, bolder track title with the artist

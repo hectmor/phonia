@@ -93,6 +93,9 @@ fn draw_track_list(
             now_playing,
             usize::from(list_area.height),
             theme,
+            // An album's tracks share its one artist and this very album, both already in the
+            // header; a playlist's or a radio's span different artists and albums, so show both.
+            !matches!(view.header(), Header::Album(_)),
         ),
     };
     frame.render_widget(Paragraph::new(lines), list_area);
@@ -138,7 +141,9 @@ fn header_lines(header: &Header, theme: &Theme) -> Vec<Line<'static>> {
 
 /// The tracks, numbered as they are on the album or the playlist, the one under the cursor
 /// highlighted when the list has the focus, the one playing marked the same way the queue marks
-/// its own current entry, and one TIDAL will not stream dimmed.
+/// its own current entry, and one TIDAL will not stream dimmed. `full` adds the artist and the
+/// album to each row (`fmt::track`); without it (`fmt::track_short`) both are left out, for an
+/// album's own tracks, where the header already names the one artist and this is the album.
 fn track_rows<'a>(
     tracks: &[TrackSummary],
     cursor: Cursor,
@@ -146,6 +151,7 @@ fn track_rows<'a>(
     now_playing: Option<&str>,
     height: usize,
     theme: &Theme,
+    full: bool,
 ) -> (Vec<Line<'a>>, Option<usize>) {
     if tracks.is_empty() {
         return (vec![Line::styled("No tracks.", theme.dim)], None);
@@ -161,7 +167,12 @@ fn track_rows<'a>(
             let number = track.track_number.map_or(index + 1, |n| n as usize);
             let current = now_playing.is_some_and(|id| track.id == id);
             let marker = if current { ">" } else { " " };
-            let text = format!("{marker}{number:>3}. {}", fmt::track_short(track));
+            let described = if full {
+                fmt::track(track)
+            } else {
+                fmt::track_short(track)
+            };
+            let text = format!("{marker}{number:>3}. {described}");
             let style = if focused && index == selected {
                 theme.selected
             } else if current {
@@ -307,6 +318,9 @@ fn draw_artist(
                 now_playing_tidal_id(state),
                 usize::from(list_area.height),
                 theme,
+                // Top tracks span many albums; repeating the one artist is harmless (and shows
+                // features, e.g. "Korn, Skrillex").
+                true,
             ),
             ArtistTab::Albums => album_rows(
                 &view.albums.items,
