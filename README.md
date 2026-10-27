@@ -170,7 +170,9 @@ phonia tui
 ```
 
 No DAC connected, or on Bluetooth headphones? By default phonia detects this itself (see
-below) and falls back to shared mode. To force it from the command line instead:
+below) and falls back to shared mode — and if the DAC is unplugged mid-track, it switches
+there too instead of failing the track, ready for a `phonia ctl resume` or Space in the TUI.
+To force it from the command line instead:
 
 ```sh
 phoniad --output shared:default --quality lossless

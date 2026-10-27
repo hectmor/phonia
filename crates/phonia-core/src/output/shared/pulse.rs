@@ -502,29 +502,39 @@ impl Drop for PulseTransport {
     }
 }
 
-/// A second connection that listens for outputs coming and going, and tells the ring when the one
-/// the stream plays on is gone. A stream that is not allowed to move is not closed when its output
-/// disappears: it stays, silent, so nothing else would notice.
+/// A second connection that listens for outputs coming and going, and tells the ring when the
+/// device the stream was opened on is gone -- for a named output, which is not allowed to move
+/// and would otherwise stay open, silent, with nothing else noticing; for `Target::Default`, which
+/// the server is free to move to a new default on its own, so that losing the physical device
+/// pauses instead of silently continuing wherever it was moved to (#157).
 struct Watcher {
     socket: UnixStream,
 }
 
 impl Watcher {
-    /// `sink` is the output the stream may not leave, when there is one; `stream_index` is the
-    /// stream, whose volume the desktop's mixer may change.
+    /// `sink` is the device the stream was opened on (its index then, and a name for the
+    /// message); `stream_index` is the stream, whose volume the desktop's mixer may change.
+    /// `follow_default`, for `Target::Default` only, is a connection used to re-resolve which
+    /// device `sink` means whenever the server's default changes -- otherwise the stream could
+    /// move on to a new default (that is what `no_move: false` is for) while this watcher kept
+    /// listening for the *previous* device to disappear, and would never notice the one actually
+    /// playing go away.
     fn start(
-        sink: Option<(u32, String)>,
+        mut sink: (u32, String),
         stream_index: u32,
         ring: Ring,
         volume: Arc<SharedVolume>,
+        follow_default: Option<Client>,
     ) -> Result<Watcher> {
         let (mut reader, version) = raw_connect()?;
+        let mut mask = protocol::SubscriptionMask::SINK | protocol::SubscriptionMask::SINK_INPUT;
+        if follow_default.is_some() {
+            mask |= protocol::SubscriptionMask::SERVER;
+        }
         protocol::write_command_message(
             reader.get_mut(),
             2,
-            &protocol::Command::Subscribe(
-                protocol::SubscriptionMask::SINK | protocol::SubscriptionMask::SINK_INPUT,
-            ),
+            &protocol::Command::Subscribe(mask),
             version,
         )?;
         protocol::read_ack_message(&mut reader)
@@ -545,16 +555,8 @@ impl Watcher {
                                 SubscriptionEventType as Kind,
                             };
                             match (event.event_facility, event.event_type) {
-                                (Facility::Sink, Kind::Removed)
-                                    if sink
-                                        .as_ref()
-                                        .is_some_and(|(index, _)| event.index == Some(*index)) =>
-                                {
-                                    let name = sink
-                                        .as_ref()
-                                        .map(|(_, name)| name.as_str())
-                                        .unwrap_or_default();
-                                    ring.mark_gone(&format!("the output '{name}' went away"));
+                                (Facility::Sink, Kind::Removed) if event.index == Some(sink.0) => {
+                                    ring.mark_gone(&format!("the output '{}' went away", sink.1));
                                     return;
                                 }
                                 (Facility::SinkInput, Kind::Changed)
@@ -562,6 +564,21 @@ impl Watcher {
                                 {
                                     if let Ok(current) = read_stream_volume(stream_index) {
                                         volume.changed_outside(stream_index, current);
+                                    }
+                                }
+                                (Facility::Server, Kind::Changed) => {
+                                    if let Some(client) = &follow_default {
+                                        match block_on(client.server_info())
+                                            .ok()
+                                            .and_then(|info| info.default_sink_name)
+                                            .and_then(|name| {
+                                                block_on(client.sink_info_by_name(name)).ok()
+                                            }) {
+                                            Some(info) => sink = (info.index, output_from(&info, None).description),
+                                            None => crate::warn!(
+                                                "phonia: could not follow the sound server's new default output"
+                                            ),
+                                        }
                                     }
                                 }
                                 _ => {}
@@ -837,12 +854,16 @@ impl SharedSinkFactory {
             }
         };
         let generation = attached.map_or(0, |(_, generation)| generation);
-        let sink = named.then(|| (stream.sink(), output.description.clone()));
+        // Watched even in `Target::Default`: the stream is still allowed to follow a new default
+        // (`no_move` stays as it was above), but losing the physical device it opened on now
+        // pauses instead of quietly playing on whatever the server moves it to next (#157).
+        let sink = (stream.sink(), output.description.clone());
         let watcher = match Watcher::start(
             sink,
             attached.map_or(u32::MAX, |(index, _)| index),
             ring.clone(),
             self.volume.clone(),
+            (!named).then(|| client.clone()),
         ) {
             Ok(watcher) => Some(watcher),
             Err(error) => {
@@ -1503,6 +1524,122 @@ mod tests {
             error.downcast_ref::<crate::output::OutputGone>().is_some(),
             "{error:#}"
         );
+    }
+
+    /// Sets the default sink to `name` and waits until the server actually reports it, since
+    /// `pactl set-default-sink` returns as soon as the request is sent, not once the session
+    /// manager has applied it -- a fixed sleep here was flaky.
+    fn set_default_sink(name: &str) {
+        assert!(
+            std::process::Command::new("pactl")
+                .args(["set-default-sink", name])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while pactl_output(&["get-default-sink"]).trim() != name {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the server never made '{name}' the default"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a sound server, pactl and parec"]
+    fn a_default_output_that_goes_away_is_reported_as_gone_too() {
+        let sink_name = "phonia_test_gone_default";
+        let null = NullSink::load(sink_name);
+        let previous_default = pactl_output(&["get-default-sink"]).trim().to_string();
+        set_default_sink(sink_name);
+
+        let spec = SourceSpec {
+            sample_rate: 48_000,
+            channels: 2,
+            bits_per_sample: 24,
+        };
+        let factory = SharedSinkFactory::new(Target::Default);
+        let mut sink = factory.open(spec).unwrap();
+        write_all(&mut *sink, &ramp(4_800), 2);
+
+        drop(null); // the output disappears under the stream, even though it is "default"
+        let audio = ramp(48_000);
+        let started = std::time::Instant::now();
+        let error = loop {
+            match sink.write(&audio) {
+                Ok(_) => assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "the loss was never noticed"
+                ),
+                Err(error) => break error,
+            }
+        };
+        assert!(
+            error.downcast_ref::<crate::output::OutputGone>().is_some(),
+            "{error:#}"
+        );
+
+        let _ = std::process::Command::new("pactl")
+            .args(["set-default-sink", &previous_default])
+            .status();
+    }
+
+    #[test]
+    #[ignore = "needs a sound server, pactl and parec"]
+    fn a_default_output_is_watched_again_after_the_default_moves_to_a_new_device() {
+        // Reproduces a real report against #157/#204: the DAC is lost, the stream falls back to
+        // `shared:default` on whatever that was then, the DAC is plugged back in and becomes the
+        // new default (so the stream silently follows it, since `no_move` is false) -- and the
+        // *old* watched device going away must not matter any more, only the one playing now.
+        let (first, second) = ("phonia_test_follow_a", "phonia_test_follow_b");
+        let null_a = NullSink::load(first);
+        let _null_b = NullSink::load(second);
+        let previous_default = pactl_output(&["get-default-sink"]).trim().to_string();
+        set_default_sink(first);
+
+        let spec = SourceSpec {
+            sample_rate: 48_000,
+            channels: 2,
+            bits_per_sample: 24,
+        };
+        let factory = SharedSinkFactory::new(Target::Default);
+        let mut sink = factory.open(spec).unwrap();
+        write_all(&mut *sink, &ramp(4_800), 2);
+
+        set_default_sink(second);
+        // The stream itself migrates at the server's own pace; give it (and the watcher's
+        // re-resolve) a moment, the same margin the other real-server tests allow.
+        std::thread::sleep(Duration::from_millis(500));
+
+        drop(null_a); // gone, but not what the stream is on any more: must change nothing
+        let quiet_until = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < quiet_until {
+            write_all(&mut *sink, &ramp(4_800), 2);
+        }
+
+        set_default_sink(second); // still `second`; just re-confirms it did not move back to `a`
+        drop(_null_b); // now the output actually playing disappears
+        let audio = ramp(48_000);
+        let started = std::time::Instant::now();
+        let error = loop {
+            match sink.write(&audio) {
+                Ok(_) => assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "the loss of the *current* device was never noticed"
+                ),
+                Err(error) => break error,
+            }
+        };
+        assert!(
+            error.downcast_ref::<crate::output::OutputGone>().is_some(),
+            "{error:#}"
+        );
+
+        let _ = std::process::Command::new("pactl")
+            .args(["set-default-sink", &previous_default])
+            .status();
     }
 
     #[test]

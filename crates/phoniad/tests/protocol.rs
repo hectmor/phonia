@@ -45,19 +45,41 @@ async fn fixture_with(
     blocking: bool,
     options: phonia_core::engine::Options,
 ) -> Fixture {
-    fixture_full(name, blocking, options, None, None).await
+    fixture_full(name, blocking, options, None, None, None).await
 }
 
 /// A fixture with a catalog of the test's choosing (none, like a daemon with no TIDAL login).
 async fn fixture_with_catalog(name: &str, catalog: Option<Arc<dyn Catalog>>) -> Fixture {
-    fixture_full(name, false, Default::default(), catalog, None).await
+    fixture_full(name, false, Default::default(), catalog, None, None).await
 }
 
 /// A fixture that persists its recently played log to `recent_path`, so a second fixture pointed
 /// at the same path can confirm it survived -- no test fixture writes to the real state
 /// directory by default (see `fixture_full`'s own `None`), only this one, into a temp file.
 async fn fixture_with_recent_path(name: &str, recent_path: PathBuf) -> Fixture {
-    fixture_full(name, false, Default::default(), None, Some(recent_path)).await
+    fixture_full(
+        name,
+        false,
+        Default::default(),
+        None,
+        Some(recent_path),
+        None,
+    )
+    .await
+}
+
+/// A fixture configured, as an auto-mode daemon is (#157), to fall back to shared mode when the
+/// exclusive output is lost.
+async fn fixture_falling_back(name: &str) -> Fixture {
+    fixture_full(
+        name,
+        true,
+        Default::default(),
+        None,
+        None,
+        Some(OutputSpec::Shared { sink: None }),
+    )
+    .await
 }
 
 async fn fixture_full(
@@ -66,6 +88,7 @@ async fn fixture_full(
     options: phonia_core::engine::Options,
     catalog: Option<Arc<dyn Catalog>>,
     recent_path: Option<PathBuf>,
+    fall_back_to: Option<OutputSpec>,
 ) -> Fixture {
     let sinks = if blocking {
         FakeSinkFactory::blocking()
@@ -90,6 +113,7 @@ async fn fixture_full(
         },
         build,
     )
+    .with_fallback(fall_back_to)
     .with_lister(Arc::new(|| {
         Box::pin(async {
             let entry = |id: &str, mode, name: &str, bit_perfect| Entry {
@@ -1124,6 +1148,211 @@ async fn wait_until_open(factory: &FakeSinkFactory) {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("the new output was never opened");
+}
+
+/// Polls `client.status()` until `state` holds, or panics. Used for the fallback tests below: the
+/// daemon's own reaction to the lost output runs on a spawned task, not on the request that
+/// triggered it, so there is no single reply to wait on.
+async fn wait_until_state(client: &Client, state: State) {
+    for _ in 0..200 {
+        if client.status().await.unwrap().state == state {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("never reached {state:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unplugged_dac_switches_to_the_fallback_output_but_stays_paused() {
+    let f = fixture_falling_back("dac-lost").await;
+    let client = f.client().await;
+    let a = f.wav("a.wav", 300_000);
+    let (ids, _, _) = added(client.request(add(&[&a], AddAt::End)).await.unwrap());
+    let (_, mut events) = client.subscribe().await.unwrap();
+    client
+        .request(Request::Play { item: Some(ids[0]) })
+        .await
+        .unwrap();
+    events_until(&mut events, |event| {
+        matches!(event, Event::TrackStarted { .. })
+    })
+    .await;
+
+    // Actually hear some of it before losing the DAC, so there is a real position to carry on
+    // from (nothing written but never advanced has been "heard" yet).
+    let mut heard_before = 0;
+    for _ in 0..200 {
+        f.sinks.handles()[0].advance(4096);
+        heard_before = client.status().await.unwrap().position_ms;
+        if heard_before > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(heard_before > 0, "never made any progress before the loss");
+
+    f.sinks.handles()[0].lose_output("the DAC was unplugged");
+    let seen = events_until(&mut events, |event| {
+        matches!(event, Event::OutputChanged { .. })
+    })
+    .await;
+    assert!(
+        seen.iter().any(|(_, event)| matches!(
+            event,
+            Event::OutputReleased {
+                reason: ReleaseReason::Lost,
+                ..
+            }
+        )),
+        "{seen:?}"
+    );
+    let Some((_, Event::OutputChanged { route })) = seen.last() else {
+        unreachable!()
+    };
+    assert_eq!(
+        (route.id.as_str(), route.mode),
+        ("shared:default", OutputMode::Shared)
+    );
+
+    let (id, second) = {
+        let switched = f.switched.lock().unwrap();
+        assert_eq!(switched.len(), 1);
+        switched[0].clone()
+    };
+    assert_eq!(id, "shared:default");
+
+    // Switched automatically, but not resumed: the new sink is not even opened yet (that only
+    // happens on resume), and the listener presses play themselves.
+    let status = client.status().await.unwrap();
+    assert_eq!(status.state, State::Paused, "moved, but waits for a resume");
+    assert!(
+        status.position_ms >= heard_before,
+        "kept the position, did not restart (was {heard_before}ms, now {})",
+        status.position_ms
+    );
+    assert!(second.handles().is_empty(), "not opened until resumed");
+
+    client.request(Request::Resume).await.unwrap();
+    wait_until_open(&second).await;
+    second.handles()[0].set_blocking(false);
+    wait_until_state(&client, State::Playing).await;
+    let position = client.status().await.unwrap().position_ms;
+    assert!(
+        position >= heard_before,
+        "resuming carries on from {heard_before}ms, not restarted (now {position}ms)"
+    );
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unplugged_dac_without_a_fallback_pauses_as_before() {
+    let f = fixture("dac-lost-no-fallback", true).await;
+    let client = f.client().await;
+    let a = f.wav("a.wav", 300_000);
+    let (ids, _, _) = added(client.request(add(&[&a], AddAt::End)).await.unwrap());
+    let (_, mut events) = client.subscribe().await.unwrap();
+    client
+        .request(Request::Play { item: Some(ids[0]) })
+        .await
+        .unwrap();
+    events_until(&mut events, |event| {
+        matches!(event, Event::TrackStarted { .. })
+    })
+    .await;
+
+    f.sinks.handles()[0].lose_output("the DAC was unplugged");
+    let seen = events_until(&mut events, |event| {
+        matches!(event, Event::OutputReleased { .. })
+    })
+    .await;
+    assert!(matches!(
+        seen.last(),
+        Some((
+            _,
+            Event::OutputReleased {
+                reason: ReleaseReason::Lost,
+                ..
+            }
+        ))
+    ));
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(client.status().await.unwrap().state, State::Paused);
+    assert!(
+        f.switched.lock().unwrap().is_empty(),
+        "nothing configured to fall back to: stays paused, as before #157"
+    );
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lost_shared_output_is_not_moved() {
+    let f = fixture_falling_back("shared-lost").await;
+    let client = f.client().await;
+    let a = f.wav("a.wav", 300_000);
+    let (ids, _, _) = added(client.request(add(&[&a], AddAt::End)).await.unwrap());
+    let (_, mut events) = client.subscribe().await.unwrap();
+    client
+        .request(Request::Play { item: Some(ids[0]) })
+        .await
+        .unwrap();
+    events_until(&mut events, |event| {
+        matches!(event, Event::TrackStarted { .. })
+    })
+    .await;
+
+    // Switch onto a shared output first, the same dance as
+    // `switching_the_output_moves_playback_keeps_the_position_and_tells_everyone`.
+    let sink = f.sinks.handles()[0].clone();
+    let switching = {
+        let client = f.client().await;
+        tokio::spawn(async move {
+            client
+                .request(Request::SetOutput {
+                    output: "shared:speaker".into(),
+                })
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    sink.advance(1024);
+    assert_eq!(switching.await.unwrap().unwrap(), Payload::Ack);
+    events_until(&mut events, |event| {
+        matches!(event, Event::OutputChanged { .. })
+    })
+    .await;
+
+    let second = {
+        let switched = f.switched.lock().unwrap();
+        assert_eq!(switched.len(), 1);
+        switched[0].1.clone()
+    };
+    wait_until_open(&second).await;
+    second.handles()[0].lose_output("the speaker went away");
+    let seen = events_until(&mut events, |event| {
+        matches!(event, Event::OutputReleased { .. })
+    })
+    .await;
+    assert!(matches!(
+        seen.last(),
+        Some((
+            _,
+            Event::OutputReleased {
+                reason: ReleaseReason::Lost,
+                ..
+            }
+        ))
+    ));
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(client.status().await.unwrap().state, State::Paused);
+    assert_eq!(
+        f.switched.lock().unwrap().len(),
+        1,
+        "no further switch: a lost output falls back only from an exclusive card"
+    );
+    f.finish().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

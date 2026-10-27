@@ -36,6 +36,9 @@ pub struct Outputs {
     level: Mutex<Volume>,
     /// Told when the desktop's mixer changes the volume.
     on_volume: Mutex<Option<VolumeHandler>>,
+    /// Where to carry on when an exclusive output is lost (#157): `None` when the daemon was not
+    /// started in auto mode, in which case a lost output just pauses, as before.
+    fallback: Option<OutputSpec>,
 }
 
 impl Outputs {
@@ -49,7 +52,14 @@ impl Outputs {
             factory: Mutex::new(None),
             level: Mutex::new(Volume::default()),
             on_volume: Mutex::new(None),
+            fallback: None,
         }
+    }
+
+    /// Where to carry on automatically when the output is lost, if anywhere (#157).
+    pub fn with_fallback(mut self, fallback: Option<OutputSpec>) -> Self {
+        self.fallback = fallback;
+        self
     }
 
     /// Calls `handler` when the volume changes from outside (the desktop's mixer).
@@ -134,6 +144,15 @@ impl Outputs {
             },
             description: description.clone(),
         }
+    }
+
+    /// Where to carry on when the output is lost (#157): only from an exclusive card, only when
+    /// a fallback was configured.
+    pub fn fallback_for_lost(&self) -> Option<String> {
+        if !matches!(self.current.lock().unwrap().0, OutputSpec::Exclusive { .. }) {
+            return None;
+        }
+        self.fallback.as_ref().map(OutputSpec::id)
     }
 
     /// The output an id names, and a factory for it.
@@ -260,6 +279,21 @@ mod tests {
                 muted: false
             }
         );
+    }
+
+    #[test]
+    fn a_lost_output_falls_back_only_from_an_exclusive_card_and_only_when_asked() {
+        let with_fallback = outputs(exclusive()).with_fallback(Some(shared()));
+        assert_eq!(
+            with_fallback.fallback_for_lost(),
+            Some("shared:default".into())
+        );
+
+        let no_fallback = outputs(exclusive());
+        assert_eq!(no_fallback.fallback_for_lost(), None);
+
+        let already_shared = outputs(shared()).with_fallback(Some(shared()));
+        assert_eq!(already_shared.fallback_for_lost(), None);
     }
 
     #[test]

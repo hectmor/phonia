@@ -264,6 +264,19 @@ impl Daemon {
                             engine::Event::QueueExhausted => {
                                 self.autoplay.lock().unwrap().queue_exhausted(queue.current);
                             }
+                            engine::Event::OutputReleased {
+                                reason: engine::ReleaseReason::Lost,
+                                ..
+                            } => {
+                                // Switches to the fallback output, if one was configured for an
+                                // auto-mode daemon (#157), so it is ready to resume on instead of
+                                // dead air; stays paused there, left for the listener to resume.
+                                // Only fires for an exclusive output, never for a plain
+                                // pause/release.
+                                if let Some(id) = self.outputs.fallback_for_lost() {
+                                    tokio::spawn(self.clone().fall_back(id));
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -943,6 +956,14 @@ impl Daemon {
             Ok(()) => Reply::Ok(Payload::Ack),
             Err(error) => self::error(ErrorCode::Internal, &format!("{error:#}")),
         }
+    }
+
+    /// The DAC went away mid-track (#157): moves to the fallback output so it is ready to play
+    /// on, but stays paused there -- a resume (`phonia ctl resume`, or Space in the TUI) is the
+    /// listener's own call, not automatic.
+    async fn fall_back(self: Arc<Self>, id: String) {
+        eprintln!("phoniad: the output was lost, switched to {id} (paused)");
+        let _ = self.set_output(&id).await;
     }
 
     /// Names the output the daemon started on the way the list of outputs does.
