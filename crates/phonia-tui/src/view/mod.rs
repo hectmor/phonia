@@ -1384,10 +1384,7 @@ mod tests {
             text.contains("The desktop's default output (MOMENTUM TW 4)  \u{2716}"),
             "{text}"
         );
-        assert!(
-            !text.contains("(MOMENTUM TW 4) (MOMENTUM TW 4)"),
-            "{text}"
-        );
+        assert!(!text.contains("(MOMENTUM TW 4) (MOMENTUM TW 4)"), "{text}");
     }
 
     #[test]
