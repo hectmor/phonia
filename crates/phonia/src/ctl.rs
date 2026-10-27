@@ -1567,6 +1567,7 @@ mod tests {
             cover: None,
             album_id: None,
             artist_id: None,
+            album: None,
         };
         Queue {
             version: 1,
@@ -2508,6 +2509,7 @@ mod tests {
                 played_at_ms: 1_700_000_000_000,
                 artist_id: None,
                 album_id: None,
+                album: None,
             }],
         };
         let text = format_recent(&payload);

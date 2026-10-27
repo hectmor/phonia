@@ -129,7 +129,7 @@ their turn comes.
 | #175 | Making the TUI responsive: the cover and the whole interface fit the terminal | Closed (all four parts) |
 | #188 | Give the cover room to breathe: columns beside it, a floor under it | Closed (two columns, one row) |
 | #198 | Scrolling lists jump with every cursor move instead of staying put until the edge | Closed |
-| #207 | Show artist and album in every track list, not just title and duration | In progress (part 1 of 2: an opened playlist, radio and an artist's top tracks; the queue and recently played are part 2) |
+| #207 | Show artist and album in every track list, not just title and duration | In progress (part 1 done: an opened playlist, radio and an artist's top tracks; part 2 PR 1 of 2 done: the album title reaches the queue and recently played over protocol 1.20, not yet rendered) |
 
 Started right after #120. The owner's concrete ask, from a screenshot of
 TIDAL's own web player: a visually bigger, bolder track title with the artist
@@ -158,12 +158,20 @@ deliberately separate, not-yet-investigated future issue, the same territory
 
 ## Right now
 
-`v1.1.0` is out. Everything the audio path and the interface need is done:
-phases 0–3, 6 and 7 are closed, and phase 4 is code complete except for work
-nobody has scoped yet.
+`v1.1.0` is out. Phases 0–3 and 7 are closed; phase 4 is code complete except
+for work nobody has scoped yet; phase 6 reopened for #207 (and #157's own
+follow-up bugs surfaced a new one, #206).
 
 What is actually left, in no committed order:
 
+- **Phase 6** — #207 (artist and album in every track list) part 1 is done
+  (an opened playlist, radio and an artist's Top Tracks tab); part 2 (the
+  queue and Home's recently played) has an approved plan, PR 1 of 2 done (the
+  album title now reaches both over protocol 1.20, not yet rendered), PR 2
+  (the actual row change in both places) not started. #206 (a second
+  USB DAC disconnect fails the track instead of pausing, a gap #157/#204/#205
+  left open) has a full approved plan (4 fixes in `alsa.rs`/`device.rs`/
+  `audio_thread.rs`), not started.
 - **Phase 4** — part 2 of #196 is the one thing in flight: adding and removing
   favorite tracks, albums and artists works, while following and unfollowing a
   playlist (`fal`/`fdl`) answers with an error until TIDAL's own endpoint for
@@ -177,8 +185,9 @@ What is actually left, in no committed order:
   document split this file's own #169 entry describes. #157 (pick the output
   automatically: the DAC when it is plugged in, speakers or Bluetooth when it
   is not) is done.
-- **Nothing is planned in detail.** No issue above has an approved plan, so
-  the next step for any of them is a planning pass, not an implementation.
+- **Nothing beyond #207 part 2 and #206 is planned in detail.** No other
+  issue above has an approved plan, so the next step for any of them is a
+  planning pass, not an implementation.
 
 The historical narrative that used to live in this section — what each merged
 issue decided and why, part by part — was removed in #169: every one of those

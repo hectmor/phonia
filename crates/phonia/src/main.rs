@@ -310,6 +310,7 @@ async fn run_play_file(
             cover: None,
             album_id: None,
             artist_id: None,
+            album: None,
         }]);
     }
     queue.set_shuffle(shuffle);
@@ -355,6 +356,7 @@ async fn run_play(
             cover: None,
             album_id: None,
             artist_id: None,
+            album: None,
         }]);
     }
     queue.set_shuffle(shuffle);

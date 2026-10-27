@@ -63,6 +63,8 @@ pub struct QueueTrack {
     /// The id of the track's first credited artist; `None` for a local file, or a TIDAL track
     /// with no artist credited.
     pub artist_id: Option<String>,
+    /// The track's album's title; `None` for a local file, or a TIDAL track with no album.
+    pub album: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

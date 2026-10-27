@@ -82,6 +82,7 @@ pub fn queue_dto(queue: &QueueSnapshot) -> ipc::Queue {
                 cover: item.track.cover.clone(),
                 album_id: item.track.album_id.clone(),
                 artist_id: item.track.artist_id.clone(),
+                album: item.track.album.clone(),
             })
             .collect(),
         order: queue.order.iter().map(|id| ipc::ItemId(id.0)).collect(),
@@ -108,22 +109,29 @@ pub(crate) fn entry_of(
     (Some(ipc::ItemId(id.0)), source)
 }
 
-/// The id of the track's first credited artist and of its album, for the recently played log's
-/// own `ga`/`gr` (#194) -- the same ids `QueueItem::artist_id`/`album_id` already carry, just
-/// read off the matching queue entry instead of converted onto the wire.
+/// The id of the track's first credited artist, the id of its album and the album's title, for
+/// the recently played log's own `ga`/`gr` (#194) and album display (#207) -- the same values
+/// `QueueItem::artist_id`/`album_id`/`album` already carry, just read off the matching queue
+/// entry instead of converted onto the wire.
 pub(crate) fn artist_and_album_id(
     track: &engine::TrackRef,
     queue: &QueueSnapshot,
-) -> (Option<String>, Option<String>) {
+) -> (Option<String>, Option<String>, Option<String>) {
     let Some(id) = ItemId::from_ref(track) else {
-        return (None, None);
+        return (None, None, None);
     };
     queue
         .items
         .iter()
         .find(|item| item.id == id)
-        .map(|item| (item.track.artist_id.clone(), item.track.album_id.clone()))
-        .unwrap_or((None, None))
+        .map(|item| {
+            (
+                item.track.artist_id.clone(),
+                item.track.album_id.clone(),
+                item.track.album.clone(),
+            )
+        })
+        .unwrap_or((None, None, None))
 }
 
 pub fn quality(quality: Quality) -> ipc::Quality {
@@ -403,6 +411,7 @@ pub fn played_track(entry: &phonia_core::recent::PlayedTrack) -> ipc::PlayedTrac
         played_at_ms: entry.played_at_ms,
         artist_id: entry.artist_id.clone(),
         album_id: entry.album_id.clone(),
+        album: entry.album.clone(),
     }
 }
 
@@ -474,6 +483,7 @@ mod tests {
                         cover: cover.map(str::to_string),
                         album_id: None,
                         artist_id: None,
+                        album: None,
                     },
                 }
             };
@@ -496,12 +506,15 @@ mod tests {
         let mut snapshot = snapshot();
         snapshot.items[1].track.artist_id = Some("artist-1".to_string());
         snapshot.items[1].track.album_id = Some("album-1".to_string());
+        snapshot.items[1].track.album = Some("Album One".to_string());
         let dto = queue_dto(&snapshot);
         assert_eq!(dto.version, 3);
         assert_eq!(dto.items[0].artist_id, None);
         assert_eq!(dto.items[1].artist_id.as_deref(), Some("artist-1"));
         assert_eq!(dto.items[0].album_id, None);
         assert_eq!(dto.items[1].album_id.as_deref(), Some("album-1"));
+        assert_eq!(dto.items[0].album, None);
+        assert_eq!(dto.items[1].album.as_deref(), Some("Album One"));
         assert_eq!(dto.items[0].id, ipc::ItemId(7));
         assert_eq!(dto.items[0].source, "file:/m/a.flac");
         assert_eq!(dto.items[0].duration_ms, Some(215_000));
@@ -520,20 +533,25 @@ mod tests {
         let mut snapshot = snapshot();
         snapshot.items[1].track.artist_id = Some("artist-1".to_string());
         snapshot.items[1].track.album_id = Some("album-1".to_string());
+        snapshot.items[1].track.album = Some("Album One".to_string());
 
         assert_eq!(
             artist_and_album_id(&ItemId(8).track_ref(), &snapshot),
-            (Some("artist-1".to_string()), Some("album-1".to_string()))
+            (
+                Some("artist-1".to_string()),
+                Some("album-1".to_string()),
+                Some("Album One".to_string())
+            )
         );
         // Item 7 has neither credited.
         assert_eq!(
             artist_and_album_id(&ItemId(7).track_ref(), &snapshot),
-            (None, None)
+            (None, None, None)
         );
         // A reference the queue no longer has (already removed): nothing to read.
         assert_eq!(
             artist_and_album_id(&ItemId(99).track_ref(), &snapshot),
-            (None, None)
+            (None, None, None)
         );
     }
 
