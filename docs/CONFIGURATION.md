@@ -8,12 +8,12 @@ affect are in [USAGE.md](USAGE.md); the audio behaviour they select is in
 ## The config file
 
 The settings live in `~/.config/phonia/config.toml` (`$XDG_CONFIG_HOME/phonia/`). Nothing is
-required to exist except the audio device (in exclusive mode):
+required to exist:
 
 ```toml
 [output]
 device = "hw:DS2,0"     # a sound card: `phonia devices` lists them. "auto" = the first USB card.
-mode = "exclusive"      # exclusive: phonia owns the card, bit-perfect. shared: through PipeWire, any output
+mode = "auto"           # auto (default, #157): the DAC if plugged in, else shared. exclusive/shared pin one
 sink = "default"        # shared mode only: "default" (the desktop's) or an output's name from `phonia devices`
 reserve = true          # ask WirePlumber/PulseAudio to release the card first, and give it back after
 release_after_pause = 10   # seconds a pause lasts before the card is handed back; 0 = on every pause, "never" = keep it
@@ -55,9 +55,11 @@ autoplay = false        # fetch more tracks from TIDAL when the queue runs dry? 
   `min_quality`; network errors, timeouts and 5xx are not retried, so an outage never shows up as
   a lower quality. A track that is seeked keeps the tier it started in. phonia
   can't decode AAC yet, so `high` and `low` only make sense once that is added.
-- **Precedence** is command line, then the file, then the built-in default. There is no default
-  device: with none configured (and no `--device`) phonia refuses to start and says how to set
-  one, rather than guess a card and play on the wrong one.
+- **Precedence** is command line, then the file, then the built-in default. The default mode,
+  `auto`, picks the device for you: a USB sound card with playback (the DAC) if one is plugged
+  in, else the desktop's default output. Pinning `mode = "exclusive"` with no device configured
+  (and no `--device`) still refuses to start and says how to set one, rather than guess a card
+  and play on the wrong one — only `auto`'s own detection ever falls back by itself.
 - **Mistakes are errors.** A key it doesn't know (`devise = ...`), a value of the wrong type or a
   word that isn't an option stops it with the file, the line and what was expected, instead of
   being ignored and playing on the wrong card. A missing file just means the defaults; a file you

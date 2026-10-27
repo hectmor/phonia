@@ -186,7 +186,7 @@ mod tests {
             text,
             "Config file: /home/u/.config/phonia/config.toml (not found: all defaults)\n\
              \x20 output.device               (not set)                           (default)\n\
-             \x20 output.mode                 exclusive                           (default)\n\
+             \x20 output.mode                 auto                                (default)\n\
              \x20 output.sink                 default                             (default)\n\
              \x20 output.reserve              true                                (default)\n\
              \x20 output.release_after_pause  10 s                                (default)\n\

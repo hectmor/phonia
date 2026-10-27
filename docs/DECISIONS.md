@@ -3755,3 +3755,35 @@ unfocused, and the old stateless `first_visible` treated that as cursor 0). Now 
 tracks `queue_cursor`'s own position and stored scroll regardless of focus -- only the highlight
 still depends on it -- so switching focus away from the queue and back leaves it exactly where it
 was. This closes #198.
+
+## 2026-10-26 — #157 part 1: `mode = "auto"` is the new default, picking the DAC if one is plugged in
+
+Choosing the output used to be all-manual: with nothing in `[output]`, `mode` defaulted to
+`exclusive` with no device, so a fresh install (or this repo's own default config) refused to
+start until someone wrote a `device =` line by hand. Part 1 of #157 makes a third `OutputMode`
+value, `Auto`, the new `#[default]`: with a device named (on the command line or in the file) it
+plays there exclusively, exactly as before; with none named it looks for a USB sound card with a
+playback device (today's `first_usb_card`, the same heuristic `device = "auto"` already used, now
+shared through a new `first_usb` helper) and plays on it exclusively if found, bit-perfect with no
+config at all; with no device and no USB card it falls back to shared mode on the configured sink.
+This only changes behaviour for the one setup that failed outright before: everyone who already
+wrote `device = ...`, or who pinned `mode = "exclusive"` or `mode = "shared"` explicitly, keeps
+doing exactly what they did -- `Auto` only ever runs when both `mode` and `device` are left unset,
+and a pinned mode is never overridden by what hardware happens to be plugged in.
+
+The "is this the DAC" check stays deliberately crude: any USB card with a playback device counts,
+same as it always has for `device = "auto"`. A USB headset or webcam with an output would
+false-positive, but there is exactly one real USB audio device on the machine this was verified
+against (the Fosi Audio DS2), and a USB-Audio-Class check to rule out other device classes was not
+worth building for a problem nobody has hit.
+
+Detection reads `/proc/asound` once, synchronously, before `phoniad` opens anything
+(`Settings::output`, now backed by a testable `Settings::output_in(asound: &Path)` so the unit
+tests hand in a made-up tree instead of depending on whatever happens to be plugged into the CI
+machine or the developer's laptop). It is a one-shot decision made at startup: if the DAC is
+plugged in later, or unplugged mid-session, nothing currently reacts to that -- that is #157 part
+2 (falling back automatically when the DAC disconnects mid-track), still open, and reacquiring the
+DAC automatically on replug was explicitly scoped out of part 2 too (see its own entry once it
+lands): no hotplug watch exists for ALSA cards (only PipeWire's shared outputs have one), and the
+issue never asked for it. Today, getting back onto the DAC after a replug means a manual `phonia
+ctl output set exclusive:hw:DS2,0` or a restart.

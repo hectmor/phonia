@@ -201,10 +201,7 @@ fn by_id(spec: &str, id: &str, device: u32, asound: &Path) -> Result<Device> {
 
 fn first_usb_card(asound: &Path) -> Result<Device> {
     let cards = cards(asound)?;
-    match cards
-        .iter()
-        .find(|card| card.usb && !card.playback.is_empty())
-    {
+    match first_usb(&cards) {
         Some(card) => Ok(Device::Hw {
             card: card.index,
             device: card.playback[0],
@@ -214,6 +211,22 @@ fn first_usb_card(asound: &Path) -> Result<Device> {
             "device = \"auto\" found no USB sound card with playback. Is the DAC plugged in? Run `phonia devices`"
         ),
     }
+}
+
+// shortcut: any USB card with playback counts as the DAC (a USB headset would too); tighten if a
+// second USB audio device ever shows up.
+fn first_usb(cards: &[CardInfo]) -> Option<&CardInfo> {
+    cards
+        .iter()
+        .find(|card| card.usb && !card.playback.is_empty())
+}
+
+/// The DAC, if one is plugged in: the first USB card with a playback device, as `hw:<id>,<device>`.
+/// Used by [`crate::config::Settings::output_in`] to pick the output mode automatically (#157).
+pub fn usb_dac(asound: &Path) -> Option<String> {
+    let cards = cards(asound).ok()?;
+    let card = first_usb(&cards)?;
+    Some(format!("hw:{},{}", card.id, card.playback[0]))
 }
 
 /// The text of `phonia devices`: the cards that can play, with the string to put in the config.
@@ -438,6 +451,21 @@ mod tests {
             error.contains("DS2") && error.contains("NVidia") && error.contains("phonia devices"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn the_dac_is_the_first_usb_card_that_plays() {
+        let root = asound("dac");
+        assert_eq!(usb_dac(&root), Some("hw:DS2,0".to_string()));
+    }
+
+    #[test]
+    fn no_usb_card_means_no_dac() {
+        let root = asound("no-dac");
+        std::fs::remove_dir_all(root.join("card1")).unwrap();
+        assert_eq!(usb_dac(&root), None);
+
+        assert_eq!(usb_dac(&root.join("does-not-exist")), None);
     }
 
     #[test]
