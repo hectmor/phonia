@@ -34,13 +34,14 @@ pub async fn wait_for_shutdown(signal: &mut watch::Receiver<bool>) {
     let _ = signal.wait_for(|stopping| *stopping).await;
 }
 
-/// A track on its way into the queue: what it is, its title, artist, length, cover and album id
-/// if known, and why they are not known, if they are not.
+/// A track on its way into the queue: what it is, its title, artist, length, cover, album id and
+/// album title if known, and why they are not known, if they are not.
 type Accepted = (
     Source,
     Option<String>,
     Option<String>,
     Option<std::time::Duration>,
+    Option<String>,
     Option<String>,
     Option<String>,
     Option<String>,
@@ -359,7 +360,7 @@ impl Daemon {
         let changed = match event {
             engine::Event::TrackStarted { meta, .. } => {
                 let (_, source) = convert::entry_of(&meta.track, queue);
-                let (artist_id, album_id) = convert::artist_and_album_id(&meta.track, queue);
+                let (artist_id, album_id, album) = convert::artist_and_album_id(&meta.track, queue);
                 recent.started(source.map(|source| PlayedTrack {
                     source,
                     title: meta.title.clone(),
@@ -369,6 +370,7 @@ impl Daemon {
                     played_at_ms: now,
                     artist_id,
                     album_id,
+                    album,
                 }));
                 false
             }
@@ -1123,11 +1125,20 @@ impl Daemon {
                     info.cover,
                     info.album_id,
                     info.artist_id,
+                    info.album,
                     None,
                 )),
-                Outcome::Unresolved(source, reason) => {
-                    accepted.push((source, None, None, None, None, None, None, Some(reason)))
-                }
+                Outcome::Unresolved(source, reason) => accepted.push((
+                    source,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(reason),
+                )),
                 Outcome::Rejected(source, reason) => {
                     rejected.push(ipc::Rejected { source, reason })
                 }
@@ -1155,7 +1166,7 @@ impl Daemon {
             AddAt::Next => queue.play_next(tracks),
             AddAt::Index { index } => queue.insert(index, tracks),
         };
-        for (id, (_, _, _, _, _, _, _, reason)) in ids.iter().zip(&accepted) {
+        for (id, (_, _, _, _, _, _, _, _, reason)) in ids.iter().zip(&accepted) {
             if let Some(reason) = reason {
                 unresolved_reasons.push(ipc::Unresolved {
                     id: ipc::ItemId(id.0),
@@ -1342,6 +1353,7 @@ fn accepted_from_catalog(track: &tidal_catalog::Track) -> Result<Accepted, ipc::
     });
     let cover = track.album.as_ref().and_then(|album| album.cover.clone());
     let album_id = track.album.as_ref().map(|album| album.id.clone());
+    let album = track.album.as_ref().map(|album| album.title.clone());
     let artist_id = track.artists.first().map(|artist| artist.id.clone());
     Ok((
         source,
@@ -1351,13 +1363,14 @@ fn accepted_from_catalog(track: &tidal_catalog::Track) -> Result<Accepted, ipc::
         cover,
         album_id,
         artist_id,
+        album,
         None,
     ))
 }
 
 /// `accepted` as a queue entry.
 fn queue_track(accepted: &Accepted) -> QueueTrack {
-    let (source, title, artist, duration, cover, album_id, artist_id, _) = accepted;
+    let (source, title, artist, duration, cover, album_id, artist_id, album, _) = accepted;
     QueueTrack {
         source: phonia_core::engine::TrackRef(source.to_wire()),
         title: title.clone(),
@@ -1366,6 +1379,7 @@ fn queue_track(accepted: &Accepted) -> QueueTrack {
         cover: cover.clone(),
         album_id: album_id.clone(),
         artist_id: artist_id.clone(),
+        album: album.clone(),
     }
 }
 
@@ -1489,6 +1503,7 @@ mod play_log_tests {
                 cover: None,
                 album_id: None,
                 artist_id: None,
+                album: None,
             },
         };
         QueueSnapshot {

@@ -146,6 +146,7 @@ mod tests {
             cover: None,
             album_id: None,
             artist_id: None,
+            album: None,
         }
     }
 

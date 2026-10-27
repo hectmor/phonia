@@ -92,6 +92,8 @@ pub struct SourceInfo {
     /// The id of the track's first credited artist; `None` for a local file, or a TIDAL track
     /// with no artist credited.
     pub artist_id: Option<String>,
+    /// The track's album's title; `None` for a local file, or a TIDAL track with no album.
+    pub album: Option<String>,
 }
 
 /// Why a source could not be described.
@@ -142,6 +144,7 @@ impl FileOpener {
                 cover: None,
                 album_id: None,
                 artist_id: None,
+                album: None,
             })
         })
         .await
@@ -302,6 +305,7 @@ impl TidalOpener {
                         .collect::<Vec<_>>()
                         .join(", ")
                 };
+                let album_title = track.album.as_ref().map(|album| album.title.clone());
                 Ok(SourceInfo {
                     title: Some(track.title),
                     artist: Some(artist),
@@ -309,6 +313,7 @@ impl TidalOpener {
                     album_id: track.album.as_ref().map(|album| album.id.to_string()),
                     artist_id: track.artists.first().map(|artist| artist.id.to_string()),
                     cover: track.album.and_then(|album| album.cover),
+                    album: album_title,
                 })
             }
             Err(error) => Err(classify_track_error(id, &error)),

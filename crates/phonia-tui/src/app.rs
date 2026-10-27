@@ -3832,6 +3832,7 @@ mod tests {
                 cover: None,
                 album_id: None,
                 artist_id: None,
+                album: None,
             })
             .collect();
         let mut queue = queue();
@@ -5924,6 +5925,7 @@ mod tests {
             played_at_ms: 1_000,
             artist_id: None,
             album_id: None,
+            album: None,
         }
     }
 
@@ -5952,6 +5954,7 @@ mod tests {
                             played_at_ms: 500,
                             artist_id: None,
                             album_id: None,
+                            album: None,
                         },
                     ],
                 }),
@@ -6062,6 +6065,7 @@ mod tests {
                         played_at_ms: 1_000,
                         artist_id: Some("780".into()),
                         album_id: Some("223382003".into()),
+                        album: None,
                     }],
                 }),
             },

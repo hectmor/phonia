@@ -3907,3 +3907,40 @@ alongside the album id each already carries) rather than a client-side lookup --
 no catalog entry to look up at all, and looking up every queued TIDAL item individually doesn't
 scale -- following the exact precedent of how `QueueItem`/`PlayedTrack` already carry denormalized
 `title`/`artist` strings instead of ids alone. That is its own, still-open PR.
+
+## 2026-10-27 — #207 part 2, PR 1: the album title reaches the queue and the recently played log (protocol 1.20)
+
+Confirmed by reading the code (not assumed): the album title was already available, unused, at
+every point that fills a `QueueTrack`/`SourceInfo` -- TIDAL's catalog listing (`AlbumRef.title`,
+used by `queue_add_from`'s `accepted_from_catalog`), `TidalOpener::describe` (tidlers'
+`Track.album.title`, used by `queue_add`'s by-id path), and the recently played log, which already
+reads its `artist_id`/`album_id` off the matching queue entry rather than `TrackMeta` (#194
+precedent) -- so this needed no new TIDAL request anywhere, confirming the client-side-lookup
+option considered in part 1's entry would have been pure waste.
+
+New `album: Option<String>` field, added the same way everywhere its sibling `album_id` already
+exists: `QueueTrack`/`SourceInfo` (phonia-core), the `Accepted` tuple and `queue_track`/
+`accepted_from_catalog` (phoniad), `QueueItem`/`PlayedTrack` on the wire (phonia-ipc, protocol
+1.19 -> 1.20, additive). `convert::artist_and_album_id` (used by `note_recently_played`) grew from
+a 2-tuple to a 3-tuple returning the album title alongside the two ids, rather than adding a
+fourth ad hoc id-shaped value next to it -- same one place already reads the matching queue entry,
+so a third value is free.
+
+No UI change in this PR (Queue and Home's recently played row still render exactly as before) --
+that is PR 2, which also fixes the recently played row's separately-noticed missing duration in
+the same pass (approved alongside the album change, since both are one-line additions to the same
+row). Row format approved for both (see part 1's entry for why an opened album/playlist stays
+short): Queue keeps its own `"n. Artist - Title - Album  [duration]"` (bracketed duration, its own
+long-standing style); Home's recently played switches to `"Artist - Title - Album - duration"`,
+matching the favorites rows right next to it on the same screen.
+
+Verified against this real account, end to end through a scratch `phoniad` on a throwaway
+PipeWire null sink: adding a real track by id (`queue_add`'s `TidalOpener::describe` path) put
+`"album":"Untouchables"` on the wire exactly as expected (`tidal:33903008`, Korn - Here to Stay).
+The `queue_add_from`-listing path was covered by extending an existing integration test
+(`an_album_is_added_with_the_titles_and_lengths_that_came_with_its_listing`) rather than a separate
+live check, since it needs no network at all (`FakeCatalog`). A log saved before this field existed
+still loads, `album: None` (new `recent.rs` test), and a client on an older protocol decoding a
+wire message that already has `album` -- or a daemon stuck on this version answering a client built
+after it -- both just see `None`/the field is additive, pinned by a new golden compatibility test
+alongside the existing 1.x ones.

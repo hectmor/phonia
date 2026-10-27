@@ -1005,6 +1005,7 @@ mod tests {
                             cover: None,
                             album_id: None,
                             artist_id: None,
+                            album: None,
                         },
                         QueueItem {
                             id: ItemId(2),
@@ -1015,6 +1016,7 @@ mod tests {
                             cover: None,
                             album_id: None,
                             artist_id: None,
+                            album: None,
                         },
                     ],
                     order: vec![ItemId(2), ItemId(1)],
@@ -1646,6 +1648,7 @@ mod tests {
                 cover: None,
                 album_id: None,
                 artist_id: None,
+                album: None,
             })
             .collect();
         update(
@@ -3953,6 +3956,7 @@ mod tests {
                         played_at_ms: 1_000,
                         artist_id: None,
                         album_id: None,
+                        album: None,
                     }],
                 }),
             },

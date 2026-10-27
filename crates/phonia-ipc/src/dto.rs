@@ -269,6 +269,10 @@ pub struct QueueItem {
     /// TIDAL track with no artist credited, or an older daemon (since 1.16).
     #[serde(default)]
     pub artist_id: Option<String>,
+    /// The track's album's title; absent for a local file, a TIDAL track with no album, or an
+    /// older daemon (since 1.20).
+    #[serde(default)]
+    pub album: Option<String>,
 }
 
 /// One entry of the recently played log (since 1.15, #144): kept by the daemon in memory (and,
@@ -293,6 +297,10 @@ pub struct PlayedTrack {
     /// TIDAL track with no album, or an older daemon (since 1.18).
     #[serde(default)]
     pub album_id: Option<String>,
+    /// The track's album's title; absent for a local file, a TIDAL track with no album, or an
+    /// older daemon (since 1.20).
+    #[serde(default)]
+    pub album: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
