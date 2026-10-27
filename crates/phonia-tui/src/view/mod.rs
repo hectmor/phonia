@@ -514,6 +514,7 @@ fn signal_line<'a>(state: &State, theme: &Theme, width: u16) -> Line<'a> {
         route_text.push_str(&phonia_ipc::fmt::sample_rate(rate));
     }
     let device = match &status.route {
+        Some(route) if route.description.contains(&report.device) => route.description.clone(),
         Some(route) if route.description != report.device => {
             format!("{} ({})", route.description, report.device)
         }
@@ -1360,6 +1361,33 @@ mod tests {
         );
         let text = screen(&state, 120, 12);
         assert!(text.contains("SHARED"), "{text}");
+    }
+
+    #[test]
+    fn the_default_output_does_not_repeat_the_device_name() {
+        use phonia_ipc::{OutputMode, Route};
+        let mut state = playing(SPEC_96K);
+        state.status.as_mut().unwrap().route = Some(Route {
+            id: "shared:default".into(),
+            mode: OutputMode::Shared,
+            description: "The desktop's default output (MOMENTUM TW 4)".into(),
+        });
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::SinkReport(phonia_ipc::SinkReport {
+                device: "MOMENTUM TW 4".into(),
+                ..a_sink_report(false, phonia_ipc::OutputMode::Shared)
+            })),
+        );
+        let text = screen(&state, 120, 12);
+        assert!(
+            text.contains("The desktop's default output (MOMENTUM TW 4)  \u{2716}"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("(MOMENTUM TW 4) (MOMENTUM TW 4)"),
+            "{text}"
+        );
     }
 
     #[test]
