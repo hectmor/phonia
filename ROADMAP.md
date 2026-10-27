@@ -34,7 +34,7 @@ first tag where the tag, `main` and `Cargo.toml` agree.
 | 3 — Audio quality | [Fase 3](https://github.com/hectmor/phonia/milestone/4) | Done (#25–#31) |
 | 4 — SONE-like features | [Fase 4](https://github.com/hectmor/phonia/milestone/5) | In progress (#196 part 2; #35, #36, #37 unscoped) |
 | 5 — Extras and packaging | [Fase 5](https://github.com/hectmor/phonia/milestone/6) | In progress (CI, licensing, the process rules and #192 done; packaging open) |
-| 6 — Layout and appearance | [Fase 6](https://github.com/hectmor/phonia/milestone/7) | In progress (#124, #159, #160, #175, #188, #198 done; #207 part 1 of 2) |
+| 6 — Layout and appearance | [Fase 6](https://github.com/hectmor/phonia/milestone/7) | Done (#124, #159, #160, #175, #188, #198, #207) |
 | 7 — Home screen and discovery | [Fase 7](https://github.com/hectmor/phonia/milestone/8) | Done (#139, #144, #169, #171, #194) |
 
 Phases 0 and 1 delivered: TIDAL PKCE login, HiRes/DASH streaming, bit-perfect
@@ -129,7 +129,7 @@ their turn comes.
 | #175 | Making the TUI responsive: the cover and the whole interface fit the terminal | Closed (all four parts) |
 | #188 | Give the cover room to breathe: columns beside it, a floor under it | Closed (two columns, one row) |
 | #198 | Scrolling lists jump with every cursor move instead of staying put until the edge | Closed |
-| #207 | Show artist and album in every track list, not just title and duration | In progress (part 1 done: an opened playlist, radio and an artist's top tracks; part 2 PR 1 of 2 done: the album title reaches the queue and recently played over protocol 1.20, not yet rendered) |
+| #207 | Show artist and album in every track list, not just title and duration | Done (both parts) |
 
 Started right after #120. The owner's concrete ask, from a screenshot of
 TIDAL's own web player: a visually bigger, bolder track title with the artist
@@ -158,20 +158,19 @@ deliberately separate, not-yet-investigated future issue, the same territory
 
 ## Right now
 
-`v1.1.0` is out. Phases 0–3 and 7 are closed; phase 4 is code complete except
-for work nobody has scoped yet; phase 6 reopened for #207 (and #157's own
-follow-up bugs surfaced a new one, #206).
+`v1.1.0` is out. Phases 0–3, 6 and 7 are closed again (#207 done); phase 4 is
+code complete except for work nobody has scoped yet. #157's own follow-up
+bugs surfaced a new one, #206, still open.
 
 What is actually left, in no committed order:
 
-- **Phase 6** — #207 (artist and album in every track list) part 1 is done
-  (an opened playlist, radio and an artist's Top Tracks tab); part 2 (the
-  queue and Home's recently played) has an approved plan, PR 1 of 2 done (the
-  album title now reaches both over protocol 1.20, not yet rendered), PR 2
-  (the actual row change in both places) not started. #206 (a second
-  USB DAC disconnect fails the track instead of pausing, a gap #157/#204/#205
-  left open) has a full approved plan (4 fixes in `alsa.rs`/`device.rs`/
-  `audio_thread.rs`), not started.
+- **Phase 6** — #207 (artist and album in every track list) is done, both
+  parts: an opened playlist, radio and an artist's Top Tracks tab (part 1),
+  and the queue and Home's recently played, which also needed the album
+  title to actually reach them over protocol 1.20 first (part 2). #206 (a
+  second USB DAC disconnect fails the track instead of pausing, a gap
+  #157/#204/#205 left open) has a full approved plan (4 fixes in
+  `alsa.rs`/`device.rs`/`audio_thread.rs`), not started.
 - **Phase 4** — part 2 of #196 is the one thing in flight: adding and removing
   favorite tracks, albums and artists works, while following and unfollowing a
   playlist (`fal`/`fdl`) answers with an error until TIDAL's own endpoint for
@@ -185,9 +184,9 @@ What is actually left, in no committed order:
   document split this file's own #169 entry describes. #157 (pick the output
   automatically: the DAC when it is plugged in, speakers or Bluetooth when it
   is not) is done.
-- **Nothing beyond #207 part 2 and #206 is planned in detail.** No other
-  issue above has an approved plan, so the next step for any of them is a
-  planning pass, not an implementation.
+- **Nothing beyond #206 is planned in detail.** No other issue above has an
+  approved plan, so the next step for any of them is a planning pass, not an
+  implementation.
 
 The historical narrative that used to live in this section — what each merged
 issue decided and why, part by part — was removed in #169: every one of those
