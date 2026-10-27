@@ -3877,3 +3877,33 @@ locally tracked `(index, name)` the removal check compares against -- all on the
 thread, no cross-thread state needed. Confirmed with a second real-server test,
 `a_default_output_is_watched_again_after_the_default_moves_to_a_new_device`: default starts on
 sink A, moves to sink B, dropping A does nothing, dropping B is noticed.
+
+## 2026-10-27 — #207 part 1: a playlist's, a radio's and an artist's top tracks show their artist and album
+
+User complaint: "en las listas solo se muestra el nombre de la canción y la duración" (the lists
+only show the song name and duration). A survey of every track list first (read-only, no code
+changed yet) found the complaint didn't apply everywhere: Search's Tracks tab, Library's Favorite
+Tracks tab and Home's favorites already rendered `"Artist - Title - Album - duration - quality"`
+via `fmt::track()` (`crates/phonia-ipc/src/fmt.rs`), since `TrackSummary` already carries
+`artists`/`album`. The real gaps were an opened album/playlist/radio and an artist's Top Tracks
+tab (`crates/phonia-tui/src/view/browse.rs`'s `track_rows`, used by all three), which used
+`fmt::track_short()` -- title, duration, quality, nothing else -- on the very same `TrackSummary`,
+the data just never shown; and the queue and Home's recently played, whose own DTOs don't carry an
+album title at all (only an id), which is part 2, not touched here.
+
+`track_rows` gained a `full: bool`: `true` picks `fmt::track()` (adds artist and album), `false`
+keeps `fmt::track_short()`. Decided per caller, not uniformly:
+- **An opened album**: stays short (`full = !matches!(view.header(), Header::Album(_))`). Its one
+  artist and this very album are already the header; repeating them on every row is noise. Known,
+  accepted limitation: a various-artists compilation loses each track's own artist this way --
+  not worth a fourth case for.
+- **An opened playlist or radio**: full. Their tracks come from anywhere, so both matter.
+- **An artist's Top Tracks tab**: full, always. The artist is implied by the page (and repeating
+  it is harmless -- it also surfaces features, e.g. "Korn, Skrillex" on a feature), but the album
+  is not, since top tracks span many albums.
+
+Part 2 (the queue and Home's recently played) needs a new field the daemon sends (an album title,
+alongside the album id each already carries) rather than a client-side lookup -- a local file has
+no catalog entry to look up at all, and looking up every queued TIDAL item individually doesn't
+scale -- following the exact precedent of how `QueueItem`/`PlayedTrack` already carry denormalized
+`title`/`artist` strings instead of ids alone. That is its own, still-open PR.

@@ -76,10 +76,13 @@ track is in [AUDIO.md](AUDIO.md). Start at the [README](../README.md).
   track playing instead, also without playing, and the bar says how many tracks went in. On an
   album, a playlist or an artist, `Enter` opens it. An album or a playlist shows its title,
   artists, year, quality and copyright, then its tracks, numbered as on it, with the ones TIDAL
-  will not stream dimmed; `a`/`A` there still add the whole thing. An artist's page shows its
-  name, the start of its bio, and three tabs, its top tracks, its albums, and its EPs and singles
-  (`[`/`]` switch between them), each with its own count; `a`/`A` on the artist itself add its top
-  tracks whole. Inside any of these, `Enter` on a track queues the whole of it (the album, the
+  will not stream dimmed; `a`/`A` there still add the whole thing. A track's own row leaves out
+  the album's title and, inside an album, its one artist too, since the header already says both;
+  a playlist's or a radio's tracks show both, since they can come from anywhere. An artist's page
+  shows its name, the start of its bio, and three tabs, its top tracks, its albums, and its EPs
+  and singles (`[`/`]` switch between them), each with its own count; `a`/`A` on the artist itself
+  add its top tracks whole. Its top tracks show each one's album too, since they can come from any
+  of them. Inside any of these, `Enter` on a track queues the whole of it (the album, the
   playlist, or the artist's top tracks) at the end of the queue -- the same as `a` on the album
   row itself -- and starts at the one under the cursor (skipping, in the count, any track before
   it that TIDAL will not stream); `a`/`A` add just that track, without playing. `Enter` on an
