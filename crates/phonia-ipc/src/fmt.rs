@@ -31,6 +31,23 @@ pub fn track_name(title: Option<&str>, artist: Option<&str>, source: Option<&str
     }
 }
 
+/// [`track_name`] with the album appended when both the title and the album are known:
+/// `Korn - Here to Stay - Untouchables`. Falls back to [`track_name`] alone otherwise --
+/// appending an album to a bare source id (`tidal:12345`, no title yet) would read as if it were
+/// the title, and an empty album title is treated the same as none.
+pub fn track_name_and_album(
+    title: Option<&str>,
+    artist: Option<&str>,
+    album: Option<&str>,
+    source: Option<&str>,
+) -> String {
+    let name = track_name(title, artist, source);
+    match (title, album) {
+        (Some(_), Some(album)) if !album.is_empty() => format!("{name} - {album}"),
+        _ => name,
+    }
+}
+
 /// What TIDAL delivered: the tier, and what was asked for if it was more.
 pub fn stream_quality(quality: &StreamQuality) -> String {
     if quality.fell_back() {
@@ -233,6 +250,39 @@ mod tests {
         assert_eq!(track_name(Some("a.flac"), None, None), "a.flac");
         assert_eq!(track_name(None, None, Some("tidal:1")), "tidal:1");
         assert_eq!(track_name(None, None, None), "?");
+    }
+
+    #[test]
+    fn track_name_and_album_appends_the_album_only_when_the_title_is_known_too() {
+        assert_eq!(
+            track_name_and_album(
+                Some("Here to Stay"),
+                Some("Korn"),
+                Some("Untouchables"),
+                None
+            ),
+            "Korn - Here to Stay - Untouchables"
+        );
+        assert_eq!(
+            track_name_and_album(Some("Here to Stay"), Some("Korn"), None, None),
+            "Korn - Here to Stay",
+            "no album: falls back to track_name alone"
+        );
+        assert_eq!(
+            track_name_and_album(Some("a.flac"), None, None, None),
+            "a.flac",
+            "no artist credited either"
+        );
+        assert_eq!(
+            track_name_and_album(None, None, Some("Untouchables"), Some("tidal:1")),
+            "tidal:1",
+            "no title yet: the album would read as if it were one, so it is left out"
+        );
+        assert_eq!(
+            track_name_and_album(Some("Here to Stay"), Some("Korn"), Some(""), None),
+            "Korn - Here to Stay",
+            "an empty album title counts as none"
+        );
     }
 
     #[test]

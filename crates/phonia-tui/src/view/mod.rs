@@ -393,9 +393,10 @@ fn queue_lines<'a>(
         .map(|(index, item)| {
             let current = queue.current == Some(item.id);
             let marker = if current { ">" } else { " " };
-            let name = phonia_ipc::fmt::track_name(
+            let name = phonia_ipc::fmt::track_name_and_album(
                 item.title.as_deref(),
                 item.artist.as_deref(),
+                item.album.as_deref(),
                 Some(&item.source),
             );
             let length = item
@@ -1037,6 +1038,42 @@ mod tests {
         assert!(
             text.contains("Queue (2)"),
             "the title counts the entries: {text}"
+        );
+    }
+
+    #[test]
+    fn a_queue_row_with_an_album_shows_it_before_the_bracketed_duration() {
+        use phonia_ipc::{ItemId, Queue, QueueItem, Repeat};
+        let mut state = connected();
+        press(&mut state, '2');
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::QueueChanged {
+                queue: Queue {
+                    version: 2,
+                    items: vec![QueueItem {
+                        id: ItemId(1),
+                        source: "tidal:33903008".into(),
+                        title: Some("Here to Stay".into()),
+                        artist: Some("Korn".into()),
+                        duration_ms: Some(271_000),
+                        cover: None,
+                        album_id: Some("33903007".into()),
+                        artist_id: Some("780".into()),
+                        album: Some("Untouchables".into()),
+                    }],
+                    order: vec![ItemId(1)],
+                    current: None,
+                    shuffle: false,
+                    repeat: Repeat::Off,
+                    autoplay: false,
+                },
+            }),
+        );
+        let text = screen(&state, 90, 12);
+        assert!(
+            text.contains("Korn - Here to Stay - Untouchables  [4:31]"),
+            "{text}"
         );
     }
 
@@ -3951,12 +3988,12 @@ mod tests {
                         source: "tidal:1".into(),
                         title: Some("Here to Stay".into()),
                         artist: Some("Korn".into()),
-                        duration_ms: None,
+                        duration_ms: Some(271_000),
                         cover: None,
                         played_at_ms: 1_000,
                         artist_id: None,
                         album_id: None,
-                        album: None,
+                        album: Some("Untouchables".into()),
                     }],
                 }),
             },
@@ -3969,7 +4006,10 @@ mod tests {
         let text = screen(&with_recently_played_on_home(), 100, 14);
         assert!(text.contains("Nothing to continue yet"), "{text}");
         assert!(text.contains("Recently played"), "{text}");
-        assert!(text.contains("Korn - Here to Stay"), "{text}");
+        assert!(
+            text.contains("Korn - Here to Stay - Untouchables - 4:31"),
+            "{text}"
+        );
         let lines: Vec<&str> = text.lines().collect();
         let header = lines
             .iter()
