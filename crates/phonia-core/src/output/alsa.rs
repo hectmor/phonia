@@ -16,7 +16,7 @@ use super::caps::{self, SampleFormat};
 use super::device;
 use super::mixer::HardwareVolume;
 use super::reserve::{DeviceBusy, DeviceReserver, ReservationSlot, open_reserved};
-use super::{AudioSink, SinkFactory, VolumeControl};
+use super::{AudioSink, OutputGone, SinkFactory, VolumeControl};
 use crate::decode::SourceSpec;
 
 /// Target period/buffer sizes. Chosen as a reasonable phase-1-will-tune-this default: short
@@ -412,6 +412,15 @@ impl SinkReport {
 /// must not block.
 pub type ReportHandler = Arc<dyn Fn(SinkReport) + Send + Sync>;
 
+/// Whether `error`, from a PCM write, means the device itself is gone (a USB DAC unplugged
+/// mid-stream) rather than an ordinary underrun or other recoverable error. Checked instead of
+/// just the errno because a removed device can also leave the stream `Disconnected` on a later
+/// call. Never call `PCM::state()` here: alsa-rs panics if the raw state is negative or otherwise
+/// unrecognized, which is exactly what a removed device can produce; `state_raw()` does not.
+fn unplugged(pcm: &PCM, error: &alsa::Error) -> bool {
+    error.errno() == libc::ENODEV || pcm.state_raw() == State::Disconnected as i32
+}
+
 /// Writes all of `bytes` (whole frames of `bytes_per_frame` each) to `pcm`, blocking as needed.
 fn write_all(pcm: &PCM, device: &str, bytes_per_frame: usize, bytes: &[u8]) -> Result<()> {
     let mut offset = 0usize;
@@ -443,6 +452,10 @@ fn write_all(pcm: &PCM, device: &str, bytes_per_frame: usize, bytes: &[u8]) -> R
                 drop(io);
                 pcm.try_recover(e, true)
                     .context("could not recover from an underrun")?;
+            }
+            Err(e) if unplugged(pcm, &e) => {
+                drop(io);
+                bail!(OutputGone(format!("device '{device}' was disconnected")));
             }
             Err(e) => return Err(e).context("error writing to the ALSA device"),
         }
@@ -496,12 +509,17 @@ impl AudioSink for AlsaSink {
         }
         // Only a running (or hardware-paused) stream has audio in flight. In any other state
         // `snd_pcm_delay` can report a stale residual (a few hundred frames right after
-        // drop+prepare on the HDA card), and it fails outright after an underrun.
-        match self.pcm.state() {
-            State::Running | State::Paused | State::Draining => {
-                Ok(self.pcm.delay().map(|d| d.max(0) as u64).unwrap_or(0))
-            }
-            _ => Ok(0),
+        // drop+prepare on the HDA card), and it fails outright after an underrun. Compare the raw
+        // state, not `self.pcm.state()`: that one panics if a removed USB device leaves the state
+        // negative or otherwise unrecognized.
+        let raw = self.pcm.state_raw();
+        if [State::Running, State::Paused, State::Draining]
+            .into_iter()
+            .any(|state| raw == state as i32)
+        {
+            Ok(self.pcm.delay().map(|d| d.max(0) as u64).unwrap_or(0))
+        } else {
+            Ok(0)
         }
     }
 

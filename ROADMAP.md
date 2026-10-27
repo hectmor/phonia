@@ -117,7 +117,7 @@ their turn comes.
 | #45 | User documentation | Open, not scoped |
 | #40 | MCP server for AI agents | Open, not scoped |
 | #41 | Parametric equalizer in shared mode | Open, not scoped |
-| #157 | Automatic output detection: the DAC if present, speakers or Bluetooth if not | In progress (part 1, startup detection, done; part 2, falling back when the DAC disconnects, open) |
+| #157 | Automatic output detection: the DAC if present, speakers or Bluetooth if not | Done |
 
 ### Phase 6 — Layout and appearance
 
@@ -175,9 +175,7 @@ What is actually left, in no committed order:
   toolchain, and user documentation (#45) is now partly answered by the
   document split this file's own #169 entry describes. #157 (pick the output
   automatically: the DAC when it is plugged in, speakers or Bluetooth when it
-  is not) has its startup half done — the new `mode = "auto"` default; what's
-  left is falling back automatically if the DAC is unplugged mid-track
-  instead of failing it.
+  is not) is done.
 - **Nothing is planned in detail.** No issue above has an approved plan, so
   the next step for any of them is a planning pass, not an implementation.
 

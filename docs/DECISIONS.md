@@ -3782,8 +3782,98 @@ Detection reads `/proc/asound` once, synchronously, before `phoniad` opens anyth
 tests hand in a made-up tree instead of depending on whatever happens to be plugged into the CI
 machine or the developer's laptop). It is a one-shot decision made at startup: if the DAC is
 plugged in later, or unplugged mid-session, nothing currently reacts to that -- that is #157 part
-2 (falling back automatically when the DAC disconnects mid-track), still open, and reacquiring the
-DAC automatically on replug was explicitly scoped out of part 2 too (see its own entry once it
-lands): no hotplug watch exists for ALSA cards (only PipeWire's shared outputs have one), and the
-issue never asked for it. Today, getting back onto the DAC after a replug means a manual `phonia
-ctl output set exclusive:hw:DS2,0` or a restart.
+2 (falling back automatically when the DAC disconnects mid-track), see its own entry below.
+
+## 2026-10-27 — #157 part 2 (last): an unplugged DAC falls back to shared instead of failing the track — CLOSES #157
+
+Losing a shared output (a Bluetooth speaker switching off, PipeWire's stream closing) was already
+handled since #14: any sink's `write()` can fail with the typed `OutputGone` error, which
+`audio_thread.rs`'s `failed()` catches and turns into a pause with the position kept
+(`Event::OutputReleased{reason: Lost}`), instead of failing the track. ALSA (exclusive mode) never
+raised it: `AlsaSink::write_all` only special-cased `EPIPE` (an underrun), so a USB DAC physically
+unplugged mid-write surfaced as a generic ALSA error and failed the track outright -- exactly the
+complaint in the issue. The fix is one more arm in that same match: a write that fails with errno
+`ENODEV`, or whose PCM is left in the `Disconnected` state, is wrapped in `OutputGone` too, and the
+existing pause-and-keep-position machinery handles it for free, with no engine change.
+
+Found along the way, not asked for by the issue but required to land it safely: `AlsaSink::write`
+and `delay_frames` were calling `alsa::pcm::PCM::state()`, which **panics** if the raw ALSA state
+is negative or otherwise unrecognized -- exactly what a removed USB device can leave it at. Both
+now compare `PCM::state_raw()` (the non-panicking raw accessor) against the state constants
+directly, instead of going through the panicking wrapper. This was a latent crash waiting for
+real hardware, not a hypothetical: unplugging a DAC while `delay_frames` happened to be polled
+would have taken the whole audio thread down. Fixed as part of this PR since the whole point was
+making a DAC unplug survivable.
+
+The fallback itself: `Outputs` gained an optional `fallback: Option<OutputSpec>`, set only when
+the daemon was started in `mode = "auto"` (`#157` part 1) -- a `mode = "exclusive"` pinned by hand
+asked for bit-perfect on purpose, so losing the DAC there still just pauses, unchanged from before
+this PR; so does losing an output that was already shared (there is nothing further to fall back
+*to*). The daemon's event loop reacts to `OutputReleased{reason: Lost}` for an exclusive output by
+calling the exact same `Outputs::prepare` + `Controller::set_output` path a manual
+`phonia ctl output set` already used, moving the route to `Settings::shared()` (`shared:default`
+unless `sink` is pinned) right away -- nothing about "the output before the DAC" is remembered,
+since there is no such thing once the DAC was itself chosen automatically.
+
+It deliberately does **not** also send `Command::Resume`. The first version of this PR did, so
+losing the DAC in auto mode kept playing through the speakers with no action from the listener.
+Tried against the real hardware, that turned out to be the wrong default: the user asked for it
+to stay paused on the new output instead, the same way every other output loss already does, and
+resume it themselves (`phonia ctl resume`, Space in the TUI) -- the automatic part is only moving
+to an output that is actually ready to play on, not starting to play through the speakers by
+itself. This matches the one exception already on record: a `mode = "exclusive"` pin, or a lost
+output that was already shared, still neither switches nor resumes.
+
+Reacquiring the DAC automatically when it is replugged stays out of scope, exactly as part 1's
+entry said it would: there is still no hotplug watch for ALSA cards (only PipeWire's shared
+outputs have one via `watch_outputs`), and building one -- a poller or a udev/netlink watch, plus
+a state machine to avoid fighting a manual `output set` the user made meanwhile -- was judged not
+worth it for a one-DAC household. Today, getting back onto the DAC after a replug means a manual
+`phonia ctl output set exclusive:hw:DS2,0` or a daemon restart (which re-runs part 1's detection).
+This closes #157.
+
+## 2026-10-27 — #204: `shared:default` also notices when its device is gone, not only a named output
+
+Found while the user was trying #157's fallback by hand: the DAC was lost, phonia switched to
+`shared:default`, paused, resumed by hand onto the USB headphones that were the desktop's default
+at the time -- then the headphones themselves were unplugged, and nothing happened. Playback kept
+going, unnoticed, through whatever the sound server moved the stream to next (the laptop
+speakers). That turned out to be issue #14's own decision, working as designed: the `Watcher` in
+`output/shared/pulse.rs` only ever tracked a *named* output's sink index
+(`sink = named.then(|| (stream.sink(), ...))`); for `Target::Default` it passed `None`, so the
+`(Sink, Removed)` match guard could never be true, and `OutputGone` never fired for that case.
+
+The fix removes the `named.then(...)` gate: `sink` is now unconditionally `(stream.sink(),
+output.description.clone())`, for every target, and `Watcher::start`'s parameter changed from
+`Option<(u32, String)>` to a plain `(u32, String)` to match (it is always known at this point).
+`no_move` is untouched -- the stream still leaves PipeWire free to migrate it to the next default
+sink on its own -- but losing the *specific physical device* the stream was opened on now pauses
+phonia either way, exactly like a named output going away always has. Confirmed against a real
+PipeWire session with a null sink set as the default: `pactl set-default-sink <null>`, open a
+`Target::Default` stream, remove the sink, see `OutputGone` -- a new `#[ignore]`d test,
+`a_default_output_that_goes_away_is_reported_as_gone_too`, mirrors the existing named-output one.
+One timing note from writing that test: `pactl set-default-sink` returns as soon as the request is
+sent, not once the session manager has actually applied it, so the test polls `get-default-sink`
+rather than trusting a fixed sleep -- real desktop use has no such race, since the device was
+already the default for a while before it disappeared.
+
+This reopens #14's "`default` never gets lost" framing rather than replacing it: losing the
+*device* now pauses, but changing the default yourself (in the desktop's own settings, with
+nothing unplugged) still does not -- the stream simply follows, as `Target::Default`'s own doc
+comment always said it would, since no `Sink Removed` event fires for that.
+
+**Follow-up, same day, found testing the fix against real hardware:** the first version above
+watched a fixed sink index, captured once when the stream was opened. That is exactly wrong for
+`Target::Default`, whose whole point is that the device behind it can change over the stream's
+life -- the user's own test hit this immediately: DAC lost -> falls back to `shared:default` on
+whatever was default then (say, the laptop speakers) -> DAC plugged back in -> the desktop makes
+it the new default -> the stream silently follows there (`no_move` is still false) -> but the
+`Watcher` was still listening for the *speakers* to disappear, not the DAC, so unplugging the DAC
+a second time did nothing at all. `Watcher::start` now also takes the `Client` (only for
+`Target::Default`, as `follow_default: Option<Client>`; a named output still never moves, so it
+never needs this) and subscribes to `SubscriptionMask::SERVER` too; on `(Server, Changed)` it
+re-resolves `server_info().default_sink_name` and the matching `sink_info_by_name`, and updates the
+locally tracked `(index, name)` the removal check compares against -- all on the one watcher
+thread, no cross-thread state needed. Confirmed with a second real-server test,
+`a_default_output_is_watched_again_after_the_default_moves_to_a_new_device`: default starts on
+sink A, moves to sink B, dropping A does nothing, dropping B is noticed.
