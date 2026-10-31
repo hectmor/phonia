@@ -158,9 +158,11 @@ deliberately separate, not-yet-investigated future issue, the same territory
 
 ## Right now
 
-`v1.1.0` is out. Phases 0–3, 6 and 7 are closed again (#207 done); phase 4 is
-code complete except for work nobody has scoped yet. #157's own follow-up
-bugs surfaced a new one, #206, still open.
+`v1.2.0` is out, bringing #157 (auto output selection and DAC-lost handling),
+#207 (artist and album everywhere) and #211 (device-name fix) into `main`
+along with #38, #192, #194, #196 and #198. Phases 0–3, 6 and 7 are closed
+again (#207 done); phase 4 is code complete except for work nobody has
+scoped yet. #157's own follow-up bugs surfaced a new one, #206, still open.
 
 What is actually left, in no committed order:
 
