@@ -244,7 +244,7 @@ One connection carries requests, their responses and, once subscribed, events, a
 JSON, so `socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/phonia/phoniad.sock` is a working client:
 
 ```
-< {"type":"hello","protocol":{"major":1,"minor":19},"server":{"name":"phoniad","version":"1.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","recently_played","catalog","lyrics","autoplay"]}
+< {"type":"hello","protocol":{"major":1,"minor":20},"server":{"name":"phoniad","version":"1.2.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","recently_played","catalog","lyrics","autoplay"]}
 > {"id":1,"request":{"type":"hello","protocol":{"major":1,"minor":0},"client":{"name":"me","version":"0"}}}
 < {"type":"response","id":1,"ok":{"type":"ack"}}
 > {"id":2,"request":{"type":"subscribe"}}

@@ -19,6 +19,7 @@ on, and the [README](README.md) for what phonia is.
 |---|---|---|
 | [`v1.0.0`](https://github.com/hectmor/phonia/releases/tag/v1.0.0) | 2026-10-14 | First release off `main`: phases 0–3 and 6 complete, 4 and 7 code complete |
 | [`v1.1.0`](https://github.com/hectmor/phonia/releases/tag/v1.1.0) | 2026-10-23 | Additive, no breaking changes: the responsive TUI (#175), the dropped sound-server and debug-build fixes (#184, #186), dual MIT OR Apache-2.0 with third-party notices (#173), and the document split (#169) |
+| [`v1.2.0`](https://github.com/hectmor/phonia/releases/tag/v1.2.0) | 2026-10-31 | Additive, no breaking changes: TOML themes (#38), the TUI owning its own `phoniad` (#192), `ga`/`gr` reach (#194), favorite add/remove (#196), the scroll-window fix (#198), docs/screenshot catch-up (#200), auto output selection and DAC-lost handling (#157), artist and album everywhere over protocol 1.20 (#207), and the device-name fix (#211) |
 
 Earlier tags (`v0.2.0`–`v0.4.0`) were cut on `develop` before `main` was kept
 current, and the workspace version was not raised with them; `v1.0.0` is the
