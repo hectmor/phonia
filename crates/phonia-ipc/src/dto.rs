@@ -269,6 +269,10 @@ pub struct QueueItem {
     /// TIDAL track with no artist credited, or an older daemon (since 1.16).
     #[serde(default)]
     pub artist_id: Option<String>,
+    /// The track's album's title; absent for a local file, a TIDAL track with no album, or an
+    /// older daemon (since 1.20).
+    #[serde(default)]
+    pub album: Option<String>,
 }
 
 /// One entry of the recently played log (since 1.15, #144): kept by the daemon in memory (and,
@@ -285,6 +289,18 @@ pub struct PlayedTrack {
     pub cover: Option<String>,
     /// When this play started, milliseconds since the Unix epoch.
     pub played_at_ms: u64,
+    /// The id of the track's first credited artist, to open its page with `ga`; absent for a
+    /// local file, a TIDAL track with no artist credited, or an older daemon (since 1.18).
+    #[serde(default)]
+    pub artist_id: Option<String>,
+    /// The id of the track's album, to open its page with `gr`; absent for a local file, a
+    /// TIDAL track with no album, or an older daemon (since 1.18).
+    #[serde(default)]
+    pub album_id: Option<String>,
+    /// The track's album's title; absent for a local file, a TIDAL track with no album, or an
+    /// older daemon (since 1.20).
+    #[serde(default)]
+    pub album: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

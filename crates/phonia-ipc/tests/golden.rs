@@ -75,6 +75,7 @@ fn queue() -> Queue {
                 cover: None,
                 album_id: None,
                 artist_id: None,
+                album: None,
             },
             QueueItem {
                 id: ItemId(8),
@@ -85,6 +86,7 @@ fn queue() -> Queue {
                 cover: Some("abc123-def4".into()),
                 album_id: Some("223382003".into()),
                 artist_id: Some("780".into()),
+                album: Some("Brothers in Arms".into()),
             },
         ],
         order: vec![ItemId(8), ItemId(7)],
@@ -95,7 +97,7 @@ fn queue() -> Queue {
     }
 }
 
-const QUEUE_JSON: &str = r#"{"version":5,"items":[{"id":7,"source":"file:/music/a.flac","title":"a.flac","artist":null,"duration_ms":215000,"cover":null,"album_id":null,"artist_id":null},{"id":8,"source":"tidal:233059491","title":null,"artist":"Dire Straits","duration_ms":null,"cover":"abc123-def4","album_id":"223382003","artist_id":"780"}],"order":[8,7],"current":7,"shuffle":true,"repeat":"all","autoplay":true}"#;
+const QUEUE_JSON: &str = r#"{"version":5,"items":[{"id":7,"source":"file:/music/a.flac","title":"a.flac","artist":null,"duration_ms":215000,"cover":null,"album_id":null,"artist_id":null,"album":null},{"id":8,"source":"tidal:233059491","title":null,"artist":"Dire Straits","duration_ms":null,"cover":"abc123-def4","album_id":"223382003","artist_id":"780","album":"Brothers in Arms"}],"order":[8,7],"current":7,"shuffle":true,"repeat":"all","autoplay":true}"#;
 
 // ---- requests ------------------------------------------------------------------------------
 
@@ -252,6 +254,15 @@ fn queue_editing_requests() {
         Request::SetAutoplay { autoplay: true },
         r#"{"id":8,"request":{"type":"set_autoplay","autoplay":true}}"#,
     );
+    request(
+        9,
+        Request::SetFavorite {
+            kind: CatalogKind::Albums,
+            id: "7".to_string(),
+            favorite: false,
+        },
+        r#"{"id":9,"request":{"type":"set_favorite","kind":"albums","id":"7","favorite":false}}"#,
+    );
 }
 
 // ---- responses -----------------------------------------------------------------------------
@@ -301,7 +312,7 @@ fn the_server_banner() {
                 CAP_AUTOPLAY.into(),
             ],
         }),
-        r#"{"type":"hello","protocol":{"major":1,"minor":17},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","recently_played","catalog","lyrics","autoplay"]}"#,
+        r#"{"type":"hello","protocol":{"major":1,"minor":20},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","recently_played","catalog","lyrics","autoplay"]}"#,
     );
 }
 
@@ -1117,6 +1128,17 @@ fn a_1_12_queue_says_nothing_of_autoplay() {
 }
 
 #[test]
+fn a_1_19_queue_item_and_played_track_say_nothing_of_the_album_title() {
+    let old = r#"{"id":7,"source":"tidal:1","title":"t","artist":null,"duration_ms":1000,"cover":null,"album_id":"a","artist_id":null}"#;
+    let parsed: QueueItem = serde_json::from_str(old).unwrap();
+    assert_eq!(parsed.album, None);
+
+    let old = r#"{"source":"tidal:1","title":"t","artist":null,"duration_ms":1000,"cover":null,"played_at_ms":0,"artist_id":null,"album_id":"a"}"#;
+    let parsed: PlayedTrack = serde_json::from_str(old).unwrap();
+    assert_eq!(parsed.album, None);
+}
+
+#[test]
 fn a_mode_from_the_future_does_not_break_a_client() {
     let parsed: Route =
         serde_json::from_str(r#"{"id":"x","mode":"cloud","description":"d"}"#).unwrap();
@@ -1145,7 +1167,7 @@ fn versions_are_compatible_across_minors_but_not_majors() {
     assert!(v(1, 0).compatible_with(v(1, 7)));
     assert!(v(1, 7).compatible_with(v(1, 0)));
     assert!(!v(1, 0).compatible_with(v(2, 0)));
-    assert_eq!(PROTOCOL, v(1, 17));
+    assert_eq!(PROTOCOL, v(1, 20));
 }
 
 #[test]
@@ -1293,13 +1315,16 @@ fn the_recently_played_request_response_and_event_since_1_15() {
         duration_ms: Some(271_000),
         cover: None,
         played_at_ms: 1_700_000_000_000,
+        artist_id: Some("780".into()),
+        album_id: Some("77931244".into()),
+        album: Some("Untouchables".into()),
     };
     response(
         2,
         Reply::Ok(Payload::RecentlyPlayed {
             items: vec![played.clone()],
         }),
-        r#"{"type":"response","id":2,"ok":{"type":"recently_played","items":[{"source":"tidal:33723914","title":"Here to Stay","artist":"Korn","duration_ms":271000,"cover":null,"played_at_ms":1700000000000}]}}"#,
+        r#"{"type":"response","id":2,"ok":{"type":"recently_played","items":[{"source":"tidal:33723914","title":"Here to Stay","artist":"Korn","duration_ms":271000,"cover":null,"played_at_ms":1700000000000,"artist_id":"780","album_id":"77931244","album":"Untouchables"}]}}"#,
     );
     let json = serde_json::to_string(&ServerMessage::Event {
         seq: 1,

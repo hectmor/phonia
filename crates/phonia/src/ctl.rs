@@ -1377,9 +1377,10 @@ fn format_queue(queue: &Queue) -> String {
         } else {
             ' '
         };
-        let name = phonia_ipc::fmt::track_name(
+        let name = phonia_ipc::fmt::track_name_and_album(
             item.title.as_deref(),
             item.artist.as_deref(),
+            item.album.as_deref(),
             Some(&item.source),
         );
         let length = item
@@ -1567,6 +1568,7 @@ mod tests {
             cover: None,
             album_id: None,
             artist_id: None,
+            album: None,
         };
         Queue {
             version: 1,
@@ -1602,6 +1604,33 @@ mod tests {
         assert_eq!(
             format_queue(&queue()),
             "Queue (3 entries, shuffle on, repeat all):\n     1. One  [1:05]\n >   2. file:/m/11.flac\n     3. Three  [1:02:05]"
+        );
+    }
+
+    #[test]
+    fn a_queue_entry_with_an_album_shows_it_before_the_bracketed_duration() {
+        let queue = Queue {
+            version: 1,
+            items: vec![QueueItem {
+                id: ItemId(1),
+                source: "tidal:33903008".into(),
+                title: Some("Here to Stay".into()),
+                artist: Some("Korn".into()),
+                duration_ms: Some(271_000),
+                cover: None,
+                album_id: Some("33903007".into()),
+                artist_id: Some("780".into()),
+                album: Some("Untouchables".into()),
+            }],
+            order: vec![ItemId(1)],
+            current: None,
+            shuffle: false,
+            repeat: Repeat::Off,
+            autoplay: false,
+        };
+        assert_eq!(
+            format_queue(&queue),
+            "Queue (1 entries, shuffle off, repeat off):\n     1. Korn - Here to Stay - Untouchables  [4:31]"
         );
     }
 
@@ -2506,6 +2535,9 @@ mod tests {
                 duration_ms: Some(271_000),
                 cover: None,
                 played_at_ms: 1_700_000_000_000,
+                artist_id: None,
+                album_id: None,
+                album: None,
             }],
         };
         let text = format_recent(&payload);

@@ -16,10 +16,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-/// phonia -- phase 0: CLI spike that validates PKCE login -> HiRes playbackinfo -> DASH segments
-/// -> FLAC decoding -> bit-perfect ALSA output to a USB DAC.
+/// phonia -- the user-facing command: the TIDAL login, the standalone players `play` and
+/// `play-file`, the daemon's control surface `ctl`, the TUI, and the device tools.
 #[derive(Parser)]
-#[command(name = "phonia", about = "Bit-perfect TIDAL hi-fi player (phase 0)")]
+#[command(name = "phonia", about = "Bit-perfect TIDAL hi-fi player")]
 struct Cli {
     /// The config file to read instead of `~/.config/phonia/config.toml` (also `PHONIA_CONFIG`).
     #[arg(long, global = true, value_name = "FILE")]
@@ -108,7 +108,7 @@ enum Command {
     },
     /// Controls a running `phoniad` (the daemon): playback, queue and events.
     Ctl(ctl::CtlArgs),
-    /// Opens the terminal interface, which drives a running `phoniad`. `q` quits.
+    /// Opens the terminal interface, starting its own `phoniad` if none answers. `q` quits.
     Tui {
         /// The daemon's socket. Default: [daemon] socket in the config file, else
         /// `$XDG_RUNTIME_DIR/phonia/phoniad.sock`.
@@ -252,7 +252,7 @@ async fn main() -> ExitCode {
         }
         Command::Ctl(args) => ctl::run(args, cli.config.as_deref()).await,
         Command::Tui { socket, covers } => match ctl::socket_path(cli.config.as_deref(), socket) {
-            Ok(socket) => phonia_tui::run(socket, covers).await,
+            Ok(socket) => phonia_tui::run(socket, cli.config.as_deref(), covers).await,
             Err(error) => Err(error),
         },
         Command::Devices => run_devices().await,
@@ -310,6 +310,7 @@ async fn run_play_file(
             cover: None,
             album_id: None,
             artist_id: None,
+            album: None,
         }]);
     }
     queue.set_shuffle(shuffle);
@@ -355,6 +356,7 @@ async fn run_play(
             cover: None,
             album_id: None,
             artist_id: None,
+            album: None,
         }]);
     }
     queue.set_shuffle(shuffle);

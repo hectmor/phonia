@@ -46,7 +46,7 @@ pub const CAP_RECENTLY_PLAYED: &str = "recently_played";
 /// The protocol version this crate speaks.
 pub const PROTOCOL: Version = Version {
     major: 1,
-    minor: 17,
+    minor: 20,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,6 +296,14 @@ pub enum Request {
     /// (since 1.13). Reported back on `Queue.autoplay`.
     SetAutoplay {
         autoplay: bool,
+    },
+    /// Adds (`favorite: true`) or removes one item from the logged-in user's TIDAL favorites
+    /// (since 1.19). For a playlist this is following/unfollowing, not supported yet -- answered
+    /// with `ErrorCode::BadRequest`.
+    SetFavorite {
+        kind: CatalogKind,
+        id: String,
+        favorite: bool,
     },
     /// Stops the daemon.
     Shutdown,

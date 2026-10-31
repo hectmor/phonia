@@ -199,11 +199,19 @@ sink = "bluez_output.AA_BB_CC_DD_EE_FF.1"   # from `phonia devices`; or "default
   sample on the new one. If the new output can't be opened, playback stays paused on the track, says
   why, and `phonia ctl resume` tries again. `phoniad --output <id>` and `phonia play --output <id>`
   choose the output for one run, whatever the config file says.
-- **When the output goes away** (a Bluetooth speaker is switched off, the server stops) playback
-  pauses on the spot, with the position kept, and reports `DAC released (the output went away)`.
-  It does not move to another output and does not resume by itself; when the speaker is back,
-  `phonia ctl resume` carries on from where it was, or `phonia ctl output set` picks another.
-  `phonia ctl watch` shows outputs appearing and disappearing.
+- **When the output goes away** (a Bluetooth speaker is switched off, the server stops, a USB DAC
+  or USB headset is unplugged) playback pauses on the spot, with the position kept, and reports
+  `DAC released (the output went away)`. This applies to `shared:default` too (#204): even though
+  the sound server is free to move that stream to a new default on its own, losing the specific
+  physical device it was opened on still pauses phonia instead of letting it continue, unnoticed,
+  through whatever became the default next. In `mode = "auto"` (the default, #157), an output lost
+  while it was exclusive is also switched to the shared output there and then, so it is ready to
+  go — but it stays paused, exactly like any other loss: `phonia ctl resume` (or Space in the TUI)
+  is what actually continues it, through the new output, from the exact position. A pinned
+  `mode = "exclusive"`, or any output lost while it was already shared, is not switched anywhere:
+  `phonia ctl output set` moves it by hand. Nothing lost is taken back automatically when it
+  reappears either way — a manual `output set` or a restart picks it up again. `phonia ctl watch`
+  shows outputs appearing and disappearing.
 - One limit: while phonia holds a card in exclusive mode the desktop has no output for it, so the
   card's shared output is not in the list. `phonia ctl release` gives the card back and it
   reappears.

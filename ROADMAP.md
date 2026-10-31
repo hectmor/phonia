@@ -18,6 +18,7 @@ on, and the [README](README.md) for what phonia is.
 | Tag | Date | What |
 |---|---|---|
 | [`v1.0.0`](https://github.com/hectmor/phonia/releases/tag/v1.0.0) | 2026-10-14 | First release off `main`: phases 0–3 and 6 complete, 4 and 7 code complete |
+| [`v1.1.0`](https://github.com/hectmor/phonia/releases/tag/v1.1.0) | 2026-10-23 | Additive, no breaking changes: the responsive TUI (#175), the dropped sound-server and debug-build fixes (#184, #186), dual MIT OR Apache-2.0 with third-party notices (#173), and the document split (#169) |
 
 Earlier tags (`v0.2.0`–`v0.4.0`) were cut on `develop` before `main` was kept
 current, and the workspace version was not raised with them; `v1.0.0` is the
@@ -31,10 +32,10 @@ first tag where the tag, `main` and `Cargo.toml` agree.
 | 1 — Daemon and playback engine | [Fase 1](https://github.com/hectmor/phonia/milestone/2) | Done (#8–#16, #47, #52, #53) |
 | 2 — TUI base | [Fase 2](https://github.com/hectmor/phonia/milestone/3) | Done (#17–#24) |
 | 3 — Audio quality | [Fase 3](https://github.com/hectmor/phonia/milestone/4) | Done (#25–#31) |
-| 4 — SONE-like features | [Fase 4](https://github.com/hectmor/phonia/milestone/5) | In progress (4 of 12 issues left) |
-| 5 — Extras and packaging | [Fase 5](https://github.com/hectmor/phonia/milestone/6) | Barely started (CI only) |
-| 6 — Layout and appearance | [Fase 6](https://github.com/hectmor/phonia/milestone/7) | Done (#124, #159, #160, #175) |
-| 7 — Home screen and discovery | [Fase 7](https://github.com/hectmor/phonia/milestone/8) | Code complete; #169 (this reorganization) open |
+| 4 — SONE-like features | [Fase 4](https://github.com/hectmor/phonia/milestone/5) | In progress (#196 part 2; #35, #36, #37 unscoped) |
+| 5 — Extras and packaging | [Fase 5](https://github.com/hectmor/phonia/milestone/6) | In progress (CI, licensing, the process rules and #192 done; packaging open) |
+| 6 — Layout and appearance | [Fase 6](https://github.com/hectmor/phonia/milestone/7) | Done (#124, #159, #160, #175, #188, #198, #207) |
+| 7 — Home screen and discovery | [Fase 7](https://github.com/hectmor/phonia/milestone/8) | Done (#139, #144, #169, #171, #194) |
 
 Phases 0 and 1 delivered: TIDAL PKCE login, HiRes/DASH streaming, bit-perfect
 ALSA output, a playback engine and in-memory queue, the daemon and its IPC
@@ -88,14 +89,16 @@ done — it is its own product decision, not a leftover.
 | #156 | `ga` on a queue entry opens its artist | Closed |
 | #164 | `ga` on any track row: search results, track rows, inside an opened album | Closed |
 | #166 | `gr` opens the album of the track under the cursor | Closed |
+| #196 | Add/remove TIDAL favorites from the TUI (`fas`/`far`/`faa`/`fal`, `fds`/`fdr`/`fda`/`fdl`) | In progress (part 1 of 2) |
 | #35 | Scrobbling to Last.fm and ListenBrainz | Open, not scoped |
 | #36 | Discord Rich Presence | Open, not scoped |
 | #37 | Persistent queue and state across restarts | Open, not scoped |
-| #38 | Configurable themes in TOML | Open, not scoped |
+| #38 | Configurable themes in TOML | Closed (`theme.toml`, `palette = "gruvbox"`, `"dracula"` or `"nord"`) |
 
-#156, #164 and #166 were unplanned: they came out of using the TUI day to day,
-not from the phase's own plan. The four open issues hold a one-line
-description each and are to be scoped with Opus when their turn comes.
+#156, #164, #166 and #196 were unplanned: they came out of using the TUI day
+to day, not from the phase's own plan. The three issues still open (#35, #36,
+#37) hold a one-line description each and are to be scoped with Opus when
+their turn comes.
 
 ### Phase 5 — Extras and packaging
 
@@ -103,12 +106,18 @@ description each and are to be scoped with Opus when their turn comes.
 |---|---|---|
 | #42 | CI with GitHub Actions (build, test, clippy, fmt) | Closed |
 | #50 | Format the whole tree with rustfmt and check it in CI | Closed |
+| #173 | Licensing: dual MIT OR Apache-2.0, third-party notices shipped and guarded in CI | Closed |
+| #176 | Document the commit, branch and pull request rules | Closed (`docs/COMMITS.md`) |
+| #178 | Require the phonia Project board on every pull request | Closed |
+| #184 | A dropped sound-server connection is cached forever, and shared output never recovers | Closed |
+| #186 | A debug build spends ~40x the CPU playing, and the docs tell you to use one | Closed |
+| #192 | `phonia tui` starts and stops its own `phoniad` | Closed |
 | #43 | RPM / COPR package for Fedora | Open, not scoped |
 | #44 | AUR package | Open, not scoped |
 | #45 | User documentation | Open, not scoped |
 | #40 | MCP server for AI agents | Open, not scoped |
 | #41 | Parametric equalizer in shared mode | Open, not scoped |
-| #157 | Automatic output detection: the DAC if present, speakers or Bluetooth if not | Open, not scoped |
+| #157 | Automatic output detection: the DAC if present, speakers or Bluetooth if not | Done |
 
 ### Phase 6 — Layout and appearance
 
@@ -118,6 +127,9 @@ description each and are to be scoped with Opus when their turn comes.
 | #159 | Highlight the track playing in search, and the album it belongs to | Closed (PR #161) |
 | #160 | `Enter` inside an opened album queues it at the end of the queue | Closed |
 | #175 | Making the TUI responsive: the cover and the whole interface fit the terminal | Closed (all four parts) |
+| #188 | Give the cover room to breathe: columns beside it, a floor under it | Closed (two columns, one row) |
+| #198 | Scrolling lists jump with every cursor move instead of staying put until the edge | Closed |
+| #207 | Show artist and album in every track list, not just title and duration | Done (both parts) |
 
 Started right after #120. The owner's concrete ask, from a screenshot of
 TIDAL's own web player: a visually bigger, bolder track title with the artist
@@ -126,7 +138,7 @@ string. #159 and #160 came out of daily use rather than the phase's plan, and
 #175 reopened the phase: its first part fixed a cover that was invisible at
 twelve terminal heights, and the other three made the cover grow with the
 terminal, fit the bar's hints and tab rows to the room they have, and reflow a
-narrow terminal.
+narrow terminal. #188 and #198 came out of that same daily use, after it.
 
 ### Phase 7 — Home screen and discovery
 
@@ -134,7 +146,9 @@ narrow terminal.
 |---|---|---|
 | #139 | Home screen in the TUI (local data only) | Closed (all 4 parts) |
 | #144 | Favorite artists and Recently played on Home | Closed (all 6 parts) |
-| #169 | Split the documentation; make the README an entry point | In progress |
+| #169 | Split the documentation; make the README an entry point | Closed |
+| #171 | Re-record the screenshots: they showed a phonia without Home or Lyrics | Closed |
+| #194 | `ga`/`gr` reach Home's recently played rows and Library's favorite albums | Closed |
 
 A lightweight home screen using only data phonia already fetches (resuming,
 favorites, playlist folders, recently played). A real TIDAL-style editorial or
@@ -144,24 +158,37 @@ deliberately separate, not-yet-investigated future issue, the same territory
 
 ## Right now
 
-`v1.0.0` is out. Everything the audio path and the interface need is done:
-phases 0–3 and 6 are closed, and phases 4 and 7 are code complete except for
-work nobody has scoped yet.
+`v1.2.0` is out, bringing #157 (auto output selection and DAC-lost handling),
+#207 (artist and album everywhere) and #211 (device-name fix) into `main`
+along with #38, #192, #194, #196 and #198. Phases 0–3, 6 and 7 are closed
+again (#207 done); phase 4 is code complete except for work nobody has
+scoped yet. #157's own follow-up bugs surfaced a new one, #206, still open.
 
 What is actually left, in no committed order:
 
-- **Phase 4's four open issues** — scrobbling (#35), Discord Rich Presence
-  (#36), a queue and state that survive a restart (#37), and themes in TOML
-  (#38). Each is a one-line description today; each needs planning before any
+- **Phase 6** — #207 (artist and album in every track list) is done, both
+  parts: an opened playlist, radio and an artist's Top Tracks tab (part 1),
+  and the queue and Home's recently played, which also needed the album
+  title to actually reach them over protocol 1.20 first (part 2). #206 (a
+  second USB DAC disconnect fails the track instead of pausing, a gap
+  #157/#204/#205 left open) has a full approved plan (4 fixes in
+  `alsa.rs`/`device.rs`/`audio_thread.rs`), not started.
+- **Phase 4** — part 2 of #196 is the one thing in flight: adding and removing
+  favorite tracks, albums and artists works, while following and unfollowing a
+  playlist (`fal`/`fdl`) answers with an error until TIDAL's own endpoint for
+  it is verified. Behind it, three issues nobody has scoped: scrobbling (#35),
+  Discord Rich Presence (#36), and a queue and state that survive a restart
+  (#37). Each is a one-line description today; each needs planning before any
   code.
 - **Phase 5, packaging and extras** — the two package issues (#43 RPM/COPR,
   #44 AUR) are what would let someone install phonia without a Rust
   toolchain, and user documentation (#45) is now partly answered by the
   document split this file's own #169 entry describes. #157 (pick the output
   automatically: the DAC when it is plugged in, speakers or Bluetooth when it
-  is not) is the one that would most change daily use.
-- **Nothing is planned in detail.** No issue above has an approved plan, so
-  the next step for any of them is a planning pass, not an implementation.
+  is not) is done.
+- **Nothing beyond #206 is planned in detail.** No other issue above has an
+  approved plan, so the next step for any of them is a planning pass, not an
+  implementation.
 
 The historical narrative that used to live in this section — what each merged
 issue decided and why, part by part — was removed in #169: every one of those

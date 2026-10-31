@@ -7,12 +7,23 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Cursor {
     selected: usize,
+    /// The first row shown, as last drawn (see `view::keep_in_view`): the view sets it after each
+    /// render, the motions below never touch it.
+    scroll: usize,
 }
 
 impl Cursor {
     /// The row selected; 0 for an empty list, where nothing is.
     pub fn selected(&self) -> usize {
         self.selected
+    }
+
+    pub fn scroll(&self) -> usize {
+        self.scroll
+    }
+
+    pub fn set_scroll(&mut self, scroll: usize) {
+        self.scroll = scroll;
     }
 
     pub fn down(&mut self, len: usize) {

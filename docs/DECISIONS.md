@@ -3517,3 +3517,453 @@ twelve terminal heights now appears and survives a resize; it grows past the
 12-row cap on a tall terminal; the bar's key hints and the three tab rows fit
 the room they are given instead of being clipped at 80 columns; and a narrow
 terminal reflows rather than cramming.
+
+## 2026-10-23 — Named palettes in `theme.toml` may use true RGB; the default still uses only the terminal's 16
+
+The 2026-09-26 decision above stands for the *default* theme: with no
+`~/.config/phonia/theme.toml`, or one that doesn't set `palette`, colors are
+still exactly the terminal's own 16 ANSI colors, `NO_COLOR`-aware, unchanged.
+A small, curated set of built-in named palettes (`gruvbox`, `dracula`,
+`nord`) is added as an explicit, scoped exception: selecting one by name
+uses that scheme's real RGB colors, because the point of naming a known
+scheme is to look like it regardless of what the terminal's own 16 slots are
+mapped to. Only foregrounds are set — `text` and `selected` are untouched,
+so no palette paints the frame's background; these are dark-background
+schemes laid over whatever background the terminal already has.
+
+A chosen palette takes priority over `NO_COLOR`: no-color.org says a user's
+own configuration should override the environment variable, so a palette
+is sent as 24-bit escapes regardless, with no fallback yet for a terminal
+without true-color support.
+
+Read once at startup (`Theme::load`, `crates/phonia-tui/src/theme.rs`); no
+hot-reload, no per-role override — restart `phonia tui` to apply a change,
+the same convention `phonia-core`'s `config.toml` already uses. This closes
+#38.
+
+## 2026-10-24 — `phonia tui` starts and stops its own `phoniad`
+
+No new flag chooses between "start my own daemon" and "use the one already
+there": `phonia tui` just probes whether anything answers on the socket at
+startup, and that single fact decides everything. This is what lets a
+by-hand `phoniad`, and later a systemd user service managing it for the AUR
+package (#44), coexist with this feature without the user picking a mode:
+either way, something already answers, so the TUI never spawns and never
+owns a daemon it didn't start. Ownership is tracked only for a child this
+process itself spawned (`daemon::Owned`, `crates/phonia-tui/src/daemon.rs`);
+an inherited daemon is never touched, on quit or otherwise.
+
+The owned child is stopped with `SIGTERM` to its own pid, not by reusing the
+IPC `Request::Shutdown` that `phonia ctl shutdown` sends. `phoniad` makes a
+network call (`auth::load_client`) before it binds its socket
+(`crates/phoniad/src/main.rs`), so for a moment after it's spawned there is
+a live process but no socket yet to send an IPC request to safely — and if
+two daemons were ever racing to bind, an IPC stop could in principle land on
+the wrong one once it does bind. A signal to a pid this process holds and
+hasn't reaped has no such ambiguity, at any point in startup, and once
+`phoniad` has bound its socket this is the exact signal its own
+`terminate.recv()` branch already handles with its usual graceful
+`request_shutdown` → `stop_engine` → socket-cleanup sequence. A 3-second
+timeout falls back to `SIGKILL`, which skips that graceful device release —
+accepted as a rare, logged shortcut rather than something to engineer around
+up front.
+
+The child is spawned with `process_group(0)`, so the terminal's own SIGHUP
+reaches only the TUI, not an unprotected `phoniad` racing to handle it on
+its own; the TUI decides when to stop its child instead. The TUI now catches
+SIGTERM on itself too, not only SIGHUP, so being killed directly doesn't
+orphan its daemon either — flagged as worth doing once the SIGHUP handling
+existed at all, since without it a direct SIGTERM to the TUI would leave the
+daemon running with nothing left to stop it. The child's stderr (it still
+`eprintln!`s a few status lines) goes to `~/.local/state/phonia/phoniad.log`
+instead of the alternate screen.
+
+**A real tty loss during cleanup surfaced a latent fragility in ratatui
+itself, left as a known, invisible caveat rather than fixed further.**
+Testing the SIGHUP path against a pty that is fully closed (not just
+signalled) showed the process ending in `SIGABRT` instead of a clean exit:
+`ratatui::restore()`'s own `eprintln!` on a failed restore can itself fail
+to write to a tty that's already gone, which panics; that panic reaches the
+panic hook `ratatui::init()` installs, which calls the library's internal
+`restore()` again — on the same dead tty, triggering the same failing
+`eprintln!` a second time, this time *while already panicking*, which Rust
+turns into a process abort. `phonia`'s own explicit restore call in
+`crates/phonia-tui/src/lib.rs` was changed to `try_restore()` (whose error is
+just ignored) to remove one occurrence of this, but `ratatui::init()`'s own
+panic hook still calls the panic-prone `restore()` internally, as does a
+`Drop for Terminal` cursor-restore attempt in `ratatui-core` — neither is
+something this crate can change short of overriding ratatui's panic hook
+outright. Left as-is because the daemon is always stopped *before* any of
+this runs (confirmed by testing), so the one guarantee this feature makes
+is unaffected either way, and because nobody is left to see the abort: by
+the time it could happen, the terminal that would have shown it is gone.
+
+Confirmed by hand: quit (`q`), SIGTERM to the TUI's own pid, and a closed
+terminal (SIGHUP, including a pty closed outright) each stop only a
+self-started daemon, every time, before the process itself exits; a
+hand-started `phoniad` survives a TUI connecting to it and quitting
+normally, unchanged. This closes #192.
+
+## 2026-10-25 — #194: `ga`/`gr` reach Home's recently played rows and Library's favorite albums
+
+`ga` (open artist) and `gr` (open album) already worked on any row carrying
+a `TrackSummary` (#156, #164, #166): search, Home's other blocks, Library's
+Favorite Tracks, inside an opened album/playlist/artist/radio, and the
+queue. Two rows were left out, for different reasons.
+
+**Library's Favorite Albums rows** needed no new data: `AlbumSummary`
+already carries `artists: Vec<ArtistRef>` (it just wasn't wired up). `ga`
+there now opens the first credited artist via the same `open_artist_or_album`
+helper everything else uses; `gr` stays a no-op, since you're already on
+that album.
+
+**Home's recently played rows** needed a new id, since `PlayedTrack` (both
+the wire DTO in `phonia-ipc::dto` and the daemon-local one in
+`phonia-core::recent`) carried only the artist's *name*, no id, and no
+album at all. Added `artist_id: Option<String>` and `album_id:
+Option<String>` to both, `#[serde(default)]` on each (the core one for an
+on-disk `recently_played.json` saved by an older daemon; the wire one for
+an older client or daemon, same as every optional field before it), and
+bumped the protocol to 1.18. The daemon fills them in
+`Daemon::note_recently_played` (`crates/phoniad/src/daemon.rs`) from the
+matching queue entry's own `artist_id`/`album_id` (already resolved there
+for `QueueItem`, via a new `convert::artist_and_album_id` reading the same
+queue snapshot `convert::entry_of` already searches for the entry's
+source) — not from `engine::TrackMeta`, which carries neither. `gr` on such
+a row opens the album with a placeholder "Album" title and the row's own
+cover, the same way `gr` on a queue entry already does (`open_queue_album`),
+since the id is all that's known until the real answer arrives.
+
+Both gaps, and the fix for each, were already spelled out precisely when
+#194 was filed — this just carries out that plan. A played row from an
+older daemon (no ids sent) or an untagged local file makes `ga`/`gr` a
+no-op, exactly like a favorite album nobody credited an artist to; neither
+is an error, just nothing to open. This closes #194.
+
+## 2026-10-25 — #196 part 1: `fas`/`far`/`faa`/`fal` add, `fds`/`fdr`/`fda`/`fdl` remove TIDAL favorites
+
+`phonia` could only read favorites (`favorite_tracks`/`favorite_albums`/
+`favorite_artists`, all GET); there was no way to add or remove one without
+leaving the app. New wire request `Request::SetFavorite { kind: CatalogKind,
+id: String, favorite: bool }` (protocol → 1.19), answered with `Ack`;
+`Catalog::set_favorite` resolves to the real endpoint shape confirmed
+against the vendored `tidlers` crate (not called into, same as every other
+catalog call — see `remote.rs`'s own module doc): add is `POST
+/users/{user_id}/favorites/{tracks|albums|artists}` with form
+`trackIds`/`albumIds`/`artistIds` = one id; remove is `DELETE
+/users/{user_id}/favorites/{tracks|albums|artists}/{id}`.
+
+No row anywhere carries an "is this already a favorite" flag, and a first
+pass of this issue (planned with Opus) built a *context-based* toggle: the
+same `fs`/`fr`/`fa` keys removed when the row was already on a favorites
+list of that kind, added otherwise, mirroring how `Enter` already behaves
+differently by screen. The project owner rejected that shape after trying it
+live and asked for explicit, direction-carrying keys instead: `fas`/`far`/
+`faa`/`fal` always add (track/album/artist/playlist), `fds`/`fdr`/`fda`/
+`fdl` always remove — the direction is the key's, never the screen's. This
+is simpler, not just different: every dispatch site now resolves a row to a
+target id exactly once (the same `track_target`/`album_target` helpers
+`ga`/`gr` already used), with no per-screen branching on whether the row
+happens to already be a favorite. `Action::Favorite(CatalogKind, bool)`
+carries the direction from the key table itself.
+
+Both the chords and the leader key moved during review. The owner first
+asked for `fa`→`aa`, `fr`→`ad`, `fl`→`al`, `fs`→`as` (an `a`/`d` *leader*
+for add/delete), but `a` and `d` are already single-key bindings
+(`AddToQueue`, `RemoveEntry`) — `keymap::resolve` matches an exact key
+sequence before it looks for a longer one, so with `[a]` bound, `as` could
+never be typed. Moving those two to `aq`/`dd` was the fix an Opus-planned
+pass proposed, but it changes two keys used constantly for an unrelated
+reason, so the owner chose instead to keep the favorites keys three deep,
+under the otherwise-unused `f` leader (freed up now that the context-based
+`fs`/`fr`/`fa` are gone): `f` then `a`/`d` for the direction, then
+`s`/`r`/`a`/`l` for the kind. `a` and `d` alone are untouched.
+
+`fal`/`fdl` are bound now, but only resolve a target id from a search
+result's own `Selected::Playlist` row — following/unfollowing a playlist has
+no implemented endpoint yet (`Kind::Playlists` answers
+`CatalogError::Invalid`), so pressing them there reaches the daemon and
+surfaces that as `last_error`, honestly, rather than being a silent no-op.
+Every other playlist row (Library's Playlists tab, Home's folder block, an
+opened folder) stays a no-op for both chords, same as before: those rows are
+already in "My Collection", owned or followed indistinguishably, so adding
+again would do nothing and removing needs a distinction (`owned: bool`) that
+does not exist yet. No `Event::FavoriteChanged` either — nothing would
+consume it, since no DTO field shows favorite status anywhere; the client
+that made the change already gets the `Ack`. On a successful `Ack`, the TUI
+bumps the library's generation and refetches it (keeping the current tab),
+the same send-then-react-to-the-answer shape every other mutating action in
+this codebase already uses — no optimistic update.
+
+This is part 1 of 2. Part 2 needs a live-verified follow/unfollow playlist
+endpoint (none of `tidlers`, this repo, or TIDAL's documented API has one
+confirmed yet) before `fal`/`fdl` do anything on a real playlist; #196
+stays open until then.
+
+## 2026-10-26 — #198: scrolling lists remember their own window instead of recomputing it from nothing
+
+`view::first_visible(cursor, rows)` decided which row a list's window started at purely from the
+cursor's current position and the rows available -- it had no memory of where the window was a
+moment ago. Once the cursor was at `rows - 1` or past it, this pinned the cursor to the window's
+*last* row and recomputed the window from scratch on every move: a queue of 100 tracks with a
+10-row window, sitting on the last track, lost that track from view on the very first "up" press,
+because the window moved by one row for every single cursor step instead of staying put until the
+cursor actually reached its edge. The same function backed every scrollable list in the TUI
+(Queue, Home, Search, Library, and an opened album/playlist/artist page), so it was one bug, not
+five.
+
+The fix gives each list a persisted scroll offset, instead of a stateless recomputation, so the
+window only moves the minimum needed when the cursor would actually leave it:
+```
+scroll = if cursor < scroll { cursor }
+         else if cursor >= scroll + rows { cursor + 1 - rows }
+         else { scroll };
+scroll.min(len.saturating_sub(rows))   // never shows past the end of a shorter/shrunk list
+```
+(`view::keep_in_view`, replacing `first_visible`).
+
+The offset lives on `Cursor` itself (a new private `scroll` field, alongside `selected`), since
+every scrollable list already owns exactly one `Cursor` -- the queue's, Home's, each search tab's,
+each library tab's, and every browse view's (`TrackListView`/`ArtistView`/`FolderView`) -- so one
+field covers every list at every depth of every stack for free, and a freshly built `Cursor`
+(a new search, a newly pushed view) starts at scroll 0 with no extra code.
+
+The harder question was *where* the offset gets written back, given `view::draw(state: &State, ...)`
+is a pure read of `State` (by design -- it is what lets it be tested with plain values and
+ratatui's `TestBackend`) and the exact row count a given list renders at is a layout detail (cover
+sizes, wrapped bios, variable headers) that only `draw` itself actually knows. Making `draw` take
+`&mut State` was tried and rejected: `browse::draw` borrows a view stack out of the very `State` it
+also holds, so threading a mutable borrow through breaks down the first level in. Interior
+mutability (`Cell`) does not fit either: `Cursor` is `Copy` and copied by value in several places
+(`search.rs`'s `rows`, for one), and `Cell` is not `Copy`.
+
+What `draw` does instead: it stays a pure read, but now returns the scroll offset it drew the main
+panel's one visible list at (`Option<usize>`, `None` on Lyrics, which has no list, or when the
+terminal is too small to draw anything). The run loop (`lib.rs`'s new `paint` helper, wrapping the
+three places that used to call `terminal.draw(|frame| view::draw(...))` directly) takes that value
+and calls a new `State::remember_scroll(scroll)`, which writes it onto whichever `Cursor` `draw`
+just rendered -- found by the same section/stack rule `draw_main` itself uses, so it can never land
+on the wrong list. This is the one place besides `app::update` allowed to mutate `State`, and it
+only ever writes back what the frame just drawn already shows, so it needed no `Msg`, no redraw,
+and does not interact with `update`'s own before/after `Snapshot` comparison that decides whether
+to redraw at all (that snapshot is taken entirely within one `update` call, which never touches
+`scroll`).
+
+One visible side effect, deliberately kept, approved before implementing: the queue's window used
+to snap back to the top whenever the queue lost the focus (`draw_queue` passed `cursor: None` when
+unfocused, and the old stateless `first_visible` treated that as cursor 0). Now the window always
+tracks `queue_cursor`'s own position and stored scroll regardless of focus -- only the highlight
+still depends on it -- so switching focus away from the queue and back leaves it exactly where it
+was. This closes #198.
+
+## 2026-10-26 — #157 part 1: `mode = "auto"` is the new default, picking the DAC if one is plugged in
+
+Choosing the output used to be all-manual: with nothing in `[output]`, `mode` defaulted to
+`exclusive` with no device, so a fresh install (or this repo's own default config) refused to
+start until someone wrote a `device =` line by hand. Part 1 of #157 makes a third `OutputMode`
+value, `Auto`, the new `#[default]`: with a device named (on the command line or in the file) it
+plays there exclusively, exactly as before; with none named it looks for a USB sound card with a
+playback device (today's `first_usb_card`, the same heuristic `device = "auto"` already used, now
+shared through a new `first_usb` helper) and plays on it exclusively if found, bit-perfect with no
+config at all; with no device and no USB card it falls back to shared mode on the configured sink.
+This only changes behaviour for the one setup that failed outright before: everyone who already
+wrote `device = ...`, or who pinned `mode = "exclusive"` or `mode = "shared"` explicitly, keeps
+doing exactly what they did -- `Auto` only ever runs when both `mode` and `device` are left unset,
+and a pinned mode is never overridden by what hardware happens to be plugged in.
+
+The "is this the DAC" check stays deliberately crude: any USB card with a playback device counts,
+same as it always has for `device = "auto"`. A USB headset or webcam with an output would
+false-positive, but there is exactly one real USB audio device on the machine this was verified
+against (the Fosi Audio DS2), and a USB-Audio-Class check to rule out other device classes was not
+worth building for a problem nobody has hit.
+
+Detection reads `/proc/asound` once, synchronously, before `phoniad` opens anything
+(`Settings::output`, now backed by a testable `Settings::output_in(asound: &Path)` so the unit
+tests hand in a made-up tree instead of depending on whatever happens to be plugged into the CI
+machine or the developer's laptop). It is a one-shot decision made at startup: if the DAC is
+plugged in later, or unplugged mid-session, nothing currently reacts to that -- that is #157 part
+2 (falling back automatically when the DAC disconnects mid-track), see its own entry below.
+
+## 2026-10-27 — #157 part 2 (last): an unplugged DAC falls back to shared instead of failing the track — CLOSES #157
+
+Losing a shared output (a Bluetooth speaker switching off, PipeWire's stream closing) was already
+handled since #14: any sink's `write()` can fail with the typed `OutputGone` error, which
+`audio_thread.rs`'s `failed()` catches and turns into a pause with the position kept
+(`Event::OutputReleased{reason: Lost}`), instead of failing the track. ALSA (exclusive mode) never
+raised it: `AlsaSink::write_all` only special-cased `EPIPE` (an underrun), so a USB DAC physically
+unplugged mid-write surfaced as a generic ALSA error and failed the track outright -- exactly the
+complaint in the issue. The fix is one more arm in that same match: a write that fails with errno
+`ENODEV`, or whose PCM is left in the `Disconnected` state, is wrapped in `OutputGone` too, and the
+existing pause-and-keep-position machinery handles it for free, with no engine change.
+
+Found along the way, not asked for by the issue but required to land it safely: `AlsaSink::write`
+and `delay_frames` were calling `alsa::pcm::PCM::state()`, which **panics** if the raw ALSA state
+is negative or otherwise unrecognized -- exactly what a removed USB device can leave it at. Both
+now compare `PCM::state_raw()` (the non-panicking raw accessor) against the state constants
+directly, instead of going through the panicking wrapper. This was a latent crash waiting for
+real hardware, not a hypothetical: unplugging a DAC while `delay_frames` happened to be polled
+would have taken the whole audio thread down. Fixed as part of this PR since the whole point was
+making a DAC unplug survivable.
+
+The fallback itself: `Outputs` gained an optional `fallback: Option<OutputSpec>`, set only when
+the daemon was started in `mode = "auto"` (`#157` part 1) -- a `mode = "exclusive"` pinned by hand
+asked for bit-perfect on purpose, so losing the DAC there still just pauses, unchanged from before
+this PR; so does losing an output that was already shared (there is nothing further to fall back
+*to*). The daemon's event loop reacts to `OutputReleased{reason: Lost}` for an exclusive output by
+calling the exact same `Outputs::prepare` + `Controller::set_output` path a manual
+`phonia ctl output set` already used, moving the route to `Settings::shared()` (`shared:default`
+unless `sink` is pinned) right away -- nothing about "the output before the DAC" is remembered,
+since there is no such thing once the DAC was itself chosen automatically.
+
+It deliberately does **not** also send `Command::Resume`. The first version of this PR did, so
+losing the DAC in auto mode kept playing through the speakers with no action from the listener.
+Tried against the real hardware, that turned out to be the wrong default: the user asked for it
+to stay paused on the new output instead, the same way every other output loss already does, and
+resume it themselves (`phonia ctl resume`, Space in the TUI) -- the automatic part is only moving
+to an output that is actually ready to play on, not starting to play through the speakers by
+itself. This matches the one exception already on record: a `mode = "exclusive"` pin, or a lost
+output that was already shared, still neither switches nor resumes.
+
+Reacquiring the DAC automatically when it is replugged stays out of scope, exactly as part 1's
+entry said it would: there is still no hotplug watch for ALSA cards (only PipeWire's shared
+outputs have one via `watch_outputs`), and building one -- a poller or a udev/netlink watch, plus
+a state machine to avoid fighting a manual `output set` the user made meanwhile -- was judged not
+worth it for a one-DAC household. Today, getting back onto the DAC after a replug means a manual
+`phonia ctl output set exclusive:hw:DS2,0` or a daemon restart (which re-runs part 1's detection).
+This closes #157.
+
+## 2026-10-27 — #204: `shared:default` also notices when its device is gone, not only a named output
+
+Found while the user was trying #157's fallback by hand: the DAC was lost, phonia switched to
+`shared:default`, paused, resumed by hand onto the USB headphones that were the desktop's default
+at the time -- then the headphones themselves were unplugged, and nothing happened. Playback kept
+going, unnoticed, through whatever the sound server moved the stream to next (the laptop
+speakers). That turned out to be issue #14's own decision, working as designed: the `Watcher` in
+`output/shared/pulse.rs` only ever tracked a *named* output's sink index
+(`sink = named.then(|| (stream.sink(), ...))`); for `Target::Default` it passed `None`, so the
+`(Sink, Removed)` match guard could never be true, and `OutputGone` never fired for that case.
+
+The fix removes the `named.then(...)` gate: `sink` is now unconditionally `(stream.sink(),
+output.description.clone())`, for every target, and `Watcher::start`'s parameter changed from
+`Option<(u32, String)>` to a plain `(u32, String)` to match (it is always known at this point).
+`no_move` is untouched -- the stream still leaves PipeWire free to migrate it to the next default
+sink on its own -- but losing the *specific physical device* the stream was opened on now pauses
+phonia either way, exactly like a named output going away always has. Confirmed against a real
+PipeWire session with a null sink set as the default: `pactl set-default-sink <null>`, open a
+`Target::Default` stream, remove the sink, see `OutputGone` -- a new `#[ignore]`d test,
+`a_default_output_that_goes_away_is_reported_as_gone_too`, mirrors the existing named-output one.
+One timing note from writing that test: `pactl set-default-sink` returns as soon as the request is
+sent, not once the session manager has actually applied it, so the test polls `get-default-sink`
+rather than trusting a fixed sleep -- real desktop use has no such race, since the device was
+already the default for a while before it disappeared.
+
+This reopens #14's "`default` never gets lost" framing rather than replacing it: losing the
+*device* now pauses, but changing the default yourself (in the desktop's own settings, with
+nothing unplugged) still does not -- the stream simply follows, as `Target::Default`'s own doc
+comment always said it would, since no `Sink Removed` event fires for that.
+
+**Follow-up, same day, found testing the fix against real hardware:** the first version above
+watched a fixed sink index, captured once when the stream was opened. That is exactly wrong for
+`Target::Default`, whose whole point is that the device behind it can change over the stream's
+life -- the user's own test hit this immediately: DAC lost -> falls back to `shared:default` on
+whatever was default then (say, the laptop speakers) -> DAC plugged back in -> the desktop makes
+it the new default -> the stream silently follows there (`no_move` is still false) -> but the
+`Watcher` was still listening for the *speakers* to disappear, not the DAC, so unplugging the DAC
+a second time did nothing at all. `Watcher::start` now also takes the `Client` (only for
+`Target::Default`, as `follow_default: Option<Client>`; a named output still never moves, so it
+never needs this) and subscribes to `SubscriptionMask::SERVER` too; on `(Server, Changed)` it
+re-resolves `server_info().default_sink_name` and the matching `sink_info_by_name`, and updates the
+locally tracked `(index, name)` the removal check compares against -- all on the one watcher
+thread, no cross-thread state needed. Confirmed with a second real-server test,
+`a_default_output_is_watched_again_after_the_default_moves_to_a_new_device`: default starts on
+sink A, moves to sink B, dropping A does nothing, dropping B is noticed.
+
+## 2026-10-27 — #207 part 1: a playlist's, a radio's and an artist's top tracks show their artist and album
+
+User complaint: "en las listas solo se muestra el nombre de la canción y la duración" (the lists
+only show the song name and duration). A survey of every track list first (read-only, no code
+changed yet) found the complaint didn't apply everywhere: Search's Tracks tab, Library's Favorite
+Tracks tab and Home's favorites already rendered `"Artist - Title - Album - duration - quality"`
+via `fmt::track()` (`crates/phonia-ipc/src/fmt.rs`), since `TrackSummary` already carries
+`artists`/`album`. The real gaps were an opened album/playlist/radio and an artist's Top Tracks
+tab (`crates/phonia-tui/src/view/browse.rs`'s `track_rows`, used by all three), which used
+`fmt::track_short()` -- title, duration, quality, nothing else -- on the very same `TrackSummary`,
+the data just never shown; and the queue and Home's recently played, whose own DTOs don't carry an
+album title at all (only an id), which is part 2, not touched here.
+
+`track_rows` gained a `full: bool`: `true` picks `fmt::track()` (adds artist and album), `false`
+keeps `fmt::track_short()`. Decided per caller, not uniformly:
+- **An opened album**: stays short (`full = !matches!(view.header(), Header::Album(_))`). Its one
+  artist and this very album are already the header; repeating them on every row is noise. Known,
+  accepted limitation: a various-artists compilation loses each track's own artist this way --
+  not worth a fourth case for.
+- **An opened playlist or radio**: full. Their tracks come from anywhere, so both matter.
+- **An artist's Top Tracks tab**: full, always. The artist is implied by the page (and repeating
+  it is harmless -- it also surfaces features, e.g. "Korn, Skrillex" on a feature), but the album
+  is not, since top tracks span many albums.
+
+Part 2 (the queue and Home's recently played) needs a new field the daemon sends (an album title,
+alongside the album id each already carries) rather than a client-side lookup -- a local file has
+no catalog entry to look up at all, and looking up every queued TIDAL item individually doesn't
+scale -- following the exact precedent of how `QueueItem`/`PlayedTrack` already carry denormalized
+`title`/`artist` strings instead of ids alone. That is its own, still-open PR.
+
+## 2026-10-27 — #207 part 2, PR 1: the album title reaches the queue and the recently played log (protocol 1.20)
+
+Confirmed by reading the code (not assumed): the album title was already available, unused, at
+every point that fills a `QueueTrack`/`SourceInfo` -- TIDAL's catalog listing (`AlbumRef.title`,
+used by `queue_add_from`'s `accepted_from_catalog`), `TidalOpener::describe` (tidlers'
+`Track.album.title`, used by `queue_add`'s by-id path), and the recently played log, which already
+reads its `artist_id`/`album_id` off the matching queue entry rather than `TrackMeta` (#194
+precedent) -- so this needed no new TIDAL request anywhere, confirming the client-side-lookup
+option considered in part 1's entry would have been pure waste.
+
+New `album: Option<String>` field, added the same way everywhere its sibling `album_id` already
+exists: `QueueTrack`/`SourceInfo` (phonia-core), the `Accepted` tuple and `queue_track`/
+`accepted_from_catalog` (phoniad), `QueueItem`/`PlayedTrack` on the wire (phonia-ipc, protocol
+1.19 -> 1.20, additive). `convert::artist_and_album_id` (used by `note_recently_played`) grew from
+a 2-tuple to a 3-tuple returning the album title alongside the two ids, rather than adding a
+fourth ad hoc id-shaped value next to it -- same one place already reads the matching queue entry,
+so a third value is free.
+
+No UI change in this PR (Queue and Home's recently played row still render exactly as before) --
+that is PR 2, which also fixes the recently played row's separately-noticed missing duration in
+the same pass (approved alongside the album change, since both are one-line additions to the same
+row). Row format approved for both (see part 1's entry for why an opened album/playlist stays
+short): Queue keeps its own `"n. Artist - Title - Album  [duration]"` (bracketed duration, its own
+long-standing style); Home's recently played switches to `"Artist - Title - Album - duration"`,
+matching the favorites rows right next to it on the same screen.
+
+Verified against this real account, end to end through a scratch `phoniad` on a throwaway
+PipeWire null sink: adding a real track by id (`queue_add`'s `TidalOpener::describe` path) put
+`"album":"Untouchables"` on the wire exactly as expected (`tidal:33903008`, Korn - Here to Stay).
+The `queue_add_from`-listing path was covered by extending an existing integration test
+(`an_album_is_added_with_the_titles_and_lengths_that_came_with_its_listing`) rather than a separate
+live check, since it needs no network at all (`FakeCatalog`). A log saved before this field existed
+still loads, `album: None` (new `recent.rs` test), and a client on an older protocol decoding a
+wire message that already has `album` -- or a daemon stuck on this version answering a client built
+after it -- both just see `None`/the field is additive, pinned by a new golden compatibility test
+alongside the existing 1.x ones.
+
+## 2026-10-27 — #207 part 2, PR 2 (last): the queue and recently played actually show the album
+
+New `phonia_ipc::fmt::track_name_and_album` sits next to `track_name`: the same artist/title/
+source fallback chain, with the album appended only when both the title and the album are known
+(appending an album to a bare source id like `tidal:12345`, before a title ever arrives, would
+read as if the album were the title) and the album is not an empty string.
+
+Row formats approved earlier (part 1's entry) now actually land:
+- **Queue** (`view/mod.rs::queue_lines`, and `phonia ctl queue`'s own `format_queue`, decided
+  along with it for the same reason part 1 gave the TUI and the CLI the same rule) keeps its own
+  numbered, bracketed-duration style: `12. Korn - Here to Stay - Untouchables  [4:31]`.
+- **Home's recently played** (`view/home.rs`'s `Row::Played` arm) switches to
+  `Korn - Here to Stay - Untouchables - 4:31`, matching the favorites rows right next to it on the
+  same screen -- and, since it was a one-line addition right there, also shows the row's duration
+  for the first time (noticed missing while investigating part 1, approved as in-scope then).
+
+`phonia ctl recently_played`'s own `format_recent` was deliberately left untouched: unlike the
+queue, it already shows the raw source id on every line instead of an album, a different and
+older design choice this issue never asked to revisit.
+
+**#207 is now fully done, both parts, all 2+2 PRs merged.** Issue still open on GitHub as usual --
+close by hand.

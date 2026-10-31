@@ -137,9 +137,12 @@ async fn run(args: Args) -> Result<()> {
         )
     });
     let sinks = build(&output);
+    // Only an auto-detected output falls back by itself when lost: a pinned exclusive mode asked
+    // for bit-perfect on purpose, so losing the DAC pauses instead (#157).
+    let fallback = (settings.mode.value == config::OutputMode::Auto).then(|| settings.shared());
     let daemon = Daemon::start(DaemonParts {
         sinks,
-        outputs: Outputs::new(output.clone(), build),
+        outputs: Outputs::new(output.clone(), build).with_fallback(fallback),
         opener,
         quality: Some(quality),
         catalog: Some(catalog),

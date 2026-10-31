@@ -41,6 +41,18 @@ pub struct PlayedTrack {
     pub cover: Option<String>,
     /// When this play started, milliseconds since the epoch.
     pub played_at_ms: u64,
+    /// The id of the track's first credited artist; `None` for a local file, a TIDAL track with
+    /// no artist credited, or a log saved before this field existed.
+    #[serde(default)]
+    pub artist_id: Option<String>,
+    /// The id of the track's album; `None` for a local file, a TIDAL track with no album, or a
+    /// log saved before this field existed.
+    #[serde(default)]
+    pub album_id: Option<String>,
+    /// The track's album's title; `None` for a local file, a TIDAL track with no album, or a
+    /// log saved before this field existed.
+    #[serde(default)]
+    pub album: Option<String>,
 }
 
 /// The log itself: most recent first, deduplicated by source (playing something again moves it
@@ -196,6 +208,9 @@ mod tests {
             duration_ms: Some(200_000),
             cover: None,
             played_at_ms,
+            artist_id: None,
+            album_id: None,
+            album: None,
         }
     }
 
@@ -299,6 +314,20 @@ mod tests {
         let path = dir.join(STATE_FILE);
         fs::write(&path, b"not json at all").unwrap();
         assert_eq!(load(&path), RecentlyPlayed::default());
+    }
+
+    #[test]
+    fn a_log_saved_before_the_album_title_field_existed_still_loads() {
+        let dir = temp_dir("pre-album-field");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(STATE_FILE);
+        fs::write(
+            &path,
+            br#"{"items":[{"source":"tidal:1","title":"t","artist":null,"duration_ms":1000,"cover":null,"played_at_ms":1000,"artist_id":null,"album_id":null}]}"#,
+        )
+        .unwrap();
+        let loaded = load(&path);
+        assert_eq!(loaded.items()[0].album, None);
     }
 
     #[test]

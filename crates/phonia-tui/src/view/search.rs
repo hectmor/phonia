@@ -1,6 +1,6 @@
 //! The search section: the line being typed, the tabs, and the list of what was found.
 
-use super::first_visible;
+use super::keep_in_view;
 use super::{TabLabel, tabs_line};
 use crate::app::{Focus, State};
 use crate::lyrics;
@@ -15,7 +15,7 @@ use ratatui::widgets::Paragraph;
 /// The columns taken before the text of the line: `/ `.
 const PROMPT: usize = 2;
 
-pub fn draw(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
+pub fn draw(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) -> Option<usize> {
     let [input, tabs, list] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
@@ -24,7 +24,7 @@ pub fn draw(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
     .areas(area);
     draw_input(state, theme, frame, input);
     draw_tabs(state, theme, frame, tabs);
-    draw_list(state, theme, frame, list);
+    draw_list(state, theme, frame, list)
 }
 
 fn draw_input(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
@@ -62,20 +62,24 @@ fn draw_tabs(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(tabs_line(&tabs, area.width, theme)), area);
 }
 
-fn draw_list(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) {
+fn draw_list(state: &State, theme: &Theme, frame: &mut Frame, area: Rect) -> Option<usize> {
     let search = &state.search;
-    let lines = match &search.phase {
-        Phase::Idle => vec![Line::styled("Press / to search TIDAL.", theme.dim)],
-        Phase::Searching => vec![Line::styled("Searching...", theme.dim)],
-        Phase::Failed(reason) => vec![Line::styled(reason.clone(), theme.error)],
+    let (lines, shown) = match &search.phase {
+        Phase::Idle => (
+            vec![Line::styled("Press / to search TIDAL.", theme.dim)],
+            None,
+        ),
+        Phase::Searching => (vec![Line::styled("Searching...", theme.dim)], None),
+        Phase::Failed(reason) => (vec![Line::styled(reason.clone(), theme.error)], None),
         Phase::Done => rows(state, theme, usize::from(area.height)),
     };
     frame.render_widget(Paragraph::new(lines), area);
+    shown
 }
 
 /// The rows of the current tab that fit in `height`, the one under the cursor highlighted when the
-/// list has the focus.
-fn rows<'a>(state: &State, theme: &Theme, height: usize) -> Vec<Line<'a>> {
+/// list has the focus, and the scroll offset they were drawn at (`None` on an empty tab).
+fn rows<'a>(state: &State, theme: &Theme, height: usize) -> (Vec<Line<'a>>, Option<usize>) {
     let search = &state.search;
     let texts: Vec<String> = match search.tab {
         Tab::Tracks => search.tracks.items.iter().map(fmt::track).collect(),
@@ -85,18 +89,22 @@ fn rows<'a>(state: &State, theme: &Theme, height: usize) -> Vec<Line<'a>> {
     };
     if texts.is_empty() {
         let what = search.tab.title().to_lowercase();
-        return vec![Line::styled(
-            format!("No {what} for {:?}.", search.query),
-            theme.dim,
-        )];
+        return (
+            vec![Line::styled(
+                format!("No {what} for {:?}.", search.query),
+                theme.dim,
+            )],
+            None,
+        );
     }
     let cursor = match search.tab {
         Tab::Tracks => search.tracks.cursor,
         Tab::Albums => search.albums.cursor,
         Tab::Artists => search.artists.cursor,
         Tab::Playlists => search.playlists.cursor,
-    }
-    .selected();
+    };
+    let selected = cursor.selected();
+    let start = keep_in_view(cursor.scroll(), selected, texts.len(), height);
     let focused = state.focus == Focus::Main && !search.editing;
     // Artists and playlists have nothing in `status.track` to compare against, so only Tracks (by
     // TIDAL id) and Albums (by the album's own cover id, which a track carries too) ever mark a
@@ -107,10 +115,10 @@ fn rows<'a>(state: &State, theme: &Theme, height: usize) -> Vec<Line<'a>> {
         .and_then(|status| status.track.as_ref());
     let now_playing_track = playing.and_then(lyrics::tidal_id);
     let now_playing_album_cover = playing.and_then(|track| track.cover.as_deref());
-    texts
+    let lines = texts
         .into_iter()
         .enumerate()
-        .skip(first_visible(cursor, height))
+        .skip(start)
         .take(height.max(1))
         .map(|(index, text)| {
             let current = match search.tab {
@@ -133,7 +141,7 @@ fn rows<'a>(state: &State, theme: &Theme, height: usize) -> Vec<Line<'a>> {
             // Same marker as the queue's own current entry (see `queue_lines`), so the track or
             // album playing stands out even on a row the cursor also happens to be on.
             let marker = if current { ">" } else { " " };
-            let style = if focused && index == cursor {
+            let style = if focused && index == selected {
                 theme.selected
             } else if current {
                 theme.accent
@@ -142,5 +150,6 @@ fn rows<'a>(state: &State, theme: &Theme, height: usize) -> Vec<Line<'a>> {
             };
             Line::styled(format!("{marker}{:>4}. {text}", index + 1), style)
         })
-        .collect()
+        .collect();
+    (lines, Some(start))
 }

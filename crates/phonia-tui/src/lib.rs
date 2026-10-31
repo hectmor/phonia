@@ -4,12 +4,17 @@
 //! The shape is a small Elm: [`app::update`] turns a message into a change of the [`app::State`]
 //! and a list of things to do, and [`view::draw`] paints a state. Both are pure, so they are
 //! tested with plain values and ratatui's `TestBackend`; only [`run`] talks to the terminal.
+//! `draw` also returns the scroll offset it drew the main panel's list at (see
+//! [`view::keep_in_view`]), which `paint` below stores back onto `State` with
+//! [`app::State::remember_scroll`] right after drawing -- the one place outside `update` allowed
+//! to change `State`, and only ever with what the frame just drawn already shows.
 
 pub mod app;
 pub mod browse;
 pub mod conn;
 pub mod covers;
 pub mod cursor;
+pub mod daemon;
 pub mod graphics;
 pub mod home;
 pub mod input;
@@ -21,31 +26,62 @@ pub mod search;
 pub mod theme;
 pub mod view;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use app::{Cmd, Msg, State, TICK};
 use covers::{Covers, Outcome};
 use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures_util::StreamExt;
 use phonia_ipc::{Client, ClientInfo};
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use theme::Theme;
+use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::{Notify, mpsc};
 
 /// Runs the interface until the user quits. Takes over the terminal, and gives it back whatever
 /// happens: on an error, and on a panic too.
-pub async fn run(socket: PathBuf, cover_mode: graphics::CoverMode) -> Result<()> {
+pub async fn run(
+    socket: PathBuf,
+    config: Option<&Path>,
+    cover_mode: graphics::CoverMode,
+) -> Result<()> {
     if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
         bail!("phonia tui needs a terminal; use `phonia ctl` for scripts and pipes");
     }
+    // Fails before the terminal is touched at all, so a bad theme.toml never flashes the
+    // alternate screen just to quit right back out of it.
+    let theme = Theme::load()?;
+    // Installed before starting (or not) a daemon of our own, so a signal arriving mid-startup
+    // can't slip past before there is anywhere to catch it.
+    let mut hangup = signal(SignalKind::hangup()).context("installing the SIGHUP handler")?;
+    let mut terminate =
+        signal(SignalKind::terminate()).context("installing the SIGTERM handler")?;
+    let owned = daemon::start_if_absent(&socket, config).await?;
     // Installs a panic hook that restores the terminal before the message is printed.
     let mut terminal = ratatui::init();
     // Queries the terminal for graphics support, per `graphics::setup`'s own requirement: after
     // entering the alternate screen (just above), before reading any terminal event (below).
     let picker = graphics::setup(cover_mode);
-    let result = event_loop(&mut terminal, socket, picker).await;
-    ratatui::restore();
+    let result = event_loop(
+        &mut terminal,
+        socket,
+        picker,
+        theme,
+        &mut hangup,
+        &mut terminate,
+    )
+    .await;
+    // Before restore: after a hangup the terminal may already be gone, and ratatui::restore()'s
+    // own eprintln on failure must not skip stopping a daemon we own.
+    if let Some(owned) = owned {
+        owned.stop().await;
+    }
+    // Not `ratatui::restore()`: on a real hangup the tty is gone, so its own failed-restore
+    // `eprintln!` would also fail to write, panic, and abort the process via the panic hook's
+    // second failing `restore()` -- a crash that only became reachable once SIGHUP stopped being
+    // instantly fatal.
+    let _ = ratatui::try_restore();
     result
 }
 
@@ -53,8 +89,10 @@ async fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     socket: PathBuf,
     picker: Option<ratatui_image::picker::Picker>,
+    theme: Theme,
+    hangup: &mut Signal,
+    terminate: &mut Signal,
 ) -> Result<()> {
-    let theme = Theme::detect();
     let mut state = State::default();
     let mut covers = Covers::new(picker);
     let size = terminal.size()?;
@@ -73,18 +111,20 @@ async fn event_loop(
         requests_rx,
     ));
     let mut tick = tokio::time::interval(TICK);
-    terminal.draw(|frame| view::draw(&state, &theme, &covers, frame))?;
+    paint(terminal, &mut state, &theme, &covers)?;
     maybe_fetch_cover(&state, &mut covers, terminal.size()?, &cover_done);
 
     while !state.quit {
         let msg = tokio::select! {
+            _ = hangup.recv() => break,
+            _ = terminate.recv() => break,
             _ = tick.tick() => Msg::Tick,
             Some(msg) = from_daemon.recv() => msg,
             Some((url, cells, outcome)) = cover_results.recv() => {
                 // Not an `app::Msg`: covers are a resource for drawing, not app state (see
                 // `covers.rs`), so this redraws directly instead of going through `app::update`.
                 covers.finish(url, cells, outcome);
-                terminal.draw(|frame| view::draw(&state, &theme, &covers, frame))?;
+                paint(terminal, &mut state, &theme, &covers)?;
                 continue;
             }
             event = events.next() => match event {
@@ -114,8 +154,24 @@ async fn event_loop(
         maybe_fetch_cover(&state, &mut covers, terminal.size()?, &cover_done);
         // Painting is the expensive part: only when something changed.
         if effects.redraw && !state.quit {
-            terminal.draw(|frame| view::draw(&state, &theme, &covers, frame))?;
+            paint(terminal, &mut state, &theme, &covers)?;
         }
+    }
+    Ok(())
+}
+
+/// Draws one frame and stores back where it left the main panel's list scrolled to, so the next
+/// one picks up from there instead of recomputing the window from nothing (see the module doc).
+fn paint(
+    terminal: &mut ratatui::DefaultTerminal,
+    state: &mut State,
+    theme: &Theme,
+    covers: &Covers,
+) -> Result<()> {
+    let mut shown = None;
+    terminal.draw(|frame| shown = view::draw(state, theme, covers, frame))?;
+    if let Some(scroll) = shown {
+        state.remember_scroll(scroll);
     }
     Ok(())
 }

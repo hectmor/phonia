@@ -1,10 +1,11 @@
 //! An album, a playlist or an artist, opened to see its music.
 
-use super::first_visible;
+use super::keep_in_view;
 use super::{TabLabel, tabs_line};
 use crate::app::{Focus, State};
 use crate::browse::{ArtistTab, ArtistView, FolderView, Header, Phase, Stack, TrackListView, View};
 use crate::covers::{self, Covers};
+use crate::cursor::Cursor;
 use crate::lyrics;
 use crate::theme::Theme;
 use phonia_ipc::{AlbumSummary, FolderEntry, TrackSummary, fmt};
@@ -22,12 +23,12 @@ pub fn draw(
     covers: &Covers,
     frame: &mut Frame,
     area: Rect,
-) {
+) -> Option<usize> {
     match stack.top() {
         Some(View::TrackList(view)) => draw_track_list(state, view, theme, covers, frame, area),
         Some(View::Artist(view)) => draw_artist(state, view, theme, covers, frame, area),
         Some(View::Folder(view)) => draw_folder(state, view, theme, frame, area),
-        None => {}
+        None => None,
     }
 }
 
@@ -38,7 +39,7 @@ fn draw_track_list(
     covers: &Covers,
     frame: &mut Frame,
     area: Rect,
-) {
+) -> Option<usize> {
     let header_lines = header_lines(view.header(), theme);
     // The cover's own space is reserved whenever one *could* show here (a picker, a cover id to
     // show, and room enough), whether or not it has actually finished fetching yet: the layout
@@ -82,19 +83,23 @@ fn draw_track_list(
     frame.render_widget(Paragraph::new(header_lines), header_area);
     let focused = state.focus == Focus::Main;
     let now_playing = now_playing_tidal_id(state);
-    let lines = match &view.phase {
-        Phase::Loading => vec![Line::styled("Loading...", theme.dim)],
-        Phase::Failed(reason) => vec![Line::styled(reason.clone(), theme.error)],
+    let (lines, shown) = match &view.phase {
+        Phase::Loading => (vec![Line::styled("Loading...", theme.dim)], None),
+        Phase::Failed(reason) => (vec![Line::styled(reason.clone(), theme.error)], None),
         Phase::Done => track_rows(
             &view.tracks.items,
-            view.tracks.cursor.selected(),
+            view.tracks.cursor,
             focused,
             now_playing,
             usize::from(list_area.height),
             theme,
+            // An album's tracks share its one artist and this very album, both already in the
+            // header; a playlist's or a radio's span different artists and albums, so show both.
+            !matches!(view.header(), Header::Album(_)),
         ),
     };
     frame.render_widget(Paragraph::new(lines), list_area);
+    shown
 }
 
 /// The TIDAL id of the track playing now, when there is one (see `lyrics::tidal_id`).
@@ -136,20 +141,24 @@ fn header_lines(header: &Header, theme: &Theme) -> Vec<Line<'static>> {
 
 /// The tracks, numbered as they are on the album or the playlist, the one under the cursor
 /// highlighted when the list has the focus, the one playing marked the same way the queue marks
-/// its own current entry, and one TIDAL will not stream dimmed.
+/// its own current entry, and one TIDAL will not stream dimmed. `full` adds the artist and the
+/// album to each row (`fmt::track`); without it (`fmt::track_short`) both are left out, for an
+/// album's own tracks, where the header already names the one artist and this is the album.
 fn track_rows<'a>(
     tracks: &[TrackSummary],
-    cursor: usize,
+    cursor: Cursor,
     focused: bool,
     now_playing: Option<&str>,
     height: usize,
     theme: &Theme,
-) -> Vec<Line<'a>> {
+    full: bool,
+) -> (Vec<Line<'a>>, Option<usize>) {
     if tracks.is_empty() {
-        return vec![Line::styled("No tracks.", theme.dim)];
+        return (vec![Line::styled("No tracks.", theme.dim)], None);
     }
-    let start = first_visible(cursor, height);
-    tracks
+    let selected = cursor.selected();
+    let start = keep_in_view(cursor.scroll(), selected, tracks.len(), height);
+    let lines = tracks
         .iter()
         .enumerate()
         .skip(start)
@@ -158,8 +167,13 @@ fn track_rows<'a>(
             let number = track.track_number.map_or(index + 1, |n| n as usize);
             let current = now_playing.is_some_and(|id| track.id == id);
             let marker = if current { ">" } else { " " };
-            let text = format!("{marker}{number:>3}. {}", fmt::track_short(track));
-            let style = if focused && index == cursor {
+            let described = if full {
+                fmt::track(track)
+            } else {
+                fmt::track_short(track)
+            };
+            let text = format!("{marker}{number:>3}. {described}");
+            let style = if focused && index == selected {
                 theme.selected
             } else if current {
                 theme.accent
@@ -170,7 +184,8 @@ fn track_rows<'a>(
             };
             Line::styled(text, style)
         })
-        .collect()
+        .collect();
+    (lines, Some(start))
 }
 
 /// An artist's albums or its EPs and singles, numbered from where the page starts, the one the
@@ -178,17 +193,18 @@ fn track_rows<'a>(
 /// same way the queue marks its current entry.
 fn album_rows<'a>(
     albums: &[AlbumSummary],
-    cursor: usize,
+    cursor: Cursor,
     focused: bool,
     now_playing_cover: Option<&str>,
     height: usize,
     theme: &Theme,
-) -> Vec<Line<'a>> {
+) -> (Vec<Line<'a>>, Option<usize>) {
     if albums.is_empty() {
-        return vec![Line::styled("No albums.", theme.dim)];
+        return (vec![Line::styled("No albums.", theme.dim)], None);
     }
-    let start = first_visible(cursor, height);
-    albums
+    let selected = cursor.selected();
+    let start = keep_in_view(cursor.scroll(), selected, albums.len(), height);
+    let lines = albums
         .iter()
         .enumerate()
         .skip(start)
@@ -198,7 +214,7 @@ fn album_rows<'a>(
                 now_playing_cover.is_some_and(|cover| album.cover.as_deref() == Some(cover));
             let marker = if current { ">" } else { " " };
             let text = format!("{marker}{:>3}. {}", index + 1, fmt::album(album));
-            let style = if focused && index == cursor {
+            let style = if focused && index == selected {
                 theme.selected
             } else if current {
                 theme.accent
@@ -207,7 +223,8 @@ fn album_rows<'a>(
             };
             Line::styled(text, style)
         })
-        .collect()
+        .collect();
+    (lines, Some(start))
 }
 
 fn row_line<'a>(text: String, selected: bool, focused: bool, dim: bool, theme: &Theme) -> Line<'a> {
@@ -228,7 +245,7 @@ fn draw_artist(
     covers: &Covers,
     frame: &mut Frame,
     area: Rect,
-) {
+) -> Option<usize> {
     // Same rule as an album's or a playlist's header (see `draw_track_list`): reserved only when
     // a picture could actually show here, never on whether it has arrived yet. The tabs stay full
     // width, under the picture and the text alike.
@@ -290,21 +307,24 @@ fn draw_artist(
         );
     }
     let focused = state.focus == Focus::Main;
-    let lines = match &view.phase {
-        Phase::Loading => vec![Line::styled("Loading...", theme.dim)],
-        Phase::Failed(reason) => vec![Line::styled(reason.clone(), theme.error)],
+    let (lines, shown) = match &view.phase {
+        Phase::Loading => (vec![Line::styled("Loading...", theme.dim)], None),
+        Phase::Failed(reason) => (vec![Line::styled(reason.clone(), theme.error)], None),
         Phase::Done => match view.tab {
             ArtistTab::TopTracks => track_rows(
                 &view.top_tracks.items,
-                view.top_tracks.cursor.selected(),
+                view.top_tracks.cursor,
                 focused,
                 now_playing_tidal_id(state),
                 usize::from(list_area.height),
                 theme,
+                // Top tracks span many albums; repeating the one artist is harmless (and shows
+                // features, e.g. "Korn, Skrillex").
+                true,
             ),
             ArtistTab::Albums => album_rows(
                 &view.albums.items,
-                view.albums.cursor.selected(),
+                view.albums.cursor,
                 focused,
                 now_playing_album_cover(state),
                 usize::from(list_area.height),
@@ -312,7 +332,7 @@ fn draw_artist(
             ),
             ArtistTab::Singles => album_rows(
                 &view.singles.items,
-                view.singles.cursor.selected(),
+                view.singles.cursor,
                 focused,
                 now_playing_album_cover(state),
                 usize::from(list_area.height),
@@ -321,11 +341,18 @@ fn draw_artist(
         },
     };
     frame.render_widget(Paragraph::new(lines), list_area);
+    shown
 }
 
 /// A playlist folder: its own name, then its contents (sub-folders first, then playlists, the
 /// order TIDAL's own API already sorts them in -- nothing to re-sort here).
-fn draw_folder(state: &State, view: &FolderView, theme: &Theme, frame: &mut Frame, area: Rect) {
+fn draw_folder(
+    state: &State,
+    view: &FolderView,
+    theme: &Theme,
+    frame: &mut Frame,
+    area: Rect,
+) -> Option<usize> {
     let [header_area, list_area] =
         Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
     frame.render_widget(
@@ -336,43 +363,49 @@ fn draw_folder(state: &State, view: &FolderView, theme: &Theme, frame: &mut Fram
         header_area,
     );
     let focused = state.focus == Focus::Main;
-    let lines = match &view.phase {
-        Phase::Loading => vec![Line::styled("Loading...", theme.dim)],
-        Phase::Failed(reason) => vec![Line::styled(reason.clone(), theme.error)],
+    let (lines, shown) = match &view.phase {
+        Phase::Loading => (vec![Line::styled("Loading...", theme.dim)], None),
+        Phase::Failed(reason) => (vec![Line::styled(reason.clone(), theme.error)], None),
         Phase::Done => folder_rows(
             &view.entries.items,
-            view.entries.cursor.selected(),
+            view.entries.cursor,
             focused,
             usize::from(list_area.height),
             theme,
         ),
     };
     frame.render_widget(Paragraph::new(lines), list_area);
+    shown
 }
 
 /// A folder's own entries: a sub-folder ends with `/` and how many entries it has; a playlist
 /// prints exactly as it does everywhere else.
 fn folder_rows<'a>(
     entries: &[FolderEntry],
-    cursor: usize,
+    cursor: Cursor,
     focused: bool,
     height: usize,
     theme: &Theme,
-) -> Vec<Line<'a>> {
+) -> (Vec<Line<'a>>, Option<usize>) {
     if entries.is_empty() {
-        return vec![Line::styled("Nothing in this folder.", theme.dim)];
+        return (
+            vec![Line::styled("Nothing in this folder.", theme.dim)],
+            None,
+        );
     }
-    let start = first_visible(cursor, height);
-    entries
+    let selected = cursor.selected();
+    let start = keep_in_view(cursor.scroll(), selected, entries.len(), height);
+    let lines = entries
         .iter()
         .enumerate()
         .skip(start)
         .take(height.max(1))
         .map(|(index, entry)| {
             let text = format!("{:>3}. {}", index + 1, folder_entry_text(entry));
-            row_line(text, index == cursor, focused, false, theme)
+            row_line(text, index == selected, focused, false, theme)
         })
-        .collect()
+        .collect();
+    (lines, Some(start))
 }
 
 /// The one line a folder entry shows: a sub-folder's name with a trailing `/` and its item

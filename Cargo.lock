@@ -2017,7 +2017,7 @@ dependencies = [
 
 [[package]]
 name = "phonia"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2032,7 +2032,7 @@ dependencies = [
 
 [[package]]
 name = "phonia-core"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "alsa",
  "anyhow",
@@ -2058,7 +2058,7 @@ dependencies = [
 
 [[package]]
 name = "phonia-ipc"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "reqwest",
  "serde",
@@ -2068,23 +2068,27 @@ dependencies = [
 
 [[package]]
 name = "phonia-tui"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "crossterm",
+ "dirs",
  "futures-util",
  "image",
+ "libc",
  "phonia-ipc",
  "ratatui",
  "ratatui-image",
  "reqwest",
+ "serde",
  "serde_json",
  "tokio",
+ "toml",
 ]
 
 [[package]]
 name = "phoniad"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "clap",

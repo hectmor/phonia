@@ -31,7 +31,8 @@ track is in [AUDIO.md](AUDIO.md). Start at the [README](../README.md).
   -- Decodes and plays local files (FLAC or fMP4), one after another, through the same playback
   engine and ALSA output, without touching TIDAL. Useful for testing the DAC in isolation.
 
-- **`phonia tui [--socket <path>]`** -- the terminal interface, a client of a running `phoniad`. It
+- **`phonia tui [--socket <path>]`** -- the terminal interface, a client of `phoniad`: one you
+  started, or one it starts itself when nothing answers yet (#192, see "The daemon" below). It
   has a sidebar (Home, Queue, Search, Library, Lyrics), a main panel and a bar at the bottom. It
   opens on Home (#139). Its first row, "Continue", picks up whatever the queue was doing: resumes
   a paused track at its exact position, replays a stopped one from the start, or starts the queue
@@ -75,10 +76,13 @@ track is in [AUDIO.md](AUDIO.md). Start at the [README](../README.md).
   track playing instead, also without playing, and the bar says how many tracks went in. On an
   album, a playlist or an artist, `Enter` opens it. An album or a playlist shows its title,
   artists, year, quality and copyright, then its tracks, numbered as on it, with the ones TIDAL
-  will not stream dimmed; `a`/`A` there still add the whole thing. An artist's page shows its
-  name, the start of its bio, and three tabs, its top tracks, its albums, and its EPs and singles
-  (`[`/`]` switch between them), each with its own count; `a`/`A` on the artist itself add its top
-  tracks whole. Inside any of these, `Enter` on a track queues the whole of it (the album, the
+  will not stream dimmed; `a`/`A` there still add the whole thing. A track's own row leaves out
+  the album's title and, inside an album, its one artist too, since the header already says both;
+  a playlist's or a radio's tracks show both, since they can come from anywhere. An artist's page
+  shows its name, the start of its bio, and three tabs, its top tracks, its albums, and its EPs
+  and singles (`[`/`]` switch between them), each with its own count; `a`/`A` on the artist itself
+  add its top tracks whole. Its top tracks show each one's album too, since they can come from any
+  of them. Inside any of these, `Enter` on a track queues the whole of it (the album, the
   playlist, or the artist's top tracks) at the end of the queue -- the same as `a` on the album
   row itself -- and starts at the one under the cursor (skipping, in the count, any track before
   it that TIDAL will not stream); `a`/`A` add just that track, without playing. `Enter` on an
@@ -94,7 +98,12 @@ track is in [AUDIO.md](AUDIO.md). Start at the [README](../README.md).
   search result does (`Library › Issues`), with the same `Enter`/`a`/`A` and closing behaviour; a
   favorite track is the one exception to how a track inside an opened list behaves elsewhere:
   `Enter` plays just that one track, without queuing the rest of the list too, since a list of
-  favorites has no natural order and can run into the thousands. **`--covers
+  favorites has no natural order and can run into the thousands. A track, album, artist or
+  playlist under the cursor -- in a search result, a Library tab, a Home block, an opened view or
+  the queue -- can be added to or removed from TIDAL's favorites: `fas`/`far`/`faa`/`fal` add the
+  track, album, artist or playlist; `fds`/`fdr`/`fda`/`fdl` remove it. The direction is the key's,
+  not the screen's, and nothing changes on screen until the daemon answers (#196); following or
+  unfollowing a playlist (`fal`/`fdl`) is not implemented yet and comes back as an error. **`--covers
   auto|halfblocks|off`** (default `auto`) controls its covers (#24): an opened album's or
   playlist's header, an opened artist's own page, and the **Queue** section's own currently
   playing track show their cover or picture beside their text (the
@@ -104,7 +113,8 @@ track is in [AUDIO.md](AUDIO.md). Start at the [README](../README.md).
   through a real graphics protocol (Kitty, Sixel, iTerm2) when the
   terminal has one; `halfblocks` (24-bit colour, `▀`/`▄` characters) only when the
   terminal says it has true colour, so `theme.rs`'s own 16-ANSI-colours rule is never broken by
-  accident; with neither, no cover shows, rather than one that looks wrong. A cover is fetched
+  accident (unless a palette is chosen in `theme.toml`, see [CONFIGURATION.md](CONFIGURATION.md));
+  with neither, no cover shows, rather than one that looks wrong. A cover is fetched
   straight from TIDAL's public image CDN, which needs no TIDAL session, so this is the one thing
   the interface reaches the network for directly (see [DECISIONS.md](DECISIONS.md), 2026-10-01). The bar's
   own **signal path line** (#28) shows what is playing, through what format, to which device, with
@@ -115,9 +125,19 @@ track is in [AUDIO.md](AUDIO.md). Start at the [README](../README.md).
   natively; ...`, #25's own precise reason) in place of `phonia`'s otherwise bare "Stopped", until
   the next track actually starts or a fresh verdict arrives. Other keys
   are vim-like: `j`/`k` (or the arrows) move, `gg` and `G` go to the ends, `Ctrl-d`/`Ctrl-u` move
-  half a page, `h`/`l`/`Tab` change panel, `1`-`3` jump to a section, `?` shows the keys (and
+  half a page, `h`/`l`/`Tab` change panel, `1`-`5` jump to a section, `?` shows the keys (and
   scrolls with `j`/`k` when the terminal is too short for it) and `q` (or `Ctrl-c`) quits. The help
-  is drawn from the same table the keys are read from, so it cannot go out of date. It needs a
+  is drawn from the same table the keys are read from, so it cannot go out of date. The whole
+  layout follows the terminal it is given (#175): every panel measures the area it is really drawn
+  in rather than assuming the 80x24 phonia targets, so the bar's key hints fall back through
+  tiers of 88, 59, 36 and 14 columns as the state flags take theirs (the flags win: they are
+  state, the hints only a reminder of what `?` lists in full), and a row of tabs shows names with
+  counts, then names alone, then `< selected name >`. Below 60 columns the sidebar is not drawn at
+  all and the main panel takes its 14 columns -- the panel's title still names the section and
+  `1`-`5` still switch it, so nothing becomes unreachable. Below 40x10 the panels would be borders
+  around nothing, so it draws a centred message with the size it needs, the size there is, and how
+  to quit. A scrolling list holds its window still until the cursor reaches the edge (#198), the
+  way an editor does, instead of recentring on every move. It needs a
   terminal, and says so when it is run from a pipe.
 
 - **`--shuffle` / `--repeat`** (on `play` and `play-file`): the tracks form a queue. `--shuffle`
@@ -210,6 +230,13 @@ phonia ctl shutdown
   daemon that was killed is replaced.
 - `phoniad --verbose` prints the library's own notes and warnings; by default it prints nothing to
   stdout.
+- **`phonia tui` starts its own `phoniad`** when nothing answers yet on the socket (same `--socket`,
+  and `--config` if one was given), and stops only that one -- on quit, on SIGTERM, or when the
+  terminal closes -- never a daemon it didn't start. Its output goes to
+  `~/.local/state/phonia/phoniad.log`. Running `phoniad` yourself (by hand, or later as a systemd
+  user service) keeps working exactly as above; the TUI never touches it. If a second TUI attaches
+  to the first TUI's self-started daemon, it loses that daemon when the first TUI quits -- run
+  `phoniad` yourself first if it should outlive any one TUI session.
 
 ### The protocol
 
@@ -217,7 +244,7 @@ One connection carries requests, their responses and, once subscribed, events, a
 JSON, so `socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/phonia/phoniad.sock` is a working client:
 
 ```
-< {"type":"hello","protocol":{"major":1,"minor":6},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","catalog"]}
+< {"type":"hello","protocol":{"major":1,"minor":19},"server":{"name":"phoniad","version":"1.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","recently_played","catalog","lyrics","autoplay"]}
 > {"id":1,"request":{"type":"hello","protocol":{"major":1,"minor":0},"client":{"name":"me","version":"0"}}}
 < {"type":"response","id":1,"ok":{"type":"ack"}}
 > {"id":2,"request":{"type":"subscribe"}}

@@ -1,19 +1,19 @@
 # Configuration
 
-The complete `config.toml` reference, what every setting does, and where the
-TIDAL login is kept. The commands these settings affect are in
-[USAGE.md](USAGE.md); the audio behaviour they select is in
+The complete `config.toml` reference, what every setting does, the TUI's own
+theme file, and where the TIDAL login is kept. The commands these settings
+affect are in [USAGE.md](USAGE.md); the audio behaviour they select is in
 [AUDIO.md](AUDIO.md). Start at the [README](../README.md).
 
 ## The config file
 
 The settings live in `~/.config/phonia/config.toml` (`$XDG_CONFIG_HOME/phonia/`). Nothing is
-required to exist except the audio device (in exclusive mode):
+required to exist:
 
 ```toml
 [output]
 device = "hw:DS2,0"     # a sound card: `phonia devices` lists them. "auto" = the first USB card.
-mode = "exclusive"      # exclusive: phonia owns the card, bit-perfect. shared: through PipeWire, any output
+mode = "auto"           # auto (default, #157): the DAC if plugged in, else shared. exclusive/shared pin one
 sink = "default"        # shared mode only: "default" (the desktop's) or an output's name from `phonia devices`
 reserve = true          # ask WirePlumber/PulseAudio to release the card first, and give it back after
 release_after_pause = 10   # seconds a pause lasts before the card is handed back; 0 = on every pause, "never" = keep it
@@ -55,9 +55,11 @@ autoplay = false        # fetch more tracks from TIDAL when the queue runs dry? 
   `min_quality`; network errors, timeouts and 5xx are not retried, so an outage never shows up as
   a lower quality. A track that is seeked keeps the tier it started in. phonia
   can't decode AAC yet, so `high` and `low` only make sense once that is added.
-- **Precedence** is command line, then the file, then the built-in default. There is no default
-  device: with none configured (and no `--device`) phonia refuses to start and says how to set
-  one, rather than guess a card and play on the wrong one.
+- **Precedence** is command line, then the file, then the built-in default. The default mode,
+  `auto`, picks the device for you: a USB sound card with playback (the DAC) if one is plugged
+  in, else the desktop's default output. Pinning `mode = "exclusive"` with no device configured
+  (and no `--device`) still refuses to start and says how to set one, rather than guess a card
+  and play on the wrong one — only `auto`'s own detection ever falls back by itself.
 - **Mistakes are errors.** A key it doesn't know (`devise = ...`), a value of the wrong type or a
   word that isn't an option stops it with the file, the line and what was expected, instead of
   being ignored and playing on the wrong card. A missing file just means the defaults; a file you
@@ -159,11 +161,37 @@ autoplay = false        # fetch more tracks from TIDAL when the queue runs dry? 
   Saved to `$XDG_STATE_HOME/phonia/recently_played.json` (atomically, a temp file then a rename)
   whenever it changes, and loaded back the next time `phoniad` starts, so it survives a restart;
   a missing or unreadable file is simply an empty log, never a reason `phoniad` fails to start.
+- **Changing favorites** (#196; the request `set_favorite` of protocol 1.19, under the existing
+  `catalog` capability): adds or removes a track, album or artist from the logged-in user's TIDAL
+  favorites -- `POST /users/{id}/favorites/{tracks|albums|artists}` to add, `DELETE
+  /users/{id}/favorites/{tracks|albums|artists}/{id}` to remove. No standalone `ctl` command yet.
+  In the TUI: `fas`/`far`/`faa` add the track/album/artist under the cursor, `fds`/`fdr`/`fda`
+  remove it, wherever one is shown (a search result, a Library tab, a Home block, an opened view
+  or the queue). Following or unfollowing a playlist (`fal`/`fdl`) answers `CatalogError::Invalid`
+  for now -- no endpoint for it has been verified yet (see `docs/DECISIONS.md`, 2026-10-25).
 - `phonia config path` prints which file is used, and `phonia config show` prints every setting
   with where its value comes from (the file or the default). `--config <file>` (or the
   `PHONIA_CONFIG` environment variable) selects another file, also for `phoniad`.
 - The daemon reads the file once, at startup: restart it to apply a change. The file holds no
   secrets (the TIDAL session is kept apart, see below).
+
+## The theme file
+
+The TUI's colours live in their own file, `~/.config/phonia/theme.toml`, separate from
+`config.toml` — `phonia-tui` reads it directly and never touches `config.toml` or anything else
+in `phonia-core`. There is one key:
+
+```toml
+palette = "nord"   # "gruvbox", "dracula" or "nord"
+```
+
+With no file, or one that doesn't set `palette`, nothing changes: the TUI still uses only the
+terminal's own 16 colours, `NO_COLOR`-aware, exactly as always. Naming a palette uses that
+scheme's real colours instead, on dark-background foregrounds only — it never paints the frame's
+background, and it takes priority over `NO_COLOR` (sent as 24-bit colour regardless of whether
+the terminal says it supports true colour). An unknown palette name is a startup error that lists
+the three real ones. Like `config.toml`, this is read once at startup: restart `phonia tui` to
+apply a change.
 
 ## Where the TIDAL session is kept
 

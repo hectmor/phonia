@@ -34,13 +34,14 @@ pub async fn wait_for_shutdown(signal: &mut watch::Receiver<bool>) {
     let _ = signal.wait_for(|stopping| *stopping).await;
 }
 
-/// A track on its way into the queue: what it is, its title, artist, length, cover and album id
-/// if known, and why they are not known, if they are not.
+/// A track on its way into the queue: what it is, its title, artist, length, cover, album id and
+/// album title if known, and why they are not known, if they are not.
 type Accepted = (
     Source,
     Option<String>,
     Option<String>,
     Option<std::time::Duration>,
+    Option<String>,
     Option<String>,
     Option<String>,
     Option<String>,
@@ -264,6 +265,19 @@ impl Daemon {
                             engine::Event::QueueExhausted => {
                                 self.autoplay.lock().unwrap().queue_exhausted(queue.current);
                             }
+                            engine::Event::OutputReleased {
+                                reason: engine::ReleaseReason::Lost,
+                                ..
+                            } => {
+                                // Switches to the fallback output, if one was configured for an
+                                // auto-mode daemon (#157), so it is ready to resume on instead of
+                                // dead air; stays paused there, left for the listener to resume.
+                                // Only fires for an exclusive output, never for a plain
+                                // pause/release.
+                                if let Some(id) = self.outputs.fallback_for_lost() {
+                                    tokio::spawn(self.clone().fall_back(id));
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -346,6 +360,7 @@ impl Daemon {
         let changed = match event {
             engine::Event::TrackStarted { meta, .. } => {
                 let (_, source) = convert::entry_of(&meta.track, queue);
+                let (artist_id, album_id, album) = convert::artist_and_album_id(&meta.track, queue);
                 recent.started(source.map(|source| PlayedTrack {
                     source,
                     title: meta.title.clone(),
@@ -353,6 +368,9 @@ impl Daemon {
                     duration_ms: meta.duration.map(convert::ms),
                     cover: meta.cover.clone(),
                     played_at_ms: now,
+                    artist_id,
+                    album_id,
+                    album,
                 }));
                 false
             }
@@ -518,6 +536,9 @@ impl Daemon {
                 limit,
             } => self.playlists(from, offset, limit).await,
             Request::Library { limit } => self.library(limit).await,
+            Request::SetFavorite { kind, id, favorite } => {
+                self.set_favorite(kind, id, favorite).await
+            }
             Request::RecentlyPlayed => {
                 let items = self.recent.lock().unwrap().recent().items().to_vec();
                 Reply::Ok(Payload::RecentlyPlayed {
@@ -646,6 +667,21 @@ impl Daemon {
                     .insert(id.clone(), dto.clone());
                 Reply::Ok(Payload::Lyrics { id, lyrics: dto })
             }
+            Err(failure) => catalog_failure(&failure),
+        }
+    }
+
+    /// Adds or removes one TIDAL favorite.
+    async fn set_favorite(&self, kind: ipc::CatalogKind, id: String, favorite: bool) -> Reply {
+        let catalog = match self.catalog_or_refuse("change favorites in") {
+            Ok(catalog) => catalog,
+            Err(reply) => return reply,
+        };
+        let Some(kind) = convert::catalog_kind(kind) else {
+            return self::error(ErrorCode::BadRequest, "unknown kind");
+        };
+        match catalog.set_favorite(kind, id, favorite).await {
+            Ok(()) => Reply::Ok(Payload::Ack),
             Err(failure) => catalog_failure(&failure),
         }
     }
@@ -924,6 +960,14 @@ impl Daemon {
         }
     }
 
+    /// The DAC went away mid-track (#157): moves to the fallback output so it is ready to play
+    /// on, but stays paused there -- a resume (`phonia ctl resume`, or Space in the TUI) is the
+    /// listener's own call, not automatic.
+    async fn fall_back(self: Arc<Self>, id: String) {
+        eprintln!("phoniad: the output was lost, switched to {id} (paused)");
+        let _ = self.set_output(&id).await;
+    }
+
     /// Names the output the daemon started on the way the list of outputs does.
     pub async fn refresh_route(&self) {
         self.outputs.refresh().await;
@@ -1081,11 +1125,20 @@ impl Daemon {
                     info.cover,
                     info.album_id,
                     info.artist_id,
+                    info.album,
                     None,
                 )),
-                Outcome::Unresolved(source, reason) => {
-                    accepted.push((source, None, None, None, None, None, None, Some(reason)))
-                }
+                Outcome::Unresolved(source, reason) => accepted.push((
+                    source,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(reason),
+                )),
                 Outcome::Rejected(source, reason) => {
                     rejected.push(ipc::Rejected { source, reason })
                 }
@@ -1113,7 +1166,7 @@ impl Daemon {
             AddAt::Next => queue.play_next(tracks),
             AddAt::Index { index } => queue.insert(index, tracks),
         };
-        for (id, (_, _, _, _, _, _, _, reason)) in ids.iter().zip(&accepted) {
+        for (id, (_, _, _, _, _, _, _, _, reason)) in ids.iter().zip(&accepted) {
             if let Some(reason) = reason {
                 unresolved_reasons.push(ipc::Unresolved {
                     id: ipc::ItemId(id.0),
@@ -1300,6 +1353,7 @@ fn accepted_from_catalog(track: &tidal_catalog::Track) -> Result<Accepted, ipc::
     });
     let cover = track.album.as_ref().and_then(|album| album.cover.clone());
     let album_id = track.album.as_ref().map(|album| album.id.clone());
+    let album = track.album.as_ref().map(|album| album.title.clone());
     let artist_id = track.artists.first().map(|artist| artist.id.clone());
     Ok((
         source,
@@ -1309,13 +1363,14 @@ fn accepted_from_catalog(track: &tidal_catalog::Track) -> Result<Accepted, ipc::
         cover,
         album_id,
         artist_id,
+        album,
         None,
     ))
 }
 
 /// `accepted` as a queue entry.
 fn queue_track(accepted: &Accepted) -> QueueTrack {
-    let (source, title, artist, duration, cover, album_id, artist_id, _) = accepted;
+    let (source, title, artist, duration, cover, album_id, artist_id, album, _) = accepted;
     QueueTrack {
         source: phonia_core::engine::TrackRef(source.to_wire()),
         title: title.clone(),
@@ -1324,6 +1379,7 @@ fn queue_track(accepted: &Accepted) -> QueueTrack {
         cover: cover.clone(),
         album_id: album_id.clone(),
         artist_id: artist_id.clone(),
+        album: album.clone(),
     }
 }
 
@@ -1447,6 +1503,7 @@ mod play_log_tests {
                 cover: None,
                 album_id: None,
                 artist_id: None,
+                album: None,
             },
         };
         QueueSnapshot {
