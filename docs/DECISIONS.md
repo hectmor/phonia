@@ -3967,3 +3967,50 @@ older design choice this issue never asked to revisit.
 
 **#207 is now fully done, both parts, all 2+2 PRs merged.** Issue still open on GitHub as usual --
 close by hand.
+
+## 2026-10-31 — #214 part 1: "Albums you'll enjoy" reaches the wire
+
+The "editorial/personalized home" territory #33, #139 and #144 all deliberately deferred,
+finally investigated. Planned with Opus after a live call against the real account (not a code
+read alone -- the payload shape was genuinely unknown).
+
+**Live findings (account 208396301, country MX):** `GET /home/feed/static` sends 16 modules;
+"Albums you'll enjoy" is `moduleId: "ALBUM_RECOMMENDATIONS"` (never match on `title` -- it's
+translated by locale, e.g. "Álbumes que te encantará" for `es_MX`), a `HORIZONTAL_LIST` of 10
+items, all plain `ALBUM`, no `Mix` wrapper, no reason/subtitle text anywhere. A real paginated
+`view-all` exists (`GET /v2/home/pages/ALBUM_RECOMMENDATIONS/view-all`, 94 albums, `offset`/
+`limit` work), whose first 10 items are identical and in the same order as the feed module's.
+Neither endpoint echoes a total or a cursor. Every `/home/*` call needs `locale`, `deviceType`,
+`platform` and an `x-tidal-client-version` header or it answers `400 {"subStatus":1002}`; the
+header is harmless on every other endpoint this project calls (verified against v1 favorites/
+search and the v2 folders endpoint too). One of 94 albums had `cover: null`.
+
+**4 decisions, all = Opus's recommendation, approved via `AskUserQuestion`:**
+1. **Call `view-all` directly with phonia's own raw HTTP (not `tidlers::get_home_feed`).** The
+   full feed is ~241 KB of 16 heterogeneous modules for one we want; `tidlers`'s `HomeItem` is a
+   tagged enum with no fallback, so one unrecognized module type fails the whole feed, and its
+   `HomeAlbumData` has `cover: String` (required) -- the real null-cover album would silently
+   vanish into `HomeListItem::Unknown`. `view-all`'s own items are `{data: <v1 album>}`, which
+   `RawAlbum`/`parse_favorited_items`'s existing "unwrap one field, skip what can't be read"
+   pattern already handles, null cover included, with no new dependency.
+2. **Cache: none.** The TUI fetches once per session (same as `recently_played`), not on every
+   Home open (unlike `favorite_albums`) -- confirmed live that the list doesn't change minutes
+   apart, so there is nothing to invalidate.
+3. **No "See all" in this issue.** A real pageable list exists, but Home's `SeeAll` only jumps to
+   a `LibraryTab`, and there is no album-grid view to open one into. The wire already carries
+   `offset`/`limit`, so a future "See all" would be TUI-only work, a separate issue.
+4. **2 PRs**, core/wire/daemon then the TUI block, same split #207 used.
+
+**This PR (1 of 2):** `Catalog::recommended_albums` (`catalog/mod.rs`), its `TidalCatalog` impl
+calling `/home/pages/ALBUM_RECOMMENDATIONS/view-all` through a new `home_query` helper
+(`catalog/remote.rs`), and `parse_home_page` -- the `{data: ...}` unwrap, with
+`total = offset + items.len()` since TIDAL sends none (a noted shortcut, fine for a fixed-size
+block, wrong for a real "See all"). `FakeCatalog` grew `with_recommended_albums`/
+`Call::RecommendedAlbums`. On the wire, `AlbumListRef::RecommendedAlbums` (protocol 1.20 → 1.21,
+additive, pinned by a new golden compatibility test); no new `Request`/`Payload` needed, it rides
+the existing `Request::Albums`/`Payload::Albums`, one new match arm in `phoniad::daemon::albums`.
+Verified live end to end through a scratch `phoniad`: the real 6-album page (Illya Kuryaki,
+Caifanes, Soda Stereo, Black Sabbath, Korn's "Issues", among them) came back over the wire exactly
+as `parse_home_page`'s unit test (built from the trimmed live JSON above) predicted.
+
+Part 2 (the Home block in the TUI, closing #214) is next.

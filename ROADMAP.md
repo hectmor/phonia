@@ -33,7 +33,7 @@ first tag where the tag, `main` and `Cargo.toml` agree.
 | 1 — Daemon and playback engine | [Fase 1](https://github.com/hectmor/phonia/milestone/2) | Done (#8–#16, #47, #52, #53) |
 | 2 — TUI base | [Fase 2](https://github.com/hectmor/phonia/milestone/3) | Done (#17–#24) |
 | 3 — Audio quality | [Fase 3](https://github.com/hectmor/phonia/milestone/4) | Done (#25–#31) |
-| 4 — SONE-like features | [Fase 4](https://github.com/hectmor/phonia/milestone/5) | In progress (#196 part 2; #35, #36, #37 unscoped) |
+| 4 — SONE-like features | [Fase 4](https://github.com/hectmor/phonia/milestone/5) | In progress (#196 part 2, #214 part 1 of 2; #35, #36, #37 unscoped) |
 | 5 — Extras and packaging | [Fase 5](https://github.com/hectmor/phonia/milestone/6) | In progress (CI, licensing, the process rules and #192 done; packaging open) |
 | 6 — Layout and appearance | [Fase 6](https://github.com/hectmor/phonia/milestone/7) | Done (#124, #159, #160, #175, #188, #198, #207) |
 | 7 — Home screen and discovery | [Fase 7](https://github.com/hectmor/phonia/milestone/8) | Done (#139, #144, #169, #171, #194) |
@@ -91,6 +91,7 @@ done — it is its own product decision, not a leftover.
 | #164 | `ga` on any track row: search results, track rows, inside an opened album | Closed |
 | #166 | `gr` opens the album of the track under the cursor | Closed |
 | #196 | Add/remove TIDAL favorites from the TUI (`fas`/`far`/`faa`/`fal`, `fds`/`fdr`/`fda`/`fdl`) | In progress (part 1 of 2) |
+| #214 | "Albums you'll enjoy" on Home (TIDAL's editorial recommendation list) | In progress (part 1 of 2: core/wire/daemon, protocol 1.21) |
 | #35 | Scrobbling to Last.fm and ListenBrainz | Open, not scoped |
 | #36 | Discord Rich Presence | Open, not scoped |
 | #37 | Persistent queue and state across restarts | Open, not scoped |
@@ -174,12 +175,16 @@ What is actually left, in no committed order:
   second USB DAC disconnect fails the track instead of pausing, a gap
   #157/#204/#205 left open) has a full approved plan (4 fixes in
   `alsa.rs`/`device.rs`/`audio_thread.rs`), not started.
-- **Phase 4** — part 2 of #196 is the one thing in flight: adding and removing
+- **Phase 4** — part 2 of #196 is one thing in flight: adding and removing
   favorite tracks, albums and artists works, while following and unfollowing a
   playlist (`fal`/`fdl`) answers with an error until TIDAL's own endpoint for
-  it is verified. Behind it, three issues nobody has scoped: scrobbling (#35),
-  Discord Rich Presence (#36), and a queue and state that survive a restart
-  (#37). Each is a one-line description today; each needs planning before any
+  it is verified. #214 ("Albums you'll enjoy" on Home) is the other: part 1
+  (core/wire/daemon, protocol 1.21, calling TIDAL's `/home/*` recommendation
+  endpoint directly rather than through `tidlers`) is done; part 2 (the Home
+  block in the TUI) is next. Behind both, three issues nobody has scoped:
+  scrobbling (#35), Discord Rich Presence (#36), and a queue and state that
+  survive a restart (#37). Each is a one-line description today; each needs
+  planning before any
   code.
 - **Phase 5, packaging and extras** — the two package issues (#43 RPM/COPR,
   #44 AUR) are what would let someone install phonia without a Rust

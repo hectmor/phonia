@@ -2836,6 +2836,7 @@ fn with_a_library() -> FakeCatalog {
             "Untouchables",
             catalog::AlbumKind::Album,
         )])
+        .with_recommended_albums(vec![album_named("21", "Versus", catalog::AlbumKind::Album)])
         .with_favorite_artists(vec![catalog::Artist {
             id: "780".into(),
             name: "Korn".into(),
@@ -2910,6 +2911,29 @@ async fn favorite_tracks_and_albums_are_paged_by_their_own_catalog_ref() {
     };
     assert_eq!(from, AlbumListRef::FavoriteAlbums);
     assert_eq!(page.items[0].title, "Untouchables");
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recommended_albums_is_its_own_list_not_mixed_with_favorites() {
+    let catalog = with_a_library();
+    let f = fixture_with_catalog("recommended-albums", Some(Arc::new(catalog))).await;
+    let client = f.client().await;
+
+    let Payload::Albums { from, page } = client
+        .request(Request::Albums {
+            from: AlbumListRef::RecommendedAlbums,
+            offset: 0,
+            limit: None,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("not albums");
+    };
+    assert_eq!(from, AlbumListRef::RecommendedAlbums);
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].title, "Versus");
     f.finish().await;
 }
 

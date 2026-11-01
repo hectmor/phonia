@@ -309,6 +309,15 @@ pub trait Catalog: Send + Sync {
         limit: u32,
     ) -> BoxFuture<'static, Result<Page<Album>, CatalogError>>;
 
+    /// TIDAL's own "Albums you'll enjoy": its editorial recommendation list, built from the
+    /// user's listening history. TIDAL sends no total for it, so a page past what it actually
+    /// has simply comes back empty. At most [`MAX_ITEMS_LIMIT`] per page.
+    fn recommended_albums(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Album>, CatalogError>>;
+
     /// The artists the logged-in user has favorited, newest first. At most [`MAX_ITEMS_LIMIT`]
     /// per page.
     fn favorite_artists(

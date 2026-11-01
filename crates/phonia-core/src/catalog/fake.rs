@@ -61,6 +61,10 @@ pub enum Call {
         offset: u32,
         limit: u32,
     },
+    RecommendedAlbums {
+        offset: u32,
+        limit: u32,
+    },
     FavoriteArtists {
         offset: u32,
         limit: u32,
@@ -103,6 +107,7 @@ struct State {
     artists: HashMap<String, ArtistData>,
     favorite_tracks: Vec<Track>,
     favorite_albums: Vec<Album>,
+    recommended_albums: Vec<Album>,
     favorite_artists: Vec<Artist>,
     my_playlists: Vec<Playlist>,
     /// Keyed by folder id; `None` is the root of "My Collection".
@@ -190,6 +195,12 @@ impl FakeCatalog {
     /// The user's favorite albums, for `favorite_albums`.
     pub fn with_favorite_albums(self, albums: Vec<Album>) -> Self {
         self.state.lock().unwrap().favorite_albums = albums;
+        self
+    }
+
+    /// TIDAL's "Albums you'll enjoy", for `recommended_albums`.
+    pub fn with_recommended_albums(self, albums: Vec<Album>) -> Self {
+        self.state.lock().unwrap().recommended_albums = albums;
         self
     }
 
@@ -476,6 +487,17 @@ impl Catalog for FakeCatalog {
         let call = Call::FavoriteAlbums { offset, limit };
         self.answer(call, move |state| {
             Ok(page_of(&state.favorite_albums, offset, limit))
+        })
+    }
+
+    fn recommended_albums(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Album>, CatalogError>> {
+        let call = Call::RecommendedAlbums { offset, limit };
+        self.answer(call, move |state| {
+            Ok(page_of(&state.recommended_albums, offset, limit))
         })
     }
 

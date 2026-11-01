@@ -799,6 +799,7 @@ impl Daemon {
                     .await
             }
             ipc::AlbumListRef::FavoriteAlbums => catalog.favorite_albums(offset, limit).await,
+            ipc::AlbumListRef::RecommendedAlbums => catalog.recommended_albums(offset, limit).await,
             ipc::AlbumListRef::Unknown => {
                 return self::error(
                     ErrorCode::BadRequest,
