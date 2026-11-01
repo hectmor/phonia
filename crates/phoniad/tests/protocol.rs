@@ -2462,6 +2462,14 @@ fn browsable() -> FakeCatalog {
             ],
             vec![album_named("11", "Freak", catalog::AlbumKind::Single)],
         )
+        .with_similar_artists(
+            "780",
+            vec![catalog::Artist {
+                id: "3642161".into(),
+                name: "Caifanes".into(),
+                picture: None,
+            }],
+        )
 }
 
 fn ask_album(id: &str, limit: Option<u32>) -> Request {
@@ -2517,6 +2525,7 @@ async fn an_artist_comes_whole_in_one_answer_with_a_page_of_each_list() {
         top_tracks,
         albums,
         singles,
+        similar,
     } = client.request(ask_artist("780", None)).await.unwrap()
     else {
         panic!("not an artist");
@@ -2530,7 +2539,42 @@ async fn an_artist_comes_whole_in_one_answer_with_a_page_of_each_list() {
     );
     assert_eq!(albums.items.len(), 2);
     assert_eq!(singles.items[0].kind, Some(AlbumKind::Single));
-    assert_eq!(catalog.calls().len(), 5, "five asks, one answer");
+    let similar = similar.expect("similar artists answered");
+    assert_eq!(similar.items[0].name, "Caifanes");
+    assert_eq!(catalog.calls().len(), 6, "six asks, one answer");
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn similar_artists_failing_leaves_the_rest_of_the_artist_page_intact() {
+    let catalog = browsable().failing_similar_artists();
+    let f = fixture_with_catalog("artist-similar-fails", Some(Arc::new(catalog))).await;
+    let client = f.client().await;
+    let Payload::Artist {
+        artist,
+        similar,
+        top_tracks,
+        ..
+    } = client.request(ask_artist("780", None)).await.unwrap()
+    else {
+        panic!("not an artist");
+    };
+    assert_eq!(artist.name, "Korn");
+    assert_eq!(similar, None, "the failed list, not the whole page");
+    assert_eq!(top_tracks.items.len(), 50);
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_artist_with_none_similar_answers_an_empty_list_not_an_error() {
+    let catalog = FakeCatalog::new().with_artist(korn(), None, tracks(2), vec![], vec![]);
+    let f = fixture_with_catalog("artist-no-similar", Some(Arc::new(catalog))).await;
+    let client = f.client().await;
+    let Payload::Artist { similar, .. } = client.request(ask_artist("780", None)).await.unwrap()
+    else {
+        panic!("not an artist");
+    };
+    assert_eq!(similar.expect("answered, just empty").items.len(), 0);
     f.finish().await;
 }
 

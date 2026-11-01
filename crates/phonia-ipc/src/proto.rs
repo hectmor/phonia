@@ -46,7 +46,7 @@ pub const CAP_RECENTLY_PLAYED: &str = "recently_played";
 /// The protocol version this crate speaks.
 pub const PROTOCOL: Version = Version {
     major: 1,
-    minor: 21,
+    minor: 22,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,8 +195,10 @@ pub enum Request {
         limit: Option<u32>,
     },
     /// An artist, all that a view of it shows, in one answer (since 1.6): its bio, its most
-    /// listened to tracks, its albums, and its EPs and singles. Answered with
-    /// [`Payload::Artist`]; `limit` (default 50, most 100) is the size of each list's first page.
+    /// listened to tracks, its albums, its EPs and singles, and (since 1.22) TIDAL's own "Fans
+    /// also like". Answered with [`Payload::Artist`]; `limit` (default 50, most 100) is the size
+    /// of each list's first page -- "Fans also like" on its own never goes past 50, TIDAL's own
+    /// ceiling for that one list.
     Artist {
         id: String,
         #[serde(default)]
@@ -401,7 +403,10 @@ pub enum Payload {
     },
     /// An artist with the first page of each of its lists (since 1.6). `bio` is plain text, and
     /// absent for an artist TIDAL has nothing to say about (or when it could not be fetched: the
-    /// rest is worth showing without it).
+    /// rest is worth showing without it). `similar` (TIDAL's own "Fans also like", since 1.22)
+    /// is `None` only when it could not be fetched -- an artist TIDAL truly has none for still
+    /// answers with an empty page, same as `bio`'s own split between "nothing to say" and
+    /// "could not ask".
     Artist {
         artist: ArtistSummary,
         #[serde(default)]
@@ -409,6 +414,8 @@ pub enum Payload {
         top_tracks: Page<TrackSummary>,
         albums: Page<AlbumSummary>,
         singles: Page<AlbumSummary>,
+        #[serde(default)]
+        similar: Option<Page<ArtistSummary>>,
     },
     /// A page of tracks, and the list it is of (since 1.6).
     Tracks {

@@ -3321,6 +3321,15 @@ mod tests {
                         total: 0,
                         offset: 0,
                     },
+                    similar: Some(phonia_ipc::Page {
+                        items: vec![phonia_ipc::ArtistSummary {
+                            id: "3642161".into(),
+                            name: "Caifanes".into(),
+                            picture: None,
+                        }],
+                        total: 1,
+                        offset: 0,
+                    }),
                 }),
             },
         );
@@ -3340,6 +3349,7 @@ mod tests {
         assert!(text.contains("Top tracks (300)"), "{text}");
         assert!(text.contains("Albums (35)"), "{text}");
         assert!(text.contains("EPs & singles (0)"), "{text}");
+        assert!(text.contains("Fans also like (1)"), "{text}");
         assert!(text.contains("Freak On a Leash"), "{text}");
     }
 
@@ -3636,6 +3646,16 @@ mod tests {
         press(&mut state, ']'); // EPs & singles, empty
         let text = screen(&state, 100, 14);
         assert!(text.contains("No albums."), "{text}");
+    }
+
+    #[test]
+    fn the_similar_tab_shows_fans_also_like() {
+        let mut state = open_artist_view();
+        press(&mut state, ']');
+        press(&mut state, ']');
+        press(&mut state, ']'); // Fans also like
+        let text = screen(&state, 100, 14);
+        assert!(text.contains("Caifanes"), "{text}");
     }
 
     #[test]

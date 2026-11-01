@@ -53,6 +53,10 @@ pub enum Call {
         offset: u32,
         limit: u32,
     },
+    SimilarArtists {
+        id: String,
+        limit: u32,
+    },
     FavoriteTracks {
         offset: u32,
         limit: u32,
@@ -105,6 +109,12 @@ struct State {
     playlists: HashMap<String, Vec<Track>>,
     album_details: HashMap<String, Album>,
     artists: HashMap<String, ArtistData>,
+    /// Keyed by the seed artist's id, for `similar_artists`. A separate map, not a field of
+    /// [`ArtistData`], so `with_artist`'s own signature does not have to grow for it.
+    similar: HashMap<String, Vec<Artist>>,
+    /// Fails only `similar_artists`, independently of `error` (which fails every call): tests
+    /// the daemon tolerating this one list failing while the rest of an artist still answers.
+    fail_similar: bool,
     favorite_tracks: Vec<Track>,
     favorite_albums: Vec<Album>,
     recommended_albums: Vec<Album>,
@@ -183,6 +193,23 @@ impl FakeCatalog {
             artist: artist.clone(),
         };
         self.state.lock().unwrap().artists.insert(artist.id, data);
+        self
+    }
+
+    /// An artist's "Fans also like", for `similar_artists`.
+    pub fn with_similar_artists(self, id: &str, artists: Vec<Artist>) -> Self {
+        self.state
+            .lock()
+            .unwrap()
+            .similar
+            .insert(id.to_string(), artists);
+        self
+    }
+
+    /// Fails `similar_artists` only, the rest of the catalog still answers; see
+    /// [`State::fail_similar`].
+    pub fn failing_similar_artists(self) -> Self {
+        self.state.lock().unwrap().fail_similar = true;
         self
     }
 
@@ -465,6 +492,28 @@ impl Catalog for FakeCatalog {
                 Ok(page_of(list, offset, limit))
             }
             None => Err(CatalogError::NotFound),
+        })
+    }
+
+    fn similar_artists(
+        &self,
+        id: String,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Artist>, CatalogError>> {
+        let call = Call::SimilarArtists {
+            id: id.clone(),
+            limit,
+        };
+        self.answer(call, move |state| {
+            if state.fail_similar {
+                return Err(CatalogError::Unavailable("similar artists failed".into()));
+            }
+            // An artist with no entry here, like one TIDAL has none for, is an empty list, not
+            // an error -- verified live: an id TIDAL does not know answers 200 with no items.
+            let similar = state.similar.get(&id).cloned().unwrap_or_default();
+            let mut page = page_of(&similar, 0, limit);
+            page.total = page.items.len() as u64;
+            Ok(page)
         })
     }
 

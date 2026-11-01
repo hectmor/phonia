@@ -4039,3 +4039,64 @@ above.
 
 **#214 is now fully done, both parts, both PRs merged.** Issue still open on GitHub as usual --
 close by hand.
+
+## 2026-10-31 — #217: "Similar artists" on the artist page, from TIDAL's "Fans also like"
+
+Planned with Opus after a live call against the real account, since the "obvious" endpoint turned
+out to be the wrong one.
+
+**Live findings:** `tidlers::get_similar_artists` (`GET /artists/{id}/similar`) is NOT what
+TIDAL's own app shows as "Fans also like" -- it's a different, TiVo-sourced editorial list, with
+broken paging and missing the most obvious match for a test artist (Soda Stereo's own list from
+this endpoint never included Gustavo Cerati's solo project). Traced TIDAL's real artist page
+(`GET /v1/pages/artist?artistId=X`) to find the actual module backing "Fans also like": it's
+served from an opaque, undocumented per-module endpoint, `GET /pages/data/{module-uuid}
+?artistId={id}`, where the module uuid (`5c8d0b08-b48d-4a97-bcbd-989c81f0c96e`) is the same for
+every artist (verified live on 4 different ones). A third option, TIDAL's openapi v2
+`relationships` endpoint, was considered and rejected: different host, JSON:API shape, cursor
+paging incompatible with the existing offset-based `Page`/`Found` model -- too much new plumbing
+for a list capped at 50 items. This list's own `totalNumberOfItems` just echoes back the `limit`
+asked for, not a real count (confirmed live) -- parsing overrides it with the real `items.len()`.
+Unlike every other listing in `catalog/remote.rs` (capped at `MAX_ITEMS_LIMIT`, 100), TIDAL caps
+this one specific list at 50 (400 "Too big page" above that) -- clamped before delegating to
+`home_query`. TIDAL does not page this list at all: its own `offset` only slices inside whatever
+`limit` was asked for, never reaching past it, so there is no "load more" for this tab, ever.
+
+**4 decisions, all = Opus's recommendation, approved via `AskUserQuestion`:**
+1. **The real undocumented `/pages/data/{uuid}` module**, not `/artists/{id}/similar` -- it's what
+   TIDAL's own app actually shows, confirmed live; the wrong endpoint's own editorial list was
+   demonstrably incomplete.
+2. **Eager, bundled with the artist's other three lists** in the same `tokio::join!` the daemon
+   already does for `Payload::Artist` -- the simplest option, no new TUI loading-state machinery,
+   and this list is capped at 50 so the extra round trip is cheap.
+3. **Always show the tab**, with `ArtistView::similar_failed: bool` telling "TIDAL genuinely has
+   none for this artist" apart from "could not be fetched" (an empty `Found<T>` alone can't draw
+   that distinction) -- the same split `bio`'s own doc already draws for the same reason.
+4. **1 PR**, not split like #214/#207 -- small enough (one new catalog method, one wire field, one
+   new TUI tab) not to need it.
+
+**Implementation:** `Catalog::similar_artists` (`catalog/mod.rs`); `TidalCatalog`'s impl calling
+`/pages/data/{FANS_ALSO_LIKE}` through a new `similar_artists_query` helper built on top of the
+existing `home_query`, and `parse_similar_artists` overriding TIDAL's bogus total. `FakeCatalog`
+grew `with_similar_artists`/`failing_similar_artists` (a separate failure switch from `error`, so
+a test can exercise "this one list fails, the rest of the artist page still answers"). On the
+wire, `Payload::Artist.similar: Option<Page<ArtistSummary>>` (protocol 1.21 -> 1.22, additive,
+`None` both for "could not be fetched" and for an old daemon that predates the field -- the TUI
+can't and doesn't need to tell those apart, only `similar_failed` on the TUI's own side does, set
+locally from whether the daemon's answer carried the field). `phoniad::daemon::artist()` added
+`catalog.similar_artists(...)` as a 6th parallel call, tolerating its own failure (not part of the
+tuple the other 4 calls must all succeed for). TUI: a 4th `ArtistTab::Similar` ("Fans also like"),
+`ArtistView::current_list()` (renamed from `tracks_or_albums()`, since it now returns a 3rd kind
+of list) gained a `ListRef::Artists` arm; `Row::Artist(ArtistSummary)` added alongside the
+existing `Row::Track`/`Row::Album`, Enter opens the artist (reusing `open_artist_view`), `faa`/
+`fda` favorite it when `kind == Artists`. "Load more" on this tab always answers `None` -- TIDAL
+doesn't support it, and `total == items.len()` already made `Found::next_offset()` return `None`
+anyway, but the dedicated arm says so directly rather than relying on that incidentally.
+
+Verified live end to end through a scratch `phoniad` on an isolated socket (never the real
+interactive TUI, per the standing caution from #207's part 2): asked for artist `3633734` (Soda
+Stereo), got back 50 similar artists including Caifanes, Gustavo Cerati and Los Enanitos Verdes --
+matching what TIDAL's own app shows for the same artist. Full workspace green (`cargo test
+--workspace`, fmt, clippy -D warnings).
+
+**#217 is now fully done, one PR.** Issue still open on GitHub as usual -- close by hand.

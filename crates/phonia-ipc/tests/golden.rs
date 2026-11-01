@@ -312,7 +312,7 @@ fn the_server_banner() {
                 CAP_AUTOPLAY.into(),
             ],
         }),
-        r#"{"type":"hello","protocol":{"major":1,"minor":21},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","recently_played","catalog","lyrics","autoplay"]}"#,
+        r#"{"type":"hello","protocol":{"major":1,"minor":22},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","recently_played","catalog","lyrics","autoplay"]}"#,
     );
 }
 
@@ -1167,7 +1167,7 @@ fn versions_are_compatible_across_minors_but_not_majors() {
     assert!(v(1, 0).compatible_with(v(1, 7)));
     assert!(v(1, 7).compatible_with(v(1, 0)));
     assert!(!v(1, 0).compatible_with(v(2, 0)));
-    assert_eq!(PROTOCOL, v(1, 21));
+    assert_eq!(PROTOCOL, v(1, 22));
 }
 
 #[test]
@@ -1400,6 +1400,15 @@ fn an_album_an_artist_and_pages_come_back_whole() {
             total: 30,
             offset: 0,
         },
+        similar: Some(Page {
+            items: vec![ArtistSummary {
+                id: "3642161".into(),
+                name: "Caifanes".into(),
+                picture: None,
+            }],
+            total: 1,
+            offset: 0,
+        }),
     };
     let json = serde_json::to_string(&ServerMessage::Response {
         id: RequestId(2),
@@ -1407,7 +1416,9 @@ fn an_album_an_artist_and_pages_come_back_whole() {
     })
     .unwrap();
     assert!(
-        json.contains(r#""type":"artist""#) && json.contains(r#""bio":null"#),
+        json.contains(r#""type":"artist""#)
+            && json.contains(r#""bio":null"#)
+            && json.contains(r#""similar""#),
         "{json}"
     );
     let back: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -1486,6 +1497,12 @@ fn an_album_from_before_the_views_and_kinds_from_the_future_still_parse() {
     )
     .unwrap();
     assert!(matches!(payload, Payload::Artist { bio: None, .. }));
+    // An artist answer from before 1.22, without "Fans also like".
+    let payload: Payload = serde_json::from_str(
+        r#"{"type":"artist","artist":{"id":"1","name":"a"},"top_tracks":{"items":[],"total":0,"offset":0},"albums":{"items":[],"total":0,"offset":0},"singles":{"items":[],"total":0,"offset":0}}"#,
+    )
+    .unwrap();
+    assert!(matches!(payload, Payload::Artist { similar: None, .. }));
 }
 
 #[test]

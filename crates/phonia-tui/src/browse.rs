@@ -3,7 +3,9 @@
 //! way the stack grows past one).
 
 use crate::list::Found;
-use phonia_ipc::{AlbumSummary, CatalogRef, FolderEntry, PlaylistSummary, TrackSummary};
+use phonia_ipc::{
+    AlbumSummary, ArtistSummary, CatalogRef, FolderEntry, PlaylistSummary, TrackSummary,
+};
 
 /// Where a view stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,16 +86,25 @@ pub enum ArtistTab {
     TopTracks,
     Albums,
     Singles,
+    /// TIDAL's own "Fans also like" (#217): unlike the other three, never paged further --
+    /// TIDAL caps the whole list at 50 and does not support asking for more.
+    Similar,
 }
 
 impl ArtistTab {
-    pub const ALL: [ArtistTab; 3] = [ArtistTab::TopTracks, ArtistTab::Albums, ArtistTab::Singles];
+    pub const ALL: [ArtistTab; 4] = [
+        ArtistTab::TopTracks,
+        ArtistTab::Albums,
+        ArtistTab::Singles,
+        ArtistTab::Similar,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
             ArtistTab::TopTracks => "Top tracks",
             ArtistTab::Albums => "Albums",
             ArtistTab::Singles => "EPs & singles",
+            ArtistTab::Similar => "Fans also like",
         }
     }
 
@@ -133,6 +144,11 @@ pub struct ArtistView {
     pub top_tracks: Found<TrackSummary>,
     pub albums: Found<AlbumSummary>,
     pub singles: Found<AlbumSummary>,
+    /// TIDAL's own "Fans also like" (#217). Empty either because TIDAL genuinely has none for
+    /// this artist, or because it could not be fetched -- `similar_failed` tells those apart,
+    /// the same split `bio`'s own doc already draws for the same reason.
+    pub similar: Found<ArtistSummary>,
+    pub similar_failed: bool,
 }
 
 impl ArtistView {
@@ -149,6 +165,8 @@ impl ArtistView {
             top_tracks: Found::default(),
             albums: Found::default(),
             singles: Found::default(),
+            similar: Found::default(),
+            similar_failed: false,
         }
     }
 
@@ -157,11 +175,12 @@ impl ArtistView {
     }
 
     /// The list the current tab shows, and how long it is.
-    pub fn tracks_or_albums(&mut self) -> ListRef<'_> {
+    pub fn current_list(&mut self) -> ListRef<'_> {
         match self.tab {
             ArtistTab::TopTracks => ListRef::Tracks(&mut self.top_tracks),
             ArtistTab::Albums => ListRef::Albums(&mut self.albums),
             ArtistTab::Singles => ListRef::Albums(&mut self.singles),
+            ArtistTab::Similar => ListRef::Artists(&mut self.similar),
         }
     }
 }
@@ -170,6 +189,7 @@ impl ArtistView {
 pub enum ListRef<'a> {
     Tracks(&'a mut Found<TrackSummary>),
     Albums(&'a mut Found<AlbumSummary>),
+    Artists(&'a mut Found<ArtistSummary>),
 }
 
 /// A playlist folder opened to see its own contents: sub-folders first, then playlists (which
@@ -436,19 +456,23 @@ mod tests {
         assert_eq!(ArtistTab::default(), ArtistTab::TopTracks);
         assert_eq!(ArtistTab::TopTracks.next(), ArtistTab::Albums);
         assert_eq!(ArtistTab::Albums.next(), ArtistTab::Singles);
-        assert_eq!(ArtistTab::Singles.next(), ArtistTab::Singles);
-        assert_eq!(ArtistTab::Singles.previous(), ArtistTab::Albums);
+        assert_eq!(ArtistTab::Singles.next(), ArtistTab::Similar);
+        assert_eq!(ArtistTab::Similar.next(), ArtistTab::Similar);
+        assert_eq!(ArtistTab::Similar.previous(), ArtistTab::Singles);
         assert_eq!(ArtistTab::TopTracks.previous(), ArtistTab::TopTracks);
         assert_eq!(ArtistTab::Singles.title(), "EPs & singles");
+        assert_eq!(ArtistTab::Similar.title(), "Fans also like");
     }
 
     #[test]
     fn an_artist_views_current_list_follows_its_tab() {
         let mut view = ArtistView::new("780".into(), "Korn".into(), None);
-        assert!(matches!(view.tracks_or_albums(), ListRef::Tracks(_)));
+        assert!(matches!(view.current_list(), ListRef::Tracks(_)));
         view.tab = ArtistTab::Albums;
-        assert!(matches!(view.tracks_or_albums(), ListRef::Albums(_)));
+        assert!(matches!(view.current_list(), ListRef::Albums(_)));
         view.tab = ArtistTab::Singles;
-        assert!(matches!(view.tracks_or_albums(), ListRef::Albums(_)));
+        assert!(matches!(view.current_list(), ListRef::Albums(_)));
+        view.tab = ArtistTab::Similar;
+        assert!(matches!(view.current_list(), ListRef::Artists(_)));
     }
 }
