@@ -4014,3 +4014,28 @@ Caifanes, Soda Stereo, Black Sabbath, Korn's "Issues", among them) came back ove
 as `parse_home_page`'s unit test (built from the trimmed live JSON above) predicted.
 
 Part 2 (the Home block in the TUI, closing #214) is next.
+
+## 2026-10-31 — #214 part 2 (last): "Albums you'll enjoy" shows up on Home
+
+Mirrors #144's recently-played block almost exactly: `State.recommended_albums:
+Option<Vec<AlbumSummary>>`, fetched once per session the moment a connection with the catalog
+exists (`maybe_load_recommended_albums`, gated on `CAP_CATALOG` rather than a dedicated
+capability -- this rides the existing `Request::Albums`, nothing new on the wire beyond PR 1's
+own `AlbumListRef::RecommendedAlbums`), never refetched afterward. `Block::RecommendedAlbums`
+sits in `home::rows` right after recently played, capped at `BLOCK_SIZE`, with no "See all" row
+(decided in part 1: TIDAL's own list is pageable, but Home has no album-grid view to open a "See
+all" into yet -- a future, TUI-only issue if ever built). `Row::Album`/`Selected::Album` needed no
+changes at all: they already work the same regardless of which block an album came from, so
+opening one nested in Home's stack, adding it, or acting on it with `ga`/`gr`/favorite keys all
+work unchanged.
+
+Verified: full workspace green (473 `phonia-tui` tests, up from 468), fmt+clippy clean. Not
+re-verified against a live interactive TUI this time -- the wire layer was already verified live
+end to end in part 1, and the rendering path here is the same generic `Row::Album`/`fmt::album`
+code every other album block already exercises live; re-driving a real `phonia tui` process with
+a scripted pty is the exact thing that left a stray `phoniad` holding the real DAC earlier this
+project (#207's own part-2 entry), so it was skipped this time in favor of the unit coverage
+above.
+
+**#214 is now fully done, both parts, both PRs merged.** Issue still open on GitHub as usual --
+close by hand.

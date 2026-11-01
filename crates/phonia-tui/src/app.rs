@@ -117,6 +117,10 @@ pub struct State {
     /// outside `LibraryState`: it needs no catalog, and is pushed by an event rather than loaded
     /// page by page.
     pub recently_played: Option<Vec<phonia_ipc::PlayedTrack>>,
+    /// TIDAL's "Albums you'll enjoy" (#214): fetched once a connection with the catalog exists
+    /// (see `maybe_load_recommended_albums`), never refetched this session -- it does not
+    /// change within one (verified live), unlike `library`'s favorite albums.
+    pub recommended_albums: Option<Vec<phonia_ipc::AlbumSummary>>,
     /// Why the last request sent (a playback key) did not work, until the next one is tried.
     pub last_error: Option<String>,
     /// Why playback itself just failed (the daemon's own `Event::Error`, e.g. a track the DAC
@@ -332,6 +336,9 @@ pub enum Tag {
     /// The request that loads the recently played log, fired once a connection with the
     /// capability exists; see `maybe_load_recently_played`.
     RecentlyPlayed,
+    /// The request that loads "Albums you'll enjoy", fired once a connection with the catalog
+    /// exists; see `maybe_load_recommended_albums`.
+    RecommendedAlbums,
     /// A `SetFavorite` request; `favorite` says which direction it asked for, to pick the right
     /// notice (and because the id isn't needed again on the way back).
     Favorite { favorite: bool },
@@ -378,6 +385,17 @@ pub fn update(state: &mut State, msg: Msg) -> Effects {
         effects.commands.push(Cmd::Request {
             tag: Tag::RecentlyPlayed,
             request: Request::RecentlyPlayed,
+        });
+    }
+    if maybe_load_recommended_albums(state) {
+        effects.redraw = true;
+        effects.commands.push(Cmd::Request {
+            tag: Tag::RecommendedAlbums,
+            request: Request::Albums {
+                from: phonia_ipc::AlbumListRef::RecommendedAlbums,
+                offset: 0,
+                limit: None,
+            },
         });
     }
     // Entering the panel, or reconnecting while already in it, is also the retry for a fetch that
@@ -502,6 +520,20 @@ fn maybe_load_recently_played(state: &mut State) -> bool {
         return false;
     }
     state.recently_played = Some(Vec::new());
+    true
+}
+
+/// Fetched once a connection with the catalog exists, the same "once, then never again this
+/// session" rule `maybe_load_recently_played` follows -- gated on `CAP_CATALOG` rather than its
+/// own capability, since this rides the existing `Request::Albums`, not a dedicated one.
+fn maybe_load_recommended_albums(state: &mut State) -> bool {
+    if state.recommended_albums.is_some()
+        || state.connection != Connection::Connected
+        || !state.has(phonia_ipc::CAP_CATALOG)
+    {
+        return false;
+    }
+    state.recommended_albums = Some(Vec::new());
     true
 }
 
@@ -649,6 +681,14 @@ fn on_response(state: &mut State, tag: Tag, result: Result<Payload, String>) -> 
             }
             // A failure leaves the empty placeholder `maybe_load_recently_played` already set:
             // there is nothing to show, and no retry until the next reconnect.
+            Effects::redraw()
+        }
+        Tag::RecommendedAlbums => {
+            if let Ok(Payload::Albums { page, .. }) = result {
+                state.recommended_albums = Some(page.items);
+            }
+            // Same as `Tag::RecentlyPlayed`: a failure leaves the empty placeholder in place,
+            // no retry until the next reconnect.
             Effects::redraw()
         }
         Tag::Favorite { favorite } => on_favorited(state, favorite, result),
@@ -6523,9 +6563,13 @@ mod tests {
                 tag: artists_tag,
                 request: artists_request,
             },
+            Cmd::Request {
+                tag: recommended_tag,
+                request: recommended_request,
+            },
         ] = effects.commands.as_slice()
         else {
-            panic!("expected three tagged requests, got {:?}", effects.commands);
+            panic!("expected four tagged requests, got {:?}", effects.commands);
         };
         assert_eq!(
             *library_request,
@@ -6535,6 +6579,17 @@ mod tests {
         );
         assert_eq!(*playlists_request, LibraryState::playlist_request());
         assert_eq!(*artists_request, LibraryState::artists_request());
+        // Fired by the same "catalog" capability, but belongs to Home, not Library; see
+        // `connecting_with_the_catalog_asks_for_recommended_albums_once` for its own assertions.
+        assert_eq!(*recommended_tag, Tag::RecommendedAlbums);
+        assert_eq!(
+            *recommended_request,
+            Request::Albums {
+                from: phonia_ipc::AlbumListRef::RecommendedAlbums,
+                offset: 0,
+                limit: None,
+            }
+        );
         ch(&mut state, '4');
         (state, *library_tag, *playlists_tag, *artists_tag)
     }
@@ -6696,6 +6751,62 @@ mod tests {
                 played_track("tidal:2", "Second"),
                 played_track("tidal:1", "First")
             ])
+        );
+    }
+
+    #[test]
+    fn connecting_with_the_catalog_asks_for_recommended_albums_once() {
+        // The same "catalog" capability also fires the library's own three requests (see
+        // `opening_library`); this one is the fourth and last.
+        let mut state = State::default();
+        let effects = update(&mut state, connected_msg(&["catalog"]));
+        let Cmd::Request { tag, request } = effects.commands.last().unwrap() else {
+            panic!("expected a request, got {:?}", effects.commands.last());
+        };
+        assert_eq!(*tag, Tag::RecommendedAlbums);
+        assert_eq!(
+            *request,
+            Request::Albums {
+                from: phonia_ipc::AlbumListRef::RecommendedAlbums,
+                offset: 0,
+                limit: None,
+            }
+        );
+        assert_eq!(state.recommended_albums, Some(Vec::new()));
+
+        // Never asked again: a key or another message does not repeat it.
+        assert!(ch(&mut state, 'j').commands.is_empty());
+    }
+
+    #[test]
+    fn without_the_catalog_recommended_albums_is_not_asked_for() {
+        let mut state = State::default();
+        let effects = update(&mut state, connected_msg(&[]));
+        assert!(effects.commands.is_empty());
+        assert_eq!(state.recommended_albums, None);
+    }
+
+    #[test]
+    fn the_answer_fills_recommended_albums() {
+        let mut state = State::default();
+        update(&mut state, connected_msg(&["catalog"]));
+        update(
+            &mut state,
+            Msg::Response {
+                tag: Tag::RecommendedAlbums,
+                result: Ok(Payload::Albums {
+                    from: phonia_ipc::AlbumListRef::RecommendedAlbums,
+                    page: phonia_ipc::Page {
+                        items: vec![library_album("1", "Versus")],
+                        total: 1,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
+        assert_eq!(
+            state.recommended_albums,
+            Some(vec![library_album("1", "Versus")])
         );
     }
 
