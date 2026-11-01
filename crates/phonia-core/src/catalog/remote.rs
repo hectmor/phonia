@@ -138,6 +138,9 @@ async fn send(
     let mut request = http
         .request(method, format!("{}{path}", account.base))
         .bearer_auth(account.token)
+        // `/home/*` refuses a request missing this (400, subStatus 1002); verified live that
+        // any value works and it is harmless on every other endpoint used here.
+        .header("x-tidal-client-version", "2026.1.5")
         .query(&[("countryCode", account.country)])
         .query(query);
     if !form.is_empty() {
@@ -220,6 +223,16 @@ fn favorites_query(offset: u32, limit: u32) -> Vec<(&'static str, String)> {
     let mut query = items_query(offset, limit);
     query.push(("order", "DATE".to_string()));
     query.push(("orderDirection", "DESC".to_string()));
+    query
+}
+
+/// The query of `/home/*`: paging, plus the params TIDAL's web client always sends and the
+/// endpoint refuses a request without (verified live; any value works).
+fn home_query(offset: u32, limit: u32) -> Vec<(&'static str, String)> {
+    let mut query = items_query(offset, limit);
+    query.push(("locale", "en_US".to_string()));
+    query.push(("deviceType", "BROWSER".to_string()));
+    query.push(("platform", "WEB".to_string()));
     query
 }
 
@@ -407,6 +420,23 @@ impl Catalog for TidalCatalog {
                 )
                 .await?;
             parse_favorited_items::<RawAlbum, Album>(&body)
+        })
+    }
+
+    fn recommended_albums(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Album>, CatalogError>> {
+        let catalog = self.clone();
+        Box::pin(async move {
+            let body = catalog
+                .get_v2(
+                    "/home/pages/ALBUM_RECOMMENDATIONS/view-all",
+                    home_query(offset, limit),
+                )
+                .await?;
+            parse_home_page(&body, offset)
         })
     }
 
@@ -1045,6 +1075,50 @@ fn parse_favorited_items<Raw: DeserializeOwned, T: From<Raw>>(
     Ok(read_items::<Raw, T>(page))
 }
 
+/// A page of a `/home/*` module's own items: each entry is `{"type":..., "data": {...}}`; only
+/// `data` is kept. Unlike every v1 listing here, TIDAL sends no total for this page at all (not
+/// even the caller's own offset echoed back), so `total` is a lower bound, not a real count.
+///
+/// shortcut: `total` undercounts whatever TIDAL has past this page; fine for a fixed-size Home
+/// block, wrong for a real "See all" view — recompute it for real if one is ever built on this.
+fn parse_home_page(body: &str, offset: u32) -> Result<Page<Album>, CatalogError> {
+    #[derive(Deserialize)]
+    struct RawHomePage {
+        #[serde(default)]
+        items: Vec<Value>,
+    }
+    #[derive(Deserialize)]
+    struct RawHomeItem {
+        data: Value,
+    }
+
+    let page: RawHomePage = serde_json::from_str(body).map_err(unreadable)?;
+    let mut skipped = 0;
+    let items: Vec<Album> = page
+        .items
+        .into_iter()
+        .filter_map(|value| {
+            let album = serde_json::from_value::<RawHomeItem>(value)
+                .ok()
+                .and_then(|raw| serde_json::from_value::<RawAlbum>(raw.data).ok());
+            if album.is_none() {
+                skipped += 1;
+            }
+            album.map(Album::from)
+        })
+        .collect();
+    if skipped > 0 {
+        crate::warn!(
+            "Warning: {skipped} item(s) of a TIDAL answer could not be read and were left out."
+        );
+    }
+    Ok(Page {
+        total: offset as u64 + items.len() as u64,
+        offset: offset as u64,
+        items,
+    })
+}
+
 /// A page of the user's own playlists, told apart from ones they only follow by comparing each
 /// entry's creator id to theirs.
 fn parse_my_playlists(body: &str, user_id: &str) -> Result<Page<Playlist>, CatalogError> {
@@ -1565,6 +1639,40 @@ mod tests {
             page.total, 100,
             "TIDAL's own count is kept even though the seed was filtered out locally"
         );
+    }
+
+    #[test]
+    fn a_home_page_unwraps_data_keeps_a_null_cover_and_skips_what_it_cannot_read() {
+        let page = parse_home_page(
+            r#"{"title":"Albums you'll enjoy","items":[
+                {"type":"ALBUM","following":false,"data":{"id":2134109,"title":"Versus","cover":"314af4eb"}},
+                {"type":"ALBUM","following":false,"data":{"id":82370295,"title":"Midnight Run","cover":null}},
+                {"type":"ALBUM","following":false,"data":"not an album"}
+            ]}"#,
+            10,
+        )
+        .unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|album| album.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Versus", "Midnight Run"]
+        );
+        assert_eq!(page.items[1].cover, None);
+        assert_eq!(page.offset, 10);
+        assert_eq!(
+            page.total, 12,
+            "no real total from TIDAL: offset + what came back"
+        );
+    }
+
+    #[test]
+    fn home_query_carries_the_params_home_endpoints_require() {
+        let query = home_query(0, 10);
+        assert!(query.contains(&("locale", "en_US".to_string())));
+        assert!(query.contains(&("deviceType", "BROWSER".to_string())));
+        assert!(query.contains(&("platform", "WEB".to_string())));
     }
 
     #[test]
