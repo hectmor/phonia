@@ -293,6 +293,15 @@ pub trait Catalog: Send + Sync {
         limit: u32,
     ) -> BoxFuture<'static, Result<Page<Album>, CatalogError>>;
 
+    /// TIDAL's own "Fans also like" for an artist: at most 50 of them, in TIDAL's own order.
+    /// TIDAL does not page this list itself (its own `offset` only slices inside whatever
+    /// `limit` was asked for, never reaching past it), so there is no `offset` parameter here.
+    fn similar_artists(
+        &self,
+        id: String,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Artist>, CatalogError>>;
+
     /// The tracks the logged-in user has favorited, newest first. At most [`MAX_ITEMS_LIMIT`]
     /// per page.
     fn favorite_tracks(

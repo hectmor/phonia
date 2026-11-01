@@ -732,12 +732,13 @@ impl Daemon {
             Ok(limit) => limit,
             Err(reply) => return reply,
         };
-        let (artist, bio, top_tracks, albums, singles) = tokio::join!(
+        let (artist, bio, top_tracks, albums, singles, similar) = tokio::join!(
             catalog.artist(id.clone()),
             catalog.artist_bio(id.clone()),
             catalog.artist_top_tracks(id.clone(), 0, limit),
             catalog.artist_albums(id.clone(), AlbumFilter::Albums, 0, limit),
-            catalog.artist_albums(id, AlbumFilter::EpsAndSingles, 0, limit),
+            catalog.artist_albums(id.clone(), AlbumFilter::EpsAndSingles, 0, limit),
+            catalog.similar_artists(id, limit),
         );
         match (artist, top_tracks, albums, singles) {
             (Ok(artist), Ok(top_tracks), Ok(albums), Ok(singles)) => Reply::Ok(Payload::Artist {
@@ -746,6 +747,12 @@ impl Daemon {
                 top_tracks: convert::page(&top_tracks, convert::track_summary),
                 albums: convert::page(&albums, convert::album_summary),
                 singles: convert::page(&singles, convert::album_summary),
+                // Tolerated: TIDAL's own "Fans also like" failing leaves only that one tab
+                // empty, not the rest of the artist page (#217).
+                similar: similar
+                    .inspect_err(|e| phonia_core::warn!("similar artists failed: {e}"))
+                    .ok()
+                    .map(|page| convert::page(&page, convert::artist_summary)),
             }),
             (Err(failure), ..)
             | (_, Err(failure), ..)

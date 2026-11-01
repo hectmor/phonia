@@ -867,6 +867,7 @@ fn on_view_response(state: &mut State, serial: u64, result: Result<Payload, Stri
                     top_tracks,
                     albums,
                     singles,
+                    similar,
                 }) if opening => {
                     artist.name = summary.name;
                     artist.picture = summary.picture;
@@ -874,6 +875,16 @@ fn on_view_response(state: &mut State, serial: u64, result: Result<Payload, Stri
                     artist.top_tracks = crate::list::Found::from_page(top_tracks);
                     artist.albums = crate::list::Found::from_page(albums);
                     artist.singles = crate::list::Found::from_page(singles);
+                    match similar {
+                        Some(page) => {
+                            artist.similar = crate::list::Found::from_page(page);
+                            artist.similar_failed = false;
+                        }
+                        None => {
+                            artist.similar = crate::list::Found::default();
+                            artist.similar_failed = true;
+                        }
+                    }
                     artist.phase = browse::Phase::Done;
                 }
                 // A later page of one of its three lists.
@@ -1360,9 +1371,10 @@ fn browsing_cursor(state: &mut State) -> Option<Cursor> {
 fn view_list_mut(view: &mut browse::View) -> (usize, &mut Cursor) {
     match view {
         browse::View::TrackList(view) => (view.tracks.items.len(), &mut view.tracks.cursor),
-        browse::View::Artist(artist) => match artist.tracks_or_albums() {
+        browse::View::Artist(artist) => match artist.current_list() {
             browse::ListRef::Tracks(found) => (found.items.len(), &mut found.cursor),
             browse::ListRef::Albums(found) => (found.items.len(), &mut found.cursor),
+            browse::ListRef::Artists(found) => (found.items.len(), &mut found.cursor),
         },
         browse::View::Folder(folder) => (folder.entries.items.len(), &mut folder.entries.cursor),
     }
@@ -1703,7 +1715,7 @@ fn load_more_results(state: &mut State) -> Vec<Cmd> {
             browse::View::Artist(artist) if artist.phase == browse::Phase::Done => {
                 let id = artist.id.clone();
                 let tab = artist.tab;
-                match artist.tracks_or_albums() {
+                match artist.current_list() {
                     browse::ListRef::Tracks(found) => {
                         found.next_offset().map(|offset| Request::Tracks {
                             from: phonia_ipc::CatalogRef::ArtistTopTracks { id },
@@ -1722,6 +1734,8 @@ fn load_more_results(state: &mut State) -> Vec<Cmd> {
                             limit: Some(crate::search::PAGE_SIZE),
                         })
                     }
+                    // TIDAL caps "Fans also like" at one page; it is never paged further.
+                    browse::ListRef::Artists(_found) => None,
                 }
             }
             browse::View::Folder(folder) if folder.phase == browse::Phase::Done => {
@@ -2509,6 +2523,7 @@ enum Row {
         index: usize,
     },
     Album(phonia_ipc::AlbumSummary),
+    Artist(phonia_ipc::ArtistSummary),
 }
 
 /// The row under the cursor of the view on top, if it has finished loading and has one.
@@ -2528,7 +2543,7 @@ fn browsed_row(state: &mut State) -> Option<Row> {
         }
         browse::View::Artist(artist) if artist.phase == browse::Phase::Done => {
             let id = artist.id.clone();
-            match artist.tracks_or_albums() {
+            match artist.current_list() {
                 browse::ListRef::Tracks(found) => {
                     let index = found.cursor.selected();
                     found.items.get(index).cloned().map(|track| Row::Track {
@@ -2540,6 +2555,10 @@ fn browsed_row(state: &mut State) -> Option<Row> {
                 browse::ListRef::Albums(found) => {
                     let index = found.cursor.selected();
                     found.items.get(index).cloned().map(Row::Album)
+                }
+                browse::ListRef::Artists(found) => {
+                    let index = found.cursor.selected();
+                    found.items.get(index).cloned().map(Row::Artist)
                 }
             }
         }
@@ -2592,6 +2611,20 @@ fn act_in_view(state: &mut State, action: Action) -> Effects {
             // default no-op.
             Action::Favorite(kind, favorite) => {
                 send_favorite(state, kind, album_target(kind, &album), favorite)
+            }
+            _ => Effects::default(),
+        },
+        // A row of "Fans also like" (#217): Enter opens the artist, `faa`/`fda` favorites it;
+        // everything else (it is neither a track, album nor playlist) is a no-op.
+        Some(Row::Artist(artist)) => match action {
+            Action::Activate => open_artist_view(
+                state,
+                artist.id.clone(),
+                artist.name.clone(),
+                artist.picture,
+            ),
+            Action::Favorite(kind, favorite) if kind == phonia_ipc::CatalogKind::Artists => {
+                send_favorite(state, kind, Some(artist.id.clone()), favorite)
             }
             _ => Effects::default(),
         },
@@ -5644,6 +5677,15 @@ mod tests {
                     )
                     .unwrap(),
                     singles: page_of(vec![album("11", "Freak")], 30, 0).unwrap(),
+                    similar: page_of(
+                        vec![phonia_ipc::ArtistSummary {
+                            id: "3642161".into(),
+                            name: "Caifanes".into(),
+                            picture: None,
+                        }],
+                        1,
+                        0,
+                    ),
                 }),
             },
         );
@@ -5663,7 +5705,7 @@ mod tests {
     }
 
     #[test]
-    fn the_answer_fills_the_bio_and_the_three_lists() {
+    fn the_answer_fills_the_bio_and_the_four_lists() {
         let (state, _) = in_an_open_artist();
         let Some(browse::View::Artist(view)) = state.search_views.top() else {
             panic!("no artist view")
@@ -5673,6 +5715,8 @@ mod tests {
         assert_eq!(view.top_tracks.items.len(), 3);
         assert_eq!(view.albums.items.len(), 2);
         assert_eq!(view.singles.items[0].title, "Freak");
+        assert_eq!(view.similar.items[0].name, "Caifanes");
+        assert!(!view.similar_failed);
     }
 
     #[test]
@@ -5693,6 +5737,7 @@ mod tests {
                     top_tracks: page_of(vec![], 0, 0).unwrap(),
                     albums: page_of(vec![], 0, 0).unwrap(),
                     singles: page_of(vec![], 0, 0).unwrap(),
+                    similar: None,
                 }),
             },
         );
@@ -5701,6 +5746,7 @@ mod tests {
         };
         assert_eq!(view.phase, browse::Phase::Done);
         assert_eq!(view.bio, None);
+        assert!(view.similar_failed);
     }
 
     #[test]
@@ -5720,7 +5766,17 @@ mod tests {
             panic!("no artist view")
         };
         assert_eq!(view.tab, browse::ArtistTab::Singles);
+        assert!(ch(&mut state, ']').redraw);
+        let Some(browse::View::Artist(view)) = state.search_views.top() else {
+            panic!("no artist view")
+        };
+        assert_eq!(view.tab, browse::ArtistTab::Similar);
         assert!(!ch(&mut state, ']').redraw, "stops at the last");
+        ch(&mut state, '[');
+        let Some(browse::View::Artist(view)) = state.search_views.top() else {
+            panic!("no artist view")
+        };
+        assert_eq!(view.tab, browse::ArtistTab::Singles);
         ch(&mut state, '[');
         let Some(browse::View::Artist(view)) = state.search_views.top() else {
             panic!("no artist view")
@@ -5795,8 +5851,7 @@ mod tests {
         ch(&mut state, 'h');
         assert_eq!(state.search_views.titles(), ["Korn"]);
 
-        ch(&mut state, ']');
-        ch(&mut state, ']');
+        ch(&mut state, ']'); // Albums -> Singles
         let (_, request) = tagged(ch(&mut state, 'a'));
         assert_eq!(
             request,

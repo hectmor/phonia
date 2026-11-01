@@ -752,6 +752,7 @@ fn format_artist(payload: &Payload) -> String {
         top_tracks,
         albums,
         singles,
+        ..
     } = payload
     else {
         return "unexpected answer".to_string();
@@ -2358,6 +2359,7 @@ mod tests {
                 total: 0,
                 offset: 0,
             },
+            similar: None,
         };
         let text = format_artist(&payload);
         assert!(
@@ -2430,6 +2432,7 @@ mod tests {
                 total: 30,
                 offset: 0,
             },
+            similar: None,
         };
         let text = format_artist(&payload);
         assert!(text.starts_with("Korn   artist 780\n\nxxx"), "{text}");
@@ -2470,6 +2473,7 @@ mod tests {
             top_tracks: empty(),
             albums: empty(),
             singles: empty(),
+            similar: None,
         });
         assert!(
             text.starts_with("Nobody   artist 1\n\nTop tracks (0 of 0):"),
