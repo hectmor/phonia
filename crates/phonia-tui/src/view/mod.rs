@@ -28,6 +28,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui_image::Image;
+use std::ops::RangeInclusive;
 
 /// The columns the sidebar takes: the longest section name and room for the border and the mark.
 const SIDEBAR_WIDTH: u16 = 14;
@@ -317,9 +318,9 @@ fn draw_queue(
         queue.items.len(),
         rows,
     );
-    let cursor = focused.then(|| state.queue_cursor.selected());
+    let marked = focused.then(|| state.queue_cursor.marked());
     frame.render_widget(
-        Paragraph::new(queue_lines(queue, cursor, start, rows, theme)),
+        Paragraph::new(queue_lines(queue, marked, start, rows, theme)),
         list_area,
     );
     Some(start)
@@ -373,10 +374,12 @@ pub fn keep_in_view(scroll: usize, cursor: usize, len: usize, rows: usize) -> us
 }
 
 /// The queue in queue order, as many rows as fit starting at `start`, with the entry playing
-/// marked and, when the list has the focus, the one under the cursor highlighted.
+/// marked and, when the list has the focus, every row `marked` covers highlighted (just the one
+/// under the cursor outside a block selection, since [`crate::cursor::Cursor::marked`] is then a
+/// range of one).
 fn queue_lines<'a>(
     queue: &phonia_ipc::Queue,
-    cursor: Option<usize>,
+    marked: Option<RangeInclusive<usize>>,
     start: usize,
     rows: usize,
     theme: &Theme,
@@ -403,7 +406,10 @@ fn queue_lines<'a>(
                 .duration_ms
                 .map(|ms| format!("  [{}]", phonia_ipc::fmt::ms(ms)))
                 .unwrap_or_default();
-            let style = if cursor == Some(index) {
+            let style = if marked
+                .as_ref()
+                .is_some_and(|marked| marked.contains(&index))
+            {
                 theme.selected
             } else if current {
                 theme.accent
@@ -1936,6 +1942,47 @@ mod tests {
     }
 
     #[test]
+    fn a_marked_block_is_highlighted_whole_and_keeps_the_playing_marker() {
+        let mut state = long_queue(5);
+        let mut queue = state.queue.clone().unwrap();
+        queue.current = Some(phonia_ipc::ItemId(2));
+        update(
+            &mut state,
+            Msg::Daemon(phonia_ipc::Event::QueueChanged { queue }),
+        );
+        press(&mut state, 'l');
+        press(&mut state, 'j');
+        press(&mut state, 'V');
+        press(&mut state, 'j');
+        press(&mut state, 'j');
+
+        let theme = Theme::new(false);
+        let mut terminal = Terminal::new(TestBackend::new(60, 14)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw(&state, &theme, &Covers::disabled(), frame);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let reversed_rows = (0..14)
+            .filter(|&y| {
+                (14..40).any(|x| {
+                    buffer[(x, y)]
+                        .modifier
+                        .contains(ratatui::style::Modifier::REVERSED)
+                })
+            })
+            .count();
+        assert_eq!(reversed_rows, 3, "the whole block is highlighted");
+
+        let text = screen(&state, 60, 14);
+        assert!(
+            text.contains(">  2."),
+            "the playing marker survives:\n{text}"
+        );
+    }
+
+    #[test]
     fn the_areas_do_not_overlap_and_fill_the_screen() {
         let area = Rect::new(0, 0, 80, 24);
         let a = areas(area);
@@ -2047,6 +2094,33 @@ mod tests {
             let _ = screen(&state, w, h);
             state.help = false;
         }
+    }
+
+    #[test]
+    fn a_marked_block_of_search_tracks_is_highlighted() {
+        let mut state = with_results();
+        state.focus = Focus::Main;
+        press(&mut state, 'V');
+        press(&mut state, 'j');
+
+        let theme = Theme::new(false);
+        let mut terminal = Terminal::new(TestBackend::new(70, 14)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw(&state, &theme, &Covers::disabled(), frame);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let reversed_rows = (0..14)
+            .filter(|&y| {
+                (0..70).any(|x| {
+                    buffer[(x, y)]
+                        .modifier
+                        .contains(ratatui::style::Modifier::REVERSED)
+                })
+            })
+            .count();
+        assert_eq!(reversed_rows, 2, "both marked tracks are highlighted");
     }
 
     #[test]
