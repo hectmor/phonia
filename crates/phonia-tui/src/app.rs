@@ -1141,9 +1141,10 @@ fn in_queue(state: &State) -> bool {
     state.focus == Focus::Main && state.section() == Section::Queue
 }
 
-/// The cursor `V` marks a block on: the queue's, or the search's track list with no view open
-/// over it. `None` anywhere else (the sidebar, Home, Library, a browsed view, another search
-/// tab), where a block selection means nothing.
+/// The cursor `V` marks a block on: the queue's, the search's track list with no view open over
+/// it, or an open view's own track list (an album's, a playlist's, a radio's, or an artist's top
+/// tracks, opened from Search, Library or Home alike). `None` anywhere else (the sidebar, an
+/// artist's other tabs, a folder), where a block selection means nothing.
 fn visual_cursor(state: &mut State) -> Option<&mut Cursor> {
     if in_queue(state) && queue_len(state) > 0 {
         return Some(&mut state.queue_cursor);
@@ -1157,7 +1158,47 @@ fn visual_cursor(state: &mut State) -> Option<&mut Cursor> {
     {
         return Some(&mut state.search.tracks.cursor);
     }
+    if state.focus == Focus::Main
+        && let Some(found) = open_tracks_mut(state)
+        && !found.items.is_empty()
+    {
+        return Some(&mut found.cursor);
+    }
     None
+}
+
+/// The track list an open view is showing right now, if it is showing one: an album's, a
+/// playlist's, or a radio's own tracks, or an artist's top tracks while that tab is selected.
+/// `None` for an artist's other tabs, a folder, or when nothing is open.
+fn open_tracks_mut(state: &mut State) -> Option<&mut crate::list::Found<phonia_ipc::TrackSummary>> {
+    match active_stack_mut(state)?.top_mut()? {
+        browse::View::TrackList(view) if view.phase == browse::Phase::Done => {
+            Some(&mut view.tracks)
+        }
+        browse::View::Artist(artist)
+            if artist.phase == browse::Phase::Done
+                && artist.tab == browse::ArtistTab::TopTracks =>
+        {
+            Some(&mut artist.top_tracks)
+        }
+        _ => None,
+    }
+}
+
+/// Takes the marked block out of `found` (dropping any track TIDAL will not stream here) and
+/// leaves visual mode, for one `QueueAdd` instead of the single row's.
+fn take_marked_tracks(
+    found: &mut crate::list::Found<phonia_ipc::TrackSummary>,
+) -> Vec<phonia_ipc::NewTrack> {
+    let marked = found.cursor.marked();
+    let (start, end) = (*marked.start(), *marked.end());
+    found.cursor.end_visual();
+    found.items[start..=end]
+        .iter()
+        .filter(|track| track.streamable)
+        .filter_map(|track| phonia_ipc::source::tidal(&track.id).ok())
+        .map(|source| phonia_ipc::NewTrack { source })
+        .collect()
 }
 
 /// Applies a change to the held status, if there is one (there always should be, once connected).
@@ -1413,6 +1454,9 @@ fn apply(state: &mut State, action: Action) -> Effects {
         Action::CloseHelp => {
             state.queue_cursor.end_visual();
             state.search.tracks.cursor.end_visual();
+            if let Some(found) = open_tracks_mut(state) {
+                found.cursor.end_visual();
+            }
         }
         Action::Visual => {
             if let Some(cursor) = visual_cursor(state) {
@@ -2638,6 +2682,25 @@ fn act_in_view(state: &mut State, action: Action) -> Effects {
             return Effects::default();
         };
         return act_on_folder_entry(state, action, entry);
+    }
+    // With a block marked over the open view's own track list, `a`/`A` add every marked,
+    // streamable track at once, in list order, instead of just the one under the cursor (the
+    // same block-add `act_on_result` already does for search's own Tracks tab).
+    if matches!(action, Action::AddToQueue | Action::AddNext)
+        && open_tracks_mut(state).is_some_and(|found| found.cursor.visual())
+    {
+        let tracks = take_marked_tracks(open_tracks_mut(state).expect("just checked above"));
+        if tracks.is_empty() {
+            state.last_error =
+                Some("none of the marked tracks are available where you are".to_string());
+            return Effects::redraw();
+        }
+        let at = if action == Action::AddNext {
+            phonia_ipc::AddAt::Next
+        } else {
+            phonia_ipc::AddAt::End
+        };
+        return send_add(state, Request::QueueAdd { tracks, at }, false);
     }
     match browsed_row(state) {
         Some(Row::Track { of, track, index }) => act_on_track_row(state, action, of, track, index),
@@ -5764,6 +5827,56 @@ mod tests {
     }
 
     #[test]
+    fn v_then_a_adds_every_marked_track_of_an_open_album() {
+        let (mut state, _) = in_an_open_album(true);
+        ch(&mut state, 'j'); // "Trash"
+        ch(&mut state, 'V');
+        ch(&mut state, 'j'); // marks "Trash" and "4U"
+        let (tag, request) = tagged(ch(&mut state, 'a'));
+        assert_eq!(tag, Tag::Add { play: false });
+        assert_eq!(
+            request,
+            Request::QueueAdd {
+                tracks: vec![
+                    phonia_ipc::NewTrack {
+                        source: "tidal:2".into()
+                    },
+                    phonia_ipc::NewTrack {
+                        source: "tidal:3".into()
+                    },
+                ],
+                at: phonia_ipc::AddAt::End
+            }
+        );
+        let Some(crate::browse::View::TrackList(view)) = state.search_views.top() else {
+            panic!("no view")
+        };
+        assert!(
+            !view.tracks.cursor.visual(),
+            "visual mode ends once the block is added"
+        );
+    }
+
+    #[test]
+    fn escape_leaves_the_albums_block_without_adding_anything() {
+        let (mut state, _) = in_an_open_album(true);
+        ch(&mut state, 'V');
+        ch(&mut state, 'j');
+        press(&mut state, KeyCode::Esc);
+        let (_, request) = tagged(ch(&mut state, 'a'));
+        assert_eq!(
+            request,
+            Request::QueueAdd {
+                tracks: vec![phonia_ipc::NewTrack {
+                    source: "tidal:2".into()
+                }],
+                at: phonia_ipc::AddAt::End
+            },
+            "only the row under the cursor (where it was left), not the block that was cancelled"
+        );
+    }
+
+    #[test]
     fn h_backspace_and_starting_a_new_search_all_close_the_album() {
         let (mut state, _) = in_an_open_album(true);
         assert!(!state.search_views.is_empty());
@@ -6102,6 +6215,37 @@ mod tests {
                 at: phonia_ipc::AddAt::End
             }
         );
+    }
+
+    #[test]
+    fn v_then_a_adds_every_marked_top_track_skipping_the_one_that_cannot_stream() {
+        let (mut state, _) = in_an_open_artist();
+        ch(&mut state, 'V');
+        ch(&mut state, 'j');
+        ch(&mut state, 'j'); // marks all three top tracks; "Blind" cannot be streamed
+        let (tag, request) = tagged(ch(&mut state, 'a'));
+        assert_eq!(tag, Tag::Add { play: false });
+        assert_eq!(
+            request,
+            Request::QueueAdd {
+                tracks: vec![
+                    phonia_ipc::NewTrack {
+                        source: "tidal:1".into()
+                    },
+                    phonia_ipc::NewTrack {
+                        source: "tidal:3".into()
+                    },
+                ],
+                at: phonia_ipc::AddAt::End
+            }
+        );
+    }
+
+    #[test]
+    fn v_does_nothing_on_the_artists_albums_tab() {
+        let (mut state, _) = in_an_open_artist();
+        ch(&mut state, ']'); // Albums: not a track list
+        assert_eq!(ch(&mut state, 'V'), Effects::default());
     }
 
     #[test]

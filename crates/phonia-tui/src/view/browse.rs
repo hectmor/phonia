@@ -140,10 +140,11 @@ fn header_lines(header: &Header, theme: &Theme) -> Vec<Line<'static>> {
 }
 
 /// The tracks, numbered as they are on the album or the playlist, the one under the cursor
-/// highlighted when the list has the focus, the one playing marked the same way the queue marks
-/// its own current entry, and one TIDAL will not stream dimmed. `full` adds the artist and the
-/// album to each row (`fmt::track`); without it (`fmt::track_short`) both are left out, for an
-/// album's own tracks, where the header already names the one artist and this is the album.
+/// highlighted when the list has the focus (the whole block, while `V` has one marked), the one
+/// playing marked the same way the queue marks its own current entry, and one TIDAL will not
+/// stream dimmed. `full` adds the artist and the album to each row (`fmt::track`); without it
+/// (`fmt::track_short`) both are left out, for an album's own tracks, where the header already
+/// names the one artist and this is the album.
 fn track_rows<'a>(
     tracks: &[TrackSummary],
     cursor: Cursor,
@@ -157,6 +158,7 @@ fn track_rows<'a>(
         return (vec![Line::styled("No tracks.", theme.dim)], None);
     }
     let selected = cursor.selected();
+    let marked = cursor.marked();
     let start = keep_in_view(cursor.scroll(), selected, tracks.len(), height);
     let lines = tracks
         .iter()
@@ -173,7 +175,7 @@ fn track_rows<'a>(
                 fmt::track_short(track)
             };
             let text = format!("{marker}{number:>3}. {described}");
-            let style = if focused && index == selected {
+            let style = if focused && marked.contains(&index) {
                 theme.selected
             } else if current {
                 theme.accent
