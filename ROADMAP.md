@@ -20,6 +20,7 @@ on, and the [README](README.md) for what phonia is.
 | [`v1.0.0`](https://github.com/hectmor/phonia/releases/tag/v1.0.0) | 2026-10-14 | First release off `main`: phases 0–3 and 6 complete, 4 and 7 code complete |
 | [`v1.1.0`](https://github.com/hectmor/phonia/releases/tag/v1.1.0) | 2026-10-23 | Additive, no breaking changes: the responsive TUI (#175), the dropped sound-server and debug-build fixes (#184, #186), dual MIT OR Apache-2.0 with third-party notices (#173), and the document split (#169) |
 | [`v1.2.0`](https://github.com/hectmor/phonia/releases/tag/v1.2.0) | 2026-10-31 | Additive, no breaking changes: TOML themes (#38), the TUI owning its own `phoniad` (#192), `ga`/`gr` reach (#194), favorite add/remove (#196), the scroll-window fix (#198), docs/screenshot catch-up (#200), auto output selection and DAC-lost handling (#157), artist and album everywhere over protocol 1.20 (#207), and the device-name fix (#211) |
+| [`v1.3.0`](https://github.com/hectmor/phonia/releases/tag/v1.3.0) | 2026-11-03 | Additive, no breaking changes: "Albums you'll enjoy" on Home over protocol 1.21 (#214), similar artists on the artist page over protocol 1.22 (#217), and vim-style `shift+V` visual block selection in the Queue, Search and any open view (#219) |
 
 Earlier tags (`v0.2.0`–`v0.4.0`) were cut on `develop` before `main` was kept
 current, and the workspace version was not raised with them; `v1.0.0` is the
@@ -33,7 +34,7 @@ first tag where the tag, `main` and `Cargo.toml` agree.
 | 1 — Daemon and playback engine | [Fase 1](https://github.com/hectmor/phonia/milestone/2) | Done (#8–#16, #47, #52, #53) |
 | 2 — TUI base | [Fase 2](https://github.com/hectmor/phonia/milestone/3) | Done (#17–#24) |
 | 3 — Audio quality | [Fase 3](https://github.com/hectmor/phonia/milestone/4) | Done (#25–#31) |
-| 4 — SONE-like features | [Fase 4](https://github.com/hectmor/phonia/milestone/5) | In progress (#196 part 2; #214, #217 done; #35, #36, #37 unscoped) |
+| 4 — SONE-like features | [Fase 4](https://github.com/hectmor/phonia/milestone/5) | In progress (#196 part 2; #214, #217, #219 done; #35, #36, #37 unscoped) |
 | 5 — Extras and packaging | [Fase 5](https://github.com/hectmor/phonia/milestone/6) | In progress (CI, licensing, the process rules and #192 done; packaging open) |
 | 6 — Layout and appearance | [Fase 6](https://github.com/hectmor/phonia/milestone/7) | Done (#124, #159, #160, #175, #188, #198, #207) |
 | 7 — Home screen and discovery | [Fase 7](https://github.com/hectmor/phonia/milestone/8) | Done (#139, #144, #169, #171, #194) |
@@ -161,11 +162,10 @@ deliberately separate, not-yet-investigated future issue, the same territory
 
 ## Right now
 
-`v1.2.0` is out, bringing #157 (auto output selection and DAC-lost handling),
-#207 (artist and album everywhere) and #211 (device-name fix) into `main`
-along with #38, #192, #194, #196 and #198. Phases 0–3, 6 and 7 are closed
-again (#207 done); phase 4 is code complete except for work nobody has
-scoped yet. #157's own follow-up bugs surfaced a new one, #206, still open.
+`v1.3.0` is out, bringing #214 (recommended albums on Home), #217 (similar
+artists) and #219 (visual block selection) into `main`. Phases 0–3, 6 and 7
+stay closed; phase 4 is in progress, with #196 part 2 and #35–#37 still
+unscoped. #157's own follow-up bug, #206, is still open.
 
 What is actually left, in no committed order:
 
