@@ -519,9 +519,10 @@ fn signal_line<'a>(state: &State, theme: &Theme, width: u16) -> Line<'a> {
         route_text.push(' ');
         route_text.push_str(&phonia_ipc::fmt::sample_rate(rate));
     }
+    // The verdict already says SHARED, so a route that just wraps the device (#222) shows the
+    // device alone.
     let device = match &status.route {
-        Some(route) if route.description.contains(&report.device) => route.description.clone(),
-        Some(route) if route.description != report.device => {
+        Some(route) if !route.description.contains(&report.device) => {
             format!("{} ({})", route.description, report.device)
         }
         _ => report.device.clone(),
@@ -1370,7 +1371,7 @@ mod tests {
     }
 
     #[test]
-    fn the_default_output_does_not_repeat_the_device_name() {
+    fn the_default_output_shows_just_the_device_name() {
         use phonia_ipc::{OutputMode, Route};
         let mut state = playing(SPEC_96K);
         state.status.as_mut().unwrap().route = Some(Route {
@@ -1386,11 +1387,27 @@ mod tests {
             })),
         );
         let text = screen(&state, 120, 12);
+        assert!(text.contains("\u{2192} MOMENTUM TW 4  \u{2716}"), "{text}");
+        assert!(!text.contains("The desktop's default output"), "{text}");
+        assert!(!text.contains("(MOMENTUM TW 4) (MOMENTUM TW 4)"), "{text}");
+    }
+
+    #[test]
+    fn the_idle_line_still_says_it_follows_the_default() {
+        use phonia_ipc::{OutputMode, Route};
+        let mut state = connected();
+        state.status.as_mut().unwrap().route = Some(Route {
+            id: "shared:default".into(),
+            mode: OutputMode::Shared,
+            description: "The desktop's default output (MOMENTUM TW 4)".into(),
+        });
+        let text = screen(&state, 120, 12);
         assert!(
-            text.contains("The desktop's default output (MOMENTUM TW 4)  \u{2716}"),
+            text.contains(
+                "Output: The desktop's default output (MOMENTUM TW 4) (shared, not bit-perfect)"
+            ),
             "{text}"
         );
-        assert!(!text.contains("(MOMENTUM TW 4) (MOMENTUM TW 4)"), "{text}");
     }
 
     #[test]
