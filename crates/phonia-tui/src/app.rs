@@ -1141,6 +1141,66 @@ fn in_queue(state: &State) -> bool {
     state.focus == Focus::Main && state.section() == Section::Queue
 }
 
+/// The cursor `V` marks a block on: the queue's, the search's track list with no view open over
+/// it, or an open view's own track list (an album's, a playlist's, a radio's, or an artist's top
+/// tracks, opened from Search, Library or Home alike). `None` anywhere else (the sidebar, an
+/// artist's other tabs, a folder), where a block selection means nothing.
+fn visual_cursor(state: &mut State) -> Option<&mut Cursor> {
+    if in_queue(state) && queue_len(state) > 0 {
+        return Some(&mut state.queue_cursor);
+    }
+    if state.focus == Focus::Main
+        && state.section() == Section::Search
+        && state.search_views.is_empty()
+        && state.search.tab == Tab::Tracks
+        && state.search.phase == Phase::Done
+        && !state.search.tracks.items.is_empty()
+    {
+        return Some(&mut state.search.tracks.cursor);
+    }
+    if state.focus == Focus::Main
+        && let Some(found) = open_tracks_mut(state)
+        && !found.items.is_empty()
+    {
+        return Some(&mut found.cursor);
+    }
+    None
+}
+
+/// The track list an open view is showing right now, if it is showing one: an album's, a
+/// playlist's, or a radio's own tracks, or an artist's top tracks while that tab is selected.
+/// `None` for an artist's other tabs, a folder, or when nothing is open.
+fn open_tracks_mut(state: &mut State) -> Option<&mut crate::list::Found<phonia_ipc::TrackSummary>> {
+    match active_stack_mut(state)?.top_mut()? {
+        browse::View::TrackList(view) if view.phase == browse::Phase::Done => {
+            Some(&mut view.tracks)
+        }
+        browse::View::Artist(artist)
+            if artist.phase == browse::Phase::Done
+                && artist.tab == browse::ArtistTab::TopTracks =>
+        {
+            Some(&mut artist.top_tracks)
+        }
+        _ => None,
+    }
+}
+
+/// Takes the marked block out of `found` (dropping any track TIDAL will not stream here) and
+/// leaves visual mode, for one `QueueAdd` instead of the single row's.
+fn take_marked_tracks(
+    found: &mut crate::list::Found<phonia_ipc::TrackSummary>,
+) -> Vec<phonia_ipc::NewTrack> {
+    let marked = found.cursor.marked();
+    let (start, end) = (*marked.start(), *marked.end());
+    found.cursor.end_visual();
+    found.items[start..=end]
+        .iter()
+        .filter(|track| track.streamable)
+        .filter_map(|track| phonia_ipc::source::tidal(&track.id).ok())
+        .map(|source| phonia_ipc::NewTrack { source })
+        .collect()
+}
+
 /// Applies a change to the held status, if there is one (there always should be, once connected).
 fn set_status(state: &mut State, change: impl FnOnce(&mut Status)) {
     if let Some(status) = &mut state.status {
@@ -1389,8 +1449,20 @@ fn apply(state: &mut State, action: Action) -> Effects {
             state.help = !state.help;
             state.help_scroll = 0;
         }
-        // Only means something while the help is open, which is handled apart.
-        Action::CloseHelp => {}
+        // While the help is open this is handled apart; otherwise it leaves a block selection,
+        // wherever one might be open.
+        Action::CloseHelp => {
+            state.queue_cursor.end_visual();
+            state.search.tracks.cursor.end_visual();
+            if let Some(found) = open_tracks_mut(state) {
+                found.cursor.end_visual();
+            }
+        }
+        Action::Visual => {
+            if let Some(cursor) = visual_cursor(state) {
+                cursor.toggle_visual();
+            }
+        }
         Action::FocusNext => {
             state.focus = match state.focus {
                 Focus::Sidebar => Focus::Main,
@@ -1875,6 +1947,33 @@ fn act_on_result(state: &mut State, action: Action) -> Effects {
             }
             Selected::Track(_) => {}
         }
+    }
+    // With a block marked over the track results, `a`/`A` add every marked, streamable track at
+    // once, in list order, instead of just the one under the cursor.
+    if matches!(action, Action::AddToQueue | Action::AddNext)
+        && state.search.tab == Tab::Tracks
+        && state.search.tracks.cursor.visual()
+    {
+        let marked = state.search.tracks.cursor.marked();
+        let (start, end) = (*marked.start(), *marked.end());
+        let tracks: Vec<_> = state.search.tracks.items[start..=end]
+            .iter()
+            .filter(|track| track.streamable)
+            .filter_map(|track| phonia_ipc::source::tidal(&track.id).ok())
+            .map(|source| phonia_ipc::NewTrack { source })
+            .collect();
+        state.search.tracks.cursor.end_visual();
+        if tracks.is_empty() {
+            state.last_error =
+                Some("none of the marked tracks are available where you are".to_string());
+            return Effects::redraw();
+        }
+        let at = if action == Action::AddNext {
+            phonia_ipc::AddAt::Next
+        } else {
+            phonia_ipc::AddAt::End
+        };
+        return send_add(state, Request::QueueAdd { tracks, at }, false);
     }
     let play = action == Action::Activate;
     // Enter and `a` both go to the end of the queue; only `A` goes right after the track playing.
@@ -2584,6 +2683,25 @@ fn act_in_view(state: &mut State, action: Action) -> Effects {
         };
         return act_on_folder_entry(state, action, entry);
     }
+    // With a block marked over the open view's own track list, `a`/`A` add every marked,
+    // streamable track at once, in list order, instead of just the one under the cursor (the
+    // same block-add `act_on_result` already does for search's own Tracks tab).
+    if matches!(action, Action::AddToQueue | Action::AddNext)
+        && open_tracks_mut(state).is_some_and(|found| found.cursor.visual())
+    {
+        let tracks = take_marked_tracks(open_tracks_mut(state).expect("just checked above"));
+        if tracks.is_empty() {
+            state.last_error =
+                Some("none of the marked tracks are available where you are".to_string());
+            return Effects::redraw();
+        }
+        let at = if action == Action::AddNext {
+            phonia_ipc::AddAt::Next
+        } else {
+            phonia_ipc::AddAt::End
+        };
+        return send_add(state, Request::QueueAdd { tracks, at }, false);
+    }
     match browsed_row(state) {
         Some(Row::Track { of, track, index }) => act_on_track_row(state, action, of, track, index),
         Some(Row::Album(album)) => match action {
@@ -2952,8 +3070,9 @@ fn jump_to_library(state: &mut State, tab: LibraryTab) -> Effects {
     Effects::redraw()
 }
 
-/// The queue's edits and Enter, on the selected entry: sent while connected and looking at the
-/// queue, and refused silently otherwise, like the playback keys.
+/// The queue's edits and Enter, on the selected entry (or, with a block marked, every marked
+/// entry): sent while connected and looking at the queue, and refused silently otherwise, like
+/// the playback keys.
 fn edit_queue(state: &mut State, action: Action) -> Effects {
     if state.connection != Connection::Connected || !in_queue(state) {
         return Effects::default();
@@ -2963,37 +3082,54 @@ fn edit_queue(state: &mut State, action: Action) -> Effects {
     };
     let index = state.queue_cursor.selected();
     let len = queue.items.len();
+    let marked = state.queue_cursor.marked();
+    let (start, end) = (*marked.start(), *marked.end());
     let selected = queue.items.get(index).map(|item| item.id);
     let request = match action {
         Action::Activate => selected.map(|item| Request::Play { item: Some(item) }),
-        Action::RemoveEntry => selected.map(|id| Request::QueueRemove { ids: vec![id] }),
+        Action::RemoveEntry => queue
+            .items
+            .get(start..=end)
+            .map(|block| Request::QueueRemove {
+                ids: block.iter().map(|item| item.id).collect(),
+            }),
         Action::ClearQueue => (len > 0).then_some(Request::QueueClear),
-        // The entry moves one place, and the cursor goes with it.
-        Action::MoveEntryDown if index + 1 < len => {
-            selected.map(|id| Request::QueueMove { id, to: index + 1 })
-        }
-        Action::MoveEntryUp if index > 0 => {
-            selected.map(|id| Request::QueueMove { id, to: index - 1 })
-        }
+        // A block moves one place as a unit by moving its neighbour to the other side instead:
+        // `move_to` (phonia-core's queue/inner.rs) removes the entry and inserts it at the given
+        // index measured after the removal, so moving the entry just past the block to the
+        // block's own start has the same effect as shifting every marked entry down by one (and
+        // the mirror for up) -- in one request, so there is no in-between state to render. This
+        // also covers a single-row selection, replacing the old "move the selected entry" code.
+        Action::MoveEntryDown => queue.items.get(end + 1).map(|next| Request::QueueMove {
+            id: next.id,
+            to: start,
+        }),
+        Action::MoveEntryUp => start
+            .checked_sub(1)
+            .and_then(|i| queue.items.get(i))
+            .map(|prev| Request::QueueMove {
+                id: prev.id,
+                to: end,
+            }),
         _ => None,
     };
     let Some(request) = request else {
         return Effects::default();
     };
     let had_error = state.last_error.take().is_some();
+    let before = state.queue_cursor;
     match action {
-        Action::MoveEntryDown => state.queue_cursor.select(index + 1, len),
-        Action::MoveEntryUp => state.queue_cursor.select(index - 1, len),
+        Action::MoveEntryDown => state.queue_cursor.slide(true),
+        Action::MoveEntryUp => state.queue_cursor.slide(false),
         Action::ClearQueue => state.queue_cursor.first(),
+        Action::RemoveEntry => {
+            state.queue_cursor.select(start, len);
+            state.queue_cursor.end_visual();
+        }
         _ => {}
     }
     Effects {
-        // The cursor moving with an entry is a change to show; sending alone is not.
-        redraw: had_error
-            || matches!(
-                action,
-                Action::MoveEntryDown | Action::MoveEntryUp | Action::ClearQueue
-            ),
+        redraw: had_error || state.queue_cursor != before,
         commands: vec![Cmd::Send(request)],
     }
 }
@@ -4042,16 +4178,29 @@ mod tests {
 
     #[test]
     fn capital_j_and_k_move_the_entry_and_the_cursor_goes_with_it() {
+        // A single row moves by moving its neighbour to the other side instead (see
+        // `edit_queue`): the entry at 1 (id 2) ends up after the entry at 2 (id 3), same as
+        // before, but the request sent is `QueueMove` on the neighbour, not the entry itself.
         let mut state = in_the_queue(4);
         ch(&mut state, 'j');
         assert_eq!(
             sent(ch(&mut state, 'J')),
-            Request::QueueMove { id: id(2), to: 2 }
+            Request::QueueMove { id: id(3), to: 1 }
         );
         assert_eq!(state.queue_cursor.selected(), 2);
+
+        // The daemon answers with the order the move produced: [1, 3, 2, 4].
+        let mut moved = state.queue.clone().unwrap();
+        moved.items.swap(1, 2);
+        moved.order = moved.items.iter().map(|item| item.id).collect();
+        update(
+            &mut state,
+            Msg::Daemon(Event::QueueChanged { queue: moved }),
+        );
+
         assert_eq!(
             sent(ch(&mut state, 'K')),
-            Request::QueueMove { id: id(3), to: 1 }
+            Request::QueueMove { id: id(3), to: 2 }
         );
         assert_eq!(state.queue_cursor.selected(), 1);
     }
@@ -4085,7 +4234,7 @@ mod tests {
         // In the sidebar.
         let mut state = in_the_queue(3);
         ch(&mut state, 'h');
-        for key in ['d', 'J', 'K'] {
+        for key in ['d', 'J', 'K', 'V'] {
             assert_eq!(ch(&mut state, key), Effects::default(), "sidebar, {key}");
         }
         ch(&mut state, 'c');
@@ -4100,12 +4249,128 @@ mod tests {
 
         // On an empty queue.
         let mut state = in_the_queue(0);
-        for key in ['d', 'J', 'K'] {
+        for key in ['d', 'J', 'K', 'V'] {
             assert_eq!(ch(&mut state, key), Effects::default(), "empty, {key}");
         }
         assert_eq!(press(&mut state, KeyCode::Enter), Effects::default());
         ch(&mut state, 'c');
         assert_eq!(ch(&mut state, 'c'), Effects::default(), "nothing to clear");
+    }
+
+    #[test]
+    fn v_then_d_removes_every_marked_entry_and_leaves_visual() {
+        let mut state = in_the_queue(5);
+        ch(&mut state, 'j');
+        ch(&mut state, 'V');
+        ch(&mut state, 'j');
+        ch(&mut state, 'j');
+        assert_eq!(
+            sent(ch(&mut state, 'd')),
+            Request::QueueRemove {
+                ids: vec![id(2), id(3), id(4)]
+            }
+        );
+        assert_eq!(state.queue_cursor.selected(), 1);
+        assert_eq!(state.queue_cursor.marked(), 1..=1);
+        assert!(!state.queue_cursor.visual());
+    }
+
+    #[test]
+    fn escape_leaves_visual_without_sending_anything() {
+        let mut state = in_the_queue(5);
+        ch(&mut state, 'V');
+        ch(&mut state, 'j');
+        let effects = press(&mut state, KeyCode::Esc);
+        assert!(effects.commands.is_empty());
+        assert!(effects.redraw);
+        assert!(!state.queue_cursor.visual());
+
+        assert_eq!(
+            sent(ch(&mut state, 'd')),
+            Request::QueueRemove { ids: vec![id(2)] }
+        );
+    }
+
+    #[test]
+    fn capital_j_and_k_move_a_block_as_a_unit() {
+        let mut state = in_the_queue(5);
+        ch(&mut state, 'j');
+        ch(&mut state, 'V');
+        ch(&mut state, 'j');
+        assert_eq!(state.queue_cursor.marked(), 1..=2);
+        assert_eq!(
+            sent(ch(&mut state, 'J')),
+            Request::QueueMove { id: id(4), to: 1 }
+        );
+        assert_eq!(state.queue_cursor.marked(), 2..=3);
+
+        // The daemon answers with the order the move produced: [1, 4, 2, 3, 5].
+        let mut moved = state.queue.clone().unwrap();
+        moved.items = [1u64, 4, 2, 3, 5]
+            .into_iter()
+            .map(|n| phonia_ipc::QueueItem {
+                id: id(n),
+                ..moved.items[0].clone()
+            })
+            .collect();
+        moved.order = moved.items.iter().map(|item| item.id).collect();
+        update(
+            &mut state,
+            Msg::Daemon(Event::QueueChanged { queue: moved }),
+        );
+
+        assert_eq!(
+            sent(ch(&mut state, 'K')),
+            Request::QueueMove { id: id(4), to: 3 }
+        );
+        assert_eq!(state.queue_cursor.marked(), 1..=2);
+    }
+
+    #[test]
+    fn a_block_cannot_move_past_the_ends() {
+        let mut state = in_the_queue(5);
+        ch(&mut state, 'V');
+        ch(&mut state, 'j');
+        assert_eq!(state.queue_cursor.marked(), 0..=1);
+        assert_eq!(
+            ch(&mut state, 'K'),
+            Effects::default(),
+            "already at the top"
+        );
+
+        let mut state = in_the_queue(5);
+        ch(&mut state, 'G');
+        ch(&mut state, 'V');
+        ch(&mut state, 'k');
+        assert_eq!(state.queue_cursor.marked(), 3..=4);
+        assert_eq!(
+            ch(&mut state, 'J'),
+            Effects::default(),
+            "already at the bottom"
+        );
+    }
+
+    #[test]
+    fn a_queue_that_shrinks_under_a_block_pulls_it_back() {
+        let mut state = in_the_queue(5);
+        ch(&mut state, 'G');
+        ch(&mut state, 'V');
+        ch(&mut state, 'k');
+        assert_eq!(state.queue_cursor.marked(), 3..=4);
+
+        let mut shorter = state.queue.clone().unwrap();
+        shorter.items.truncate(3);
+        shorter.order.truncate(3);
+        update(
+            &mut state,
+            Msg::Daemon(Event::QueueChanged { queue: shorter }),
+        );
+        assert_eq!(state.queue_cursor.marked(), 2..=2);
+
+        assert_eq!(
+            sent(ch(&mut state, 'd')),
+            Request::QueueRemove { ids: vec![id(3)] }
+        );
     }
 
     #[test]
@@ -4640,6 +4905,84 @@ mod tests {
                 at: phonia_ipc::AddAt::End
             }
         );
+    }
+
+    #[test]
+    fn v_then_a_adds_every_marked_track_in_list_order() {
+        let mut state = with_results(vec![track_row(11), track_row(12), track_row(13)], 3);
+        ch(&mut state, 'j');
+        ch(&mut state, 'V');
+        ch(&mut state, 'j');
+        let (tag, request) = tagged(ch(&mut state, 'a'));
+        assert_eq!(tag, Tag::Add { play: false });
+        assert_eq!(
+            request,
+            Request::QueueAdd {
+                tracks: vec![
+                    phonia_ipc::NewTrack {
+                        source: "tidal:12".into()
+                    },
+                    phonia_ipc::NewTrack {
+                        source: "tidal:13".into()
+                    },
+                ],
+                at: phonia_ipc::AddAt::End,
+            }
+        );
+        assert!(!state.search.tracks.cursor.visual());
+
+        // Marking the same two rows from the other end sends them in the same, list order.
+        let mut state = with_results(vec![track_row(11), track_row(12), track_row(13)], 3);
+        ch(&mut state, 'G');
+        ch(&mut state, 'V');
+        ch(&mut state, 'k');
+        let (_, request) = tagged(ch(&mut state, 'a'));
+        assert_eq!(
+            request,
+            Request::QueueAdd {
+                tracks: vec![
+                    phonia_ipc::NewTrack {
+                        source: "tidal:12".into()
+                    },
+                    phonia_ipc::NewTrack {
+                        source: "tidal:13".into()
+                    },
+                ],
+                at: phonia_ipc::AddAt::End,
+            }
+        );
+    }
+
+    #[test]
+    fn a_block_skips_tracks_that_are_not_available() {
+        let mut tracks = vec![track_row(11), track_row(12), track_row(13)];
+        tracks[1].streamable = false;
+        let mut state = with_results(tracks, 3);
+        ch(&mut state, 'V');
+        ch(&mut state, 'G');
+        let (_, request) = tagged(ch(&mut state, 'a'));
+        assert_eq!(
+            request,
+            Request::QueueAdd {
+                tracks: vec![
+                    phonia_ipc::NewTrack {
+                        source: "tidal:11".into()
+                    },
+                    phonia_ipc::NewTrack {
+                        source: "tidal:13".into()
+                    },
+                ],
+                at: phonia_ipc::AddAt::End,
+            }
+        );
+    }
+
+    #[test]
+    fn v_does_nothing_outside_the_track_results() {
+        let mut state = with_results(vec![track_row(11)], 1);
+        ch(&mut state, ']');
+        assert_eq!(state.search.tab, Tab::Albums);
+        assert_eq!(ch(&mut state, 'V'), Effects::default());
     }
 
     #[test]
@@ -5484,6 +5827,56 @@ mod tests {
     }
 
     #[test]
+    fn v_then_a_adds_every_marked_track_of_an_open_album() {
+        let (mut state, _) = in_an_open_album(true);
+        ch(&mut state, 'j'); // "Trash"
+        ch(&mut state, 'V');
+        ch(&mut state, 'j'); // marks "Trash" and "4U"
+        let (tag, request) = tagged(ch(&mut state, 'a'));
+        assert_eq!(tag, Tag::Add { play: false });
+        assert_eq!(
+            request,
+            Request::QueueAdd {
+                tracks: vec![
+                    phonia_ipc::NewTrack {
+                        source: "tidal:2".into()
+                    },
+                    phonia_ipc::NewTrack {
+                        source: "tidal:3".into()
+                    },
+                ],
+                at: phonia_ipc::AddAt::End
+            }
+        );
+        let Some(crate::browse::View::TrackList(view)) = state.search_views.top() else {
+            panic!("no view")
+        };
+        assert!(
+            !view.tracks.cursor.visual(),
+            "visual mode ends once the block is added"
+        );
+    }
+
+    #[test]
+    fn escape_leaves_the_albums_block_without_adding_anything() {
+        let (mut state, _) = in_an_open_album(true);
+        ch(&mut state, 'V');
+        ch(&mut state, 'j');
+        press(&mut state, KeyCode::Esc);
+        let (_, request) = tagged(ch(&mut state, 'a'));
+        assert_eq!(
+            request,
+            Request::QueueAdd {
+                tracks: vec![phonia_ipc::NewTrack {
+                    source: "tidal:2".into()
+                }],
+                at: phonia_ipc::AddAt::End
+            },
+            "only the row under the cursor (where it was left), not the block that was cancelled"
+        );
+    }
+
+    #[test]
     fn h_backspace_and_starting_a_new_search_all_close_the_album() {
         let (mut state, _) = in_an_open_album(true);
         assert!(!state.search_views.is_empty());
@@ -5822,6 +6215,37 @@ mod tests {
                 at: phonia_ipc::AddAt::End
             }
         );
+    }
+
+    #[test]
+    fn v_then_a_adds_every_marked_top_track_skipping_the_one_that_cannot_stream() {
+        let (mut state, _) = in_an_open_artist();
+        ch(&mut state, 'V');
+        ch(&mut state, 'j');
+        ch(&mut state, 'j'); // marks all three top tracks; "Blind" cannot be streamed
+        let (tag, request) = tagged(ch(&mut state, 'a'));
+        assert_eq!(tag, Tag::Add { play: false });
+        assert_eq!(
+            request,
+            Request::QueueAdd {
+                tracks: vec![
+                    phonia_ipc::NewTrack {
+                        source: "tidal:1".into()
+                    },
+                    phonia_ipc::NewTrack {
+                        source: "tidal:3".into()
+                    },
+                ],
+                at: phonia_ipc::AddAt::End
+            }
+        );
+    }
+
+    #[test]
+    fn v_does_nothing_on_the_artists_albums_tab() {
+        let (mut state, _) = in_an_open_artist();
+        ch(&mut state, ']'); // Albums: not a track list
+        assert_eq!(ch(&mut state, 'V'), Effects::default());
     }
 
     #[test]
