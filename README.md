@@ -106,6 +106,8 @@ exists for headphones and speakers, and it says plainly that it is not bit-perfe
 - **Track radio** and **autoplay**: when the queue runs dry, phonia follows the music.
 - **Synced lyrics**, following the line being sung.
 - **Recently played**, kept locally and surviving a restart.
+- **"Albums you'll enjoy"** on Home: TIDAL's own editorial recommendation list, built from
+  your listening history.
 
 ![Pressing ga on a track opens its artist: picture, bio, top tracks, albums, EPs and singles](docs/media/artist.gif)
 

@@ -1,7 +1,7 @@
 //! The Home section: a pure view over data the TUI already holds elsewhere (`state.status`,
-//! `state.queue`, `state.library`, and `state.recently_played`), so it keeps no data of its own
-//! -- there is nothing here to fetch that Queue, Library or the recently played log do not
-//! already ask for on their own. See #139 and #144.
+//! `state.queue`, `state.library`, `state.recently_played` and `state.recommended_albums`), so
+//! it keeps no data of its own -- fetching that data (see `app.rs`'s `maybe_load_*` functions)
+//! is not this module's job either. See #139, #144 and #214.
 
 use crate::app::State;
 use crate::browse::Phase;
@@ -20,6 +20,9 @@ const BLOCK_SIZE: usize = 6;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Block {
     RecentlyPlayed,
+    /// TIDAL's "Albums you'll enjoy" (#214): like `RecentlyPlayed`, not paginated by TIDAL in a
+    /// way the TUI can browse further into, so it has no "See all" row either.
+    RecommendedAlbums,
     FavoriteAlbums,
     FavoriteArtists,
     Playlists,
@@ -39,6 +42,7 @@ impl Block {
     pub fn title(self) -> &'static str {
         match self {
             Block::RecentlyPlayed => "Recently played",
+            Block::RecommendedAlbums => "Albums you'll enjoy",
             Block::FavoriteAlbums => LibraryTab::FavoriteAlbums.title(),
             Block::FavoriteArtists => LibraryTab::FavoriteArtists.title(),
             Block::Playlists => LibraryTab::Playlists.title(),
@@ -176,12 +180,13 @@ impl Row<'_> {
     }
 }
 
-/// Every row Home shows right now: the Continue row, always, then recently played (#144, no "See
-/// all" -- see [`Block`]), then one block per non-empty list the library already holds (favorite
-/// albums, favorite artists, playlist folders, favorite tracks, in that order), each capped at
-/// [`BLOCK_SIZE`] with a "See all" row into the rest. A list not loaded yet, or loaded and empty,
-/// contributes no block at all -- there is nothing to show two ways (not ready, or ready and
-/// empty), so neither needs its own row.
+/// Every row Home shows right now: the Continue row, always, then recently played and "Albums
+/// you'll enjoy" (#144, #214, neither with a "See all" -- see [`Block`]), then one block per
+/// non-empty list the library already holds (favorite albums, favorite artists, playlist
+/// folders, favorite tracks, in that order), each capped at [`BLOCK_SIZE`] with a "See all" row
+/// into the rest. A list not loaded yet, or loaded and empty, contributes no block at all --
+/// there is nothing to show two ways (not ready, or ready and empty), so neither needs its own
+/// row.
 pub fn rows(state: &State) -> Vec<Row<'_>> {
     let mut rows = vec![Row::Continue(continuation(state))];
     if let Some(items) = &state.recently_played
@@ -190,6 +195,13 @@ pub fn rows(state: &State) -> Vec<Row<'_>> {
         rows.push(Row::Spacer);
         rows.push(Row::Header(Block::RecentlyPlayed));
         rows.extend(items.iter().take(BLOCK_SIZE).map(Row::Played));
+    }
+    if let Some(items) = &state.recommended_albums
+        && !items.is_empty()
+    {
+        rows.push(Row::Spacer);
+        rows.push(Row::Header(Block::RecommendedAlbums));
+        rows.extend(items.iter().take(BLOCK_SIZE).map(Row::Album));
     }
     let Some(library) = &state.library else {
         return rows;
@@ -765,6 +777,52 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn with_no_recommendations_yet_there_is_no_block_for_it() {
+        let state = State {
+            recommended_albums: Some(vec![]),
+            ..State::default()
+        };
+        assert_eq!(rows(&state), vec![Row::Continue(Continue::Empty)]);
+    }
+
+    #[test]
+    fn recommended_albums_has_no_see_all_row_and_sits_right_after_recently_played() {
+        let state = State {
+            recently_played: Some(vec![played("tidal:1", "First")]),
+            recommended_albums: Some(vec![album("1"), album("2")]),
+            ..State::default()
+        };
+        let rows = rows(&state);
+        assert_eq!(
+            rows,
+            vec![
+                Row::Continue(Continue::Empty),
+                Row::Spacer,
+                Row::Header(Block::RecentlyPlayed),
+                Row::Played(&played("tidal:1", "First")),
+                Row::Spacer,
+                Row::Header(Block::RecommendedAlbums),
+                Row::Album(&album("1")),
+                Row::Album(&album("2")),
+            ]
+        );
+        assert_eq!(
+            selectable_count(&rows),
+            4,
+            "continue, one played, two albums, no see-all"
+        );
+    }
+
+    #[test]
+    fn selected_on_a_recommended_album_row_is_the_album_itself() {
+        let state = State {
+            recommended_albums: Some(vec![album("1")]),
+            ..State::default()
+        };
+        assert_eq!(selected(&state, 1), Some(Selected::Album(album("1"))));
     }
 
     #[test]

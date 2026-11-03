@@ -312,7 +312,7 @@ fn the_server_banner() {
                 CAP_AUTOPLAY.into(),
             ],
         }),
-        r#"{"type":"hello","protocol":{"major":1,"minor":20},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","recently_played","catalog","lyrics","autoplay"]}"#,
+        r#"{"type":"hello","protocol":{"major":1,"minor":22},"server":{"name":"phoniad","version":"0.1.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","recently_played","catalog","lyrics","autoplay"]}"#,
     );
 }
 
@@ -1167,7 +1167,7 @@ fn versions_are_compatible_across_minors_but_not_majors() {
     assert!(v(1, 0).compatible_with(v(1, 7)));
     assert!(v(1, 7).compatible_with(v(1, 0)));
     assert!(!v(1, 0).compatible_with(v(2, 0)));
-    assert_eq!(PROTOCOL, v(1, 20));
+    assert_eq!(PROTOCOL, v(1, 22));
 }
 
 #[test]
@@ -1400,6 +1400,15 @@ fn an_album_an_artist_and_pages_come_back_whole() {
             total: 30,
             offset: 0,
         },
+        similar: Some(Page {
+            items: vec![ArtistSummary {
+                id: "3642161".into(),
+                name: "Caifanes".into(),
+                picture: None,
+            }],
+            total: 1,
+            offset: 0,
+        }),
     };
     let json = serde_json::to_string(&ServerMessage::Response {
         id: RequestId(2),
@@ -1407,7 +1416,9 @@ fn an_album_an_artist_and_pages_come_back_whole() {
     })
     .unwrap();
     assert!(
-        json.contains(r#""type":"artist""#) && json.contains(r#""bio":null"#),
+        json.contains(r#""type":"artist""#)
+            && json.contains(r#""bio":null"#)
+            && json.contains(r#""similar""#),
         "{json}"
     );
     let back: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -1443,6 +1454,28 @@ fn an_album_an_artist_and_pages_come_back_whole() {
         }),
         r#"{"type":"response","id":4,"ok":{"type":"albums","from":{"type":"artist_albums","id":"780"},"page":{"items":[],"total":35,"offset":0}}}"#,
     );
+    // Albums you'll enjoy (since 1.21), the same page shape as any other album list.
+    response(
+        5,
+        Reply::Ok(Payload::Albums {
+            from: AlbumListRef::RecommendedAlbums,
+            page: Page {
+                items: vec![],
+                total: 10,
+                offset: 0,
+            },
+        }),
+        r#"{"type":"response","id":5,"ok":{"type":"albums","from":{"type":"recommended_albums"},"page":{"items":[],"total":10,"offset":0}}}"#,
+    );
+}
+
+#[test]
+fn a_1_20_client_says_nothing_of_recommended_albums() {
+    let list: AlbumListRef = serde_json::from_str(r#"{"type":"recommended_albums"}"#).unwrap();
+    assert_eq!(list, AlbumListRef::RecommendedAlbums);
+    // An older client, from before 1.21, reads the same JSON as Unknown rather than failing.
+    let old: AlbumListRef = serde_json::from_str(r#"{"type":"not_yet_invented"}"#).unwrap();
+    assert_eq!(old, AlbumListRef::Unknown);
 }
 
 #[test]
@@ -1464,6 +1497,12 @@ fn an_album_from_before_the_views_and_kinds_from_the_future_still_parse() {
     )
     .unwrap();
     assert!(matches!(payload, Payload::Artist { bio: None, .. }));
+    // An artist answer from before 1.22, without "Fans also like".
+    let payload: Payload = serde_json::from_str(
+        r#"{"type":"artist","artist":{"id":"1","name":"a"},"top_tracks":{"items":[],"total":0,"offset":0},"albums":{"items":[],"total":0,"offset":0},"singles":{"items":[],"total":0,"offset":0}}"#,
+    )
+    .unwrap();
+    assert!(matches!(payload, Payload::Artist { similar: None, .. }));
 }
 
 #[test]

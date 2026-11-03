@@ -585,6 +585,8 @@ pub enum AlbumListRef {
     ArtistSingles { id: String },
     /// The logged-in user's favorite albums (since 1.6, with the library).
     FavoriteAlbums,
+    /// TIDAL's own "Albums you'll enjoy" recommendation list (since 1.21).
+    RecommendedAlbums,
     /// A list a newer daemon has and this version does not know.
     #[serde(other)]
     Unknown,

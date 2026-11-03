@@ -8,7 +8,7 @@ use crate::covers::{self, Covers};
 use crate::cursor::Cursor;
 use crate::lyrics;
 use crate::theme::Theme;
-use phonia_ipc::{AlbumSummary, FolderEntry, TrackSummary, fmt};
+use phonia_ipc::{AlbumSummary, ArtistSummary, FolderEntry, TrackSummary, fmt};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::Line;
@@ -140,10 +140,11 @@ fn header_lines(header: &Header, theme: &Theme) -> Vec<Line<'static>> {
 }
 
 /// The tracks, numbered as they are on the album or the playlist, the one under the cursor
-/// highlighted when the list has the focus, the one playing marked the same way the queue marks
-/// its own current entry, and one TIDAL will not stream dimmed. `full` adds the artist and the
-/// album to each row (`fmt::track`); without it (`fmt::track_short`) both are left out, for an
-/// album's own tracks, where the header already names the one artist and this is the album.
+/// highlighted when the list has the focus (the whole block, while `V` has one marked), the one
+/// playing marked the same way the queue marks its own current entry, and one TIDAL will not
+/// stream dimmed. `full` adds the artist and the album to each row (`fmt::track`); without it
+/// (`fmt::track_short`) both are left out, for an album's own tracks, where the header already
+/// names the one artist and this is the album.
 fn track_rows<'a>(
     tracks: &[TrackSummary],
     cursor: Cursor,
@@ -157,6 +158,7 @@ fn track_rows<'a>(
         return (vec![Line::styled("No tracks.", theme.dim)], None);
     }
     let selected = cursor.selected();
+    let marked = cursor.marked();
     let start = keep_in_view(cursor.scroll(), selected, tracks.len(), height);
     let lines = tracks
         .iter()
@@ -173,7 +175,7 @@ fn track_rows<'a>(
                 fmt::track_short(track)
             };
             let text = format!("{marker}{number:>3}. {described}");
-            let style = if focused && index == selected {
+            let style = if focused && marked.contains(&index) {
                 theme.selected
             } else if current {
                 theme.accent
@@ -222,6 +224,39 @@ fn album_rows<'a>(
                 theme.text
             };
             Line::styled(text, style)
+        })
+        .collect();
+    (lines, Some(start))
+}
+
+/// TIDAL's own "Fans also like" (#217): never empty because it failed to load and empty because
+/// TIDAL genuinely has none for this artist look the same otherwise, so `failed` picks the message.
+fn similar_artist_rows<'a>(
+    artists: &[ArtistSummary],
+    cursor: Cursor,
+    focused: bool,
+    height: usize,
+    failed: bool,
+    theme: &Theme,
+) -> (Vec<Line<'a>>, Option<usize>) {
+    if artists.is_empty() {
+        let text = if failed {
+            "TIDAL's similar artists could not be loaded."
+        } else {
+            "No similar artists."
+        };
+        return (vec![Line::styled(text, theme.dim)], None);
+    }
+    let selected = cursor.selected();
+    let start = keep_in_view(cursor.scroll(), selected, artists.len(), height);
+    let lines = artists
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(height.max(1))
+        .map(|(index, artist)| {
+            let text = format!(" {:>3}. {}", index + 1, fmt::artist(artist));
+            row_line(text, focused && index == selected, focused, false, theme)
         })
         .collect();
     (lines, Some(start))
@@ -336,6 +371,14 @@ fn draw_artist(
                 focused,
                 now_playing_album_cover(state),
                 usize::from(list_area.height),
+                theme,
+            ),
+            ArtistTab::Similar => similar_artist_rows(
+                &view.similar.items,
+                view.similar.cursor,
+                focused,
+                usize::from(list_area.height),
+                view.similar_failed,
                 theme,
             ),
         },
@@ -463,7 +506,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-/// The artist's three tabs, with a count once they have loaded.
+/// The artist's four tabs, with a count once they have loaded.
 fn artist_tabs<'a>(view: &ArtistView, width: u16, theme: &Theme) -> Line<'a> {
     let tabs = ArtistTab::ALL.map(|tab| TabLabel {
         name: tab.title(),
@@ -471,6 +514,7 @@ fn artist_tabs<'a>(view: &ArtistView, width: u16, theme: &Theme) -> Line<'a> {
             ArtistTab::TopTracks => view.top_tracks.total,
             ArtistTab::Albums => view.albums.total,
             ArtistTab::Singles => view.singles.total,
+            ArtistTab::Similar => view.similar.total,
         }),
         selected: tab == view.tab,
     });

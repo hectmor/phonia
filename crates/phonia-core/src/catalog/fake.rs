@@ -53,11 +53,19 @@ pub enum Call {
         offset: u32,
         limit: u32,
     },
+    SimilarArtists {
+        id: String,
+        limit: u32,
+    },
     FavoriteTracks {
         offset: u32,
         limit: u32,
     },
     FavoriteAlbums {
+        offset: u32,
+        limit: u32,
+    },
+    RecommendedAlbums {
         offset: u32,
         limit: u32,
     },
@@ -101,8 +109,15 @@ struct State {
     playlists: HashMap<String, Vec<Track>>,
     album_details: HashMap<String, Album>,
     artists: HashMap<String, ArtistData>,
+    /// Keyed by the seed artist's id, for `similar_artists`. A separate map, not a field of
+    /// [`ArtistData`], so `with_artist`'s own signature does not have to grow for it.
+    similar: HashMap<String, Vec<Artist>>,
+    /// Fails only `similar_artists`, independently of `error` (which fails every call): tests
+    /// the daemon tolerating this one list failing while the rest of an artist still answers.
+    fail_similar: bool,
     favorite_tracks: Vec<Track>,
     favorite_albums: Vec<Album>,
+    recommended_albums: Vec<Album>,
     favorite_artists: Vec<Artist>,
     my_playlists: Vec<Playlist>,
     /// Keyed by folder id; `None` is the root of "My Collection".
@@ -181,6 +196,23 @@ impl FakeCatalog {
         self
     }
 
+    /// An artist's "Fans also like", for `similar_artists`.
+    pub fn with_similar_artists(self, id: &str, artists: Vec<Artist>) -> Self {
+        self.state
+            .lock()
+            .unwrap()
+            .similar
+            .insert(id.to_string(), artists);
+        self
+    }
+
+    /// Fails `similar_artists` only, the rest of the catalog still answers; see
+    /// [`State::fail_similar`].
+    pub fn failing_similar_artists(self) -> Self {
+        self.state.lock().unwrap().fail_similar = true;
+        self
+    }
+
     /// The user's favorite tracks, for `favorite_tracks`.
     pub fn with_favorite_tracks(self, tracks: Vec<Track>) -> Self {
         self.state.lock().unwrap().favorite_tracks = tracks;
@@ -190,6 +222,12 @@ impl FakeCatalog {
     /// The user's favorite albums, for `favorite_albums`.
     pub fn with_favorite_albums(self, albums: Vec<Album>) -> Self {
         self.state.lock().unwrap().favorite_albums = albums;
+        self
+    }
+
+    /// TIDAL's "Albums you'll enjoy", for `recommended_albums`.
+    pub fn with_recommended_albums(self, albums: Vec<Album>) -> Self {
+        self.state.lock().unwrap().recommended_albums = albums;
         self
     }
 
@@ -457,6 +495,28 @@ impl Catalog for FakeCatalog {
         })
     }
 
+    fn similar_artists(
+        &self,
+        id: String,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Artist>, CatalogError>> {
+        let call = Call::SimilarArtists {
+            id: id.clone(),
+            limit,
+        };
+        self.answer(call, move |state| {
+            if state.fail_similar {
+                return Err(CatalogError::Unavailable("similar artists failed".into()));
+            }
+            // An artist with no entry here, like one TIDAL has none for, is an empty list, not
+            // an error -- verified live: an id TIDAL does not know answers 200 with no items.
+            let similar = state.similar.get(&id).cloned().unwrap_or_default();
+            let mut page = page_of(&similar, 0, limit);
+            page.total = page.items.len() as u64;
+            Ok(page)
+        })
+    }
+
     fn favorite_tracks(
         &self,
         offset: u32,
@@ -476,6 +536,17 @@ impl Catalog for FakeCatalog {
         let call = Call::FavoriteAlbums { offset, limit };
         self.answer(call, move |state| {
             Ok(page_of(&state.favorite_albums, offset, limit))
+        })
+    }
+
+    fn recommended_albums(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Album>, CatalogError>> {
+        let call = Call::RecommendedAlbums { offset, limit };
+        self.answer(call, move |state| {
+            Ok(page_of(&state.recommended_albums, offset, limit))
         })
     }
 

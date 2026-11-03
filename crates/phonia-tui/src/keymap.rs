@@ -11,8 +11,11 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub enum Action {
     Quit,
     ToggleHelp,
-    /// Closes the help, when it is open.
+    /// Closes the help, when it is open; otherwise leaves a block selection, if one is open.
     CloseHelp,
+    /// Starts a block selection anchored at the cursor (vim's visual-line mode), or ends one
+    /// already open.
+    Visual,
     /// Connects to the daemon now, when it is not connected.
     Reconnect,
     Down,
@@ -178,7 +181,7 @@ pub const BINDINGS: &[Binding] = &[
         &[Key::plain(KeyCode::Esc)],
         "Esc",
         Action::CloseHelp,
-        "close the help",
+        "close the help, or leave a block selection",
         Group::General,
     ),
     bind(
@@ -212,6 +215,13 @@ pub const BINDINGS: &[Binding] = &[
         Group::Movement,
     ),
     bind(&[c('G')], "G", Action::Last, "last row", Group::Movement),
+    bind(
+        &[c('V')],
+        "V",
+        Action::Visual,
+        "mark a block of rows (queue, search tracks); Esc leaves",
+        Group::Movement,
+    ),
     bind(
         &[Key::ctrl('d')],
         "Ctrl-d",
@@ -657,6 +667,15 @@ mod tests {
         assert_eq!(
             resolve(&[], Key::from_event(event)),
             Resolution::Action(Action::Last)
+        );
+    }
+
+    #[test]
+    fn capital_v_marks_a_block_even_when_the_terminal_reports_shift() {
+        let event = KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT);
+        assert_eq!(
+            resolve(&[], Key::from_event(event)),
+            Resolution::Action(Action::Visual)
         );
     }
 

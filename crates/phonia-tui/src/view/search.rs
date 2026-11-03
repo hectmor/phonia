@@ -141,7 +141,7 @@ fn rows<'a>(state: &State, theme: &Theme, height: usize) -> (Vec<Line<'a>>, Opti
             // Same marker as the queue's own current entry (see `queue_lines`), so the track or
             // album playing stands out even on a row the cursor also happens to be on.
             let marker = if current { ">" } else { " " };
-            let style = if focused && index == selected {
+            let style = if focused && cursor.marked().contains(&index) {
                 theme.selected
             } else if current {
                 theme.accent

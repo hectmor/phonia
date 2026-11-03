@@ -19,6 +19,8 @@ on, and the [README](README.md) for what phonia is.
 |---|---|---|
 | [`v1.0.0`](https://github.com/hectmor/phonia/releases/tag/v1.0.0) | 2026-10-14 | First release off `main`: phases 0–3 and 6 complete, 4 and 7 code complete |
 | [`v1.1.0`](https://github.com/hectmor/phonia/releases/tag/v1.1.0) | 2026-10-23 | Additive, no breaking changes: the responsive TUI (#175), the dropped sound-server and debug-build fixes (#184, #186), dual MIT OR Apache-2.0 with third-party notices (#173), and the document split (#169) |
+| [`v1.2.0`](https://github.com/hectmor/phonia/releases/tag/v1.2.0) | 2026-10-31 | Additive, no breaking changes: TOML themes (#38), the TUI owning its own `phoniad` (#192), `ga`/`gr` reach (#194), favorite add/remove (#196), the scroll-window fix (#198), docs/screenshot catch-up (#200), auto output selection and DAC-lost handling (#157), artist and album everywhere over protocol 1.20 (#207), and the device-name fix (#211) |
+| [`v1.3.0`](https://github.com/hectmor/phonia/releases/tag/v1.3.0) | 2026-11-03 | Additive, no breaking changes: "Albums you'll enjoy" on Home over protocol 1.21 (#214), similar artists on the artist page over protocol 1.22 (#217), and vim-style `shift+V` visual block selection in the Queue, Search and any open view (#219) |
 
 Earlier tags (`v0.2.0`–`v0.4.0`) were cut on `develop` before `main` was kept
 current, and the workspace version was not raised with them; `v1.0.0` is the
@@ -32,7 +34,7 @@ first tag where the tag, `main` and `Cargo.toml` agree.
 | 1 — Daemon and playback engine | [Fase 1](https://github.com/hectmor/phonia/milestone/2) | Done (#8–#16, #47, #52, #53) |
 | 2 — TUI base | [Fase 2](https://github.com/hectmor/phonia/milestone/3) | Done (#17–#24) |
 | 3 — Audio quality | [Fase 3](https://github.com/hectmor/phonia/milestone/4) | Done (#25–#31) |
-| 4 — SONE-like features | [Fase 4](https://github.com/hectmor/phonia/milestone/5) | In progress (#196 part 2; #35, #36, #37 unscoped) |
+| 4 — SONE-like features | [Fase 4](https://github.com/hectmor/phonia/milestone/5) | In progress (#196 part 2; #214, #217, #219 done; #35, #36, #37 unscoped) |
 | 5 — Extras and packaging | [Fase 5](https://github.com/hectmor/phonia/milestone/6) | In progress (CI, licensing, the process rules and #192 done; packaging open) |
 | 6 — Layout and appearance | [Fase 6](https://github.com/hectmor/phonia/milestone/7) | Done (#124, #159, #160, #175, #188, #198, #207) |
 | 7 — Home screen and discovery | [Fase 7](https://github.com/hectmor/phonia/milestone/8) | Done (#139, #144, #169, #171, #194) |
@@ -90,6 +92,8 @@ done — it is its own product decision, not a leftover.
 | #164 | `ga` on any track row: search results, track rows, inside an opened album | Closed |
 | #166 | `gr` opens the album of the track under the cursor | Closed |
 | #196 | Add/remove TIDAL favorites from the TUI (`fas`/`far`/`faa`/`fal`, `fds`/`fdr`/`fda`/`fdl`) | In progress (part 1 of 2) |
+| #214 | "Albums you'll enjoy" on Home (TIDAL's editorial recommendation list) | Closed (both parts) |
+| #217 | "Similar artists" on the artist page, from TIDAL's "Fans also like" | Closed |
 | #35 | Scrobbling to Last.fm and ListenBrainz | Open, not scoped |
 | #36 | Discord Rich Presence | Open, not scoped |
 | #37 | Persistent queue and state across restarts | Open, not scoped |
@@ -158,11 +162,10 @@ deliberately separate, not-yet-investigated future issue, the same territory
 
 ## Right now
 
-`v1.2.0` is out, bringing #157 (auto output selection and DAC-lost handling),
-#207 (artist and album everywhere) and #211 (device-name fix) into `main`
-along with #38, #192, #194, #196 and #198. Phases 0–3, 6 and 7 are closed
-again (#207 done); phase 4 is code complete except for work nobody has
-scoped yet. #157's own follow-up bugs surfaced a new one, #206, still open.
+`v1.3.0` is out, bringing #214 (recommended albums on Home), #217 (similar
+artists) and #219 (visual block selection) into `main`. Phases 0–3, 6 and 7
+stay closed; phase 4 is in progress, with #196 part 2 and #35–#37 still
+unscoped. #157's own follow-up bug, #206, is still open.
 
 What is actually left, in no committed order:
 
@@ -176,10 +179,18 @@ What is actually left, in no committed order:
 - **Phase 4** — part 2 of #196 is the one thing in flight: adding and removing
   favorite tracks, albums and artists works, while following and unfollowing a
   playlist (`fal`/`fdl`) answers with an error until TIDAL's own endpoint for
-  it is verified. Behind it, three issues nobody has scoped: scrobbling (#35),
-  Discord Rich Presence (#36), and a queue and state that survive a restart
-  (#37). Each is a one-line description today; each needs planning before any
-  code.
+  it is verified. #214 ("Albums you'll enjoy" on Home) is done, both parts:
+  core/wire/daemon (protocol 1.21, calling TIDAL's `/home/*` recommendation
+  endpoint directly rather than through `tidlers`), then the Home block in the
+  TUI, right after recently played, no "See all" (TIDAL's own list is
+  pageable, but Home has nowhere to open a "See all" of it into yet). #217
+  ("Similar artists" on the artist page, from TIDAL's "Fans also like") is
+  also done: a 4th artist tab, backed by an undocumented `/pages/data/{uuid}`
+  module endpoint found by tracing TIDAL's real artist page (protocol 1.22),
+  loaded eagerly alongside the artist's other three lists. Behind it, three
+  issues nobody has scoped: scrobbling (#35), Discord Rich Presence (#36), and
+  a queue and state that survive a restart (#37). Each is a one-line
+  description today; each needs planning before any code.
 - **Phase 5, packaging and extras** — the two package issues (#43 RPM/COPR,
   #44 AUR) are what would let someone install phonia without a Rust
   toolchain, and user documentation (#45) is now partly answered by the

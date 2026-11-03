@@ -138,6 +138,9 @@ async fn send(
     let mut request = http
         .request(method, format!("{}{path}", account.base))
         .bearer_auth(account.token)
+        // `/home/*` refuses a request missing this (400, subStatus 1002); verified live that
+        // any value works and it is harmless on every other endpoint used here.
+        .header("x-tidal-client-version", "2026.1.5")
         .query(&[("countryCode", account.country)])
         .query(query);
     if !form.is_empty() {
@@ -220,6 +223,30 @@ fn favorites_query(offset: u32, limit: u32) -> Vec<(&'static str, String)> {
     let mut query = items_query(offset, limit);
     query.push(("order", "DATE".to_string()));
     query.push(("orderDirection", "DESC".to_string()));
+    query
+}
+
+/// The module id of "Fans also like" inside `/pages/data/{id}`: an opaque TIDAL module id, not
+/// an artist id -- confirmed live that it is the same for every artist (checked on 4). Not
+/// documented anywhere; if TIDAL ever retires it, `similar_artists` fails like any other request
+/// and only that one tab goes empty, not the rest of the artist page.
+const FANS_ALSO_LIKE: &str = "5c8d0b08-b48d-4a97-bcbd-989c81f0c96e";
+
+/// The query of `/home/*`: paging, plus the params TIDAL's web client always sends and the
+/// endpoint refuses a request without (verified live; any value works).
+fn home_query(offset: u32, limit: u32) -> Vec<(&'static str, String)> {
+    let mut query = items_query(offset, limit);
+    query.push(("locale", "en_US".to_string()));
+    query.push(("deviceType", "BROWSER".to_string()));
+    query.push(("platform", "WEB".to_string()));
+    query
+}
+
+/// The query of "Fans also like": `/home/*`'s own required params, plus the seed artist and a
+/// limit TIDAL rejects past 50 (unlike every other listing here, capped at [`MAX_ITEMS_LIMIT`]).
+fn similar_artists_query(id: &str, limit: u32) -> Vec<(&'static str, String)> {
+    let mut query = home_query(0, limit.min(50));
+    query.push(("artistId", id.to_string()));
     query
 }
 
@@ -374,6 +401,24 @@ impl Catalog for TidalCatalog {
         })
     }
 
+    fn similar_artists(
+        &self,
+        id: String,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Artist>, CatalogError>> {
+        let catalog = self.clone();
+        Box::pin(async move {
+            check_id(&id)?;
+            let body = catalog
+                .get(
+                    &format!("/pages/data/{FANS_ALSO_LIKE}"),
+                    similar_artists_query(&id, limit),
+                )
+                .await?;
+            parse_similar_artists(&body)
+        })
+    }
+
     fn favorite_tracks(
         &self,
         offset: u32,
@@ -407,6 +452,23 @@ impl Catalog for TidalCatalog {
                 )
                 .await?;
             parse_favorited_items::<RawAlbum, Album>(&body)
+        })
+    }
+
+    fn recommended_albums(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> BoxFuture<'static, Result<Page<Album>, CatalogError>> {
+        let catalog = self.clone();
+        Box::pin(async move {
+            let body = catalog
+                .get_v2(
+                    "/home/pages/ALBUM_RECOMMENDATIONS/view-all",
+                    home_query(offset, limit),
+                )
+                .await?;
+            parse_home_page(&body, offset)
         })
     }
 
@@ -917,6 +979,18 @@ fn parse_album_items(body: &str) -> Result<Page<Album>, CatalogError> {
     Ok(read_items::<RawAlbum, Album>(page))
 }
 
+/// A page of "Fans also like": bare artists, the same shape [`read_items`] already reads.
+///
+/// shortcut: TIDAL's own `totalNumberOfItems` here just echoes back the `limit` asked for, not
+/// a real count (confirmed live) -- kept as the real item count instead, so nothing downstream
+/// ever asks for a page past the one call this list is answered in.
+fn parse_similar_artists(body: &str) -> Result<Page<Artist>, CatalogError> {
+    let page: RawPage = serde_json::from_str(body).map_err(unreadable)?;
+    let mut page = read_items::<RawArtist, Artist>(page);
+    page.total = page.items.len() as u64;
+    Ok(page)
+}
+
 /// TIDAL's `bio` of an artist: its text, or failing that its summary, cleaned of TIDAL's markup.
 /// `None` when there is nothing left to say.
 fn parse_bio(body: &str) -> Option<String> {
@@ -1043,6 +1117,50 @@ fn parse_favorited_items<Raw: DeserializeOwned, T: From<Raw>>(
         })
         .collect();
     Ok(read_items::<Raw, T>(page))
+}
+
+/// A page of a `/home/*` module's own items: each entry is `{"type":..., "data": {...}}`; only
+/// `data` is kept. Unlike every v1 listing here, TIDAL sends no total for this page at all (not
+/// even the caller's own offset echoed back), so `total` is a lower bound, not a real count.
+///
+/// shortcut: `total` undercounts whatever TIDAL has past this page; fine for a fixed-size Home
+/// block, wrong for a real "See all" view — recompute it for real if one is ever built on this.
+fn parse_home_page(body: &str, offset: u32) -> Result<Page<Album>, CatalogError> {
+    #[derive(Deserialize)]
+    struct RawHomePage {
+        #[serde(default)]
+        items: Vec<Value>,
+    }
+    #[derive(Deserialize)]
+    struct RawHomeItem {
+        data: Value,
+    }
+
+    let page: RawHomePage = serde_json::from_str(body).map_err(unreadable)?;
+    let mut skipped = 0;
+    let items: Vec<Album> = page
+        .items
+        .into_iter()
+        .filter_map(|value| {
+            let album = serde_json::from_value::<RawHomeItem>(value)
+                .ok()
+                .and_then(|raw| serde_json::from_value::<RawAlbum>(raw.data).ok());
+            if album.is_none() {
+                skipped += 1;
+            }
+            album.map(Album::from)
+        })
+        .collect();
+    if skipped > 0 {
+        crate::warn!(
+            "Warning: {skipped} item(s) of a TIDAL answer could not be read and were left out."
+        );
+    }
+    Ok(Page {
+        total: offset as u64 + items.len() as u64,
+        offset: offset as u64,
+        items,
+    })
 }
 
 /// A page of the user's own playlists, told apart from ones they only follow by comparing each
@@ -1565,6 +1683,72 @@ mod tests {
             page.total, 100,
             "TIDAL's own count is kept even though the seed was filtered out locally"
         );
+    }
+
+    #[test]
+    fn a_home_page_unwraps_data_keeps_a_null_cover_and_skips_what_it_cannot_read() {
+        let page = parse_home_page(
+            r#"{"title":"Albums you'll enjoy","items":[
+                {"type":"ALBUM","following":false,"data":{"id":2134109,"title":"Versus","cover":"314af4eb"}},
+                {"type":"ALBUM","following":false,"data":{"id":82370295,"title":"Midnight Run","cover":null}},
+                {"type":"ALBUM","following":false,"data":"not an album"}
+            ]}"#,
+            10,
+        )
+        .unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|album| album.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Versus", "Midnight Run"]
+        );
+        assert_eq!(page.items[1].cover, None);
+        assert_eq!(page.offset, 10);
+        assert_eq!(
+            page.total, 12,
+            "no real total from TIDAL: offset + what came back"
+        );
+    }
+
+    #[test]
+    fn similar_artists_are_read_with_a_real_count_not_tidals_own() {
+        let page = parse_similar_artists(
+            r#"{"limit":3,"offset":0,"totalNumberOfItems":3,"items":[
+                {"id":3642161,"name":"Caifanes","picture":null,"selectedAlbumCoverFallback":"x"},
+                {"id":3633298,"name":"Gustavo Cerati","picture":"b7dd659d-1665-40ec-a72b-3505a5c1e35a"},
+                {"id":56146,"name":"Los Enanitos Verdes","picture":"965bd71e-2e4d-43eb-8e07-390fb3ff563a"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|artist| artist.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Caifanes", "Gustavo Cerati", "Los Enanitos Verdes"]
+        );
+        assert_eq!(page.items[0].picture, None);
+        assert_eq!(
+            page.total, 3,
+            "TIDAL's own total just echoes the limit, not kept"
+        );
+    }
+
+    #[test]
+    fn home_query_carries_the_params_home_endpoints_require() {
+        let query = home_query(0, 10);
+        assert!(query.contains(&("locale", "en_US".to_string())));
+        assert!(query.contains(&("deviceType", "BROWSER".to_string())));
+        assert!(query.contains(&("platform", "WEB".to_string())));
+    }
+
+    #[test]
+    fn similar_artists_query_carries_the_seed_and_clamps_the_limit_to_50() {
+        let query = similar_artists_query("780", 100);
+        assert!(query.contains(&("artistId", "780".to_string())));
+        assert!(query.contains(&("limit", "50".to_string())), "{query:?}");
+        assert!(query.contains(&("locale", "en_US".to_string())));
     }
 
     #[test]

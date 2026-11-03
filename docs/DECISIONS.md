@@ -3967,3 +3967,136 @@ older design choice this issue never asked to revisit.
 
 **#207 is now fully done, both parts, all 2+2 PRs merged.** Issue still open on GitHub as usual --
 close by hand.
+
+## 2026-10-31 — #214 part 1: "Albums you'll enjoy" reaches the wire
+
+The "editorial/personalized home" territory #33, #139 and #144 all deliberately deferred,
+finally investigated. Planned with Opus after a live call against the real account (not a code
+read alone -- the payload shape was genuinely unknown).
+
+**Live findings (account 208396301, country MX):** `GET /home/feed/static` sends 16 modules;
+"Albums you'll enjoy" is `moduleId: "ALBUM_RECOMMENDATIONS"` (never match on `title` -- it's
+translated by locale, e.g. "Álbumes que te encantará" for `es_MX`), a `HORIZONTAL_LIST` of 10
+items, all plain `ALBUM`, no `Mix` wrapper, no reason/subtitle text anywhere. A real paginated
+`view-all` exists (`GET /v2/home/pages/ALBUM_RECOMMENDATIONS/view-all`, 94 albums, `offset`/
+`limit` work), whose first 10 items are identical and in the same order as the feed module's.
+Neither endpoint echoes a total or a cursor. Every `/home/*` call needs `locale`, `deviceType`,
+`platform` and an `x-tidal-client-version` header or it answers `400 {"subStatus":1002}`; the
+header is harmless on every other endpoint this project calls (verified against v1 favorites/
+search and the v2 folders endpoint too). One of 94 albums had `cover: null`.
+
+**4 decisions, all = Opus's recommendation, approved via `AskUserQuestion`:**
+1. **Call `view-all` directly with phonia's own raw HTTP (not `tidlers::get_home_feed`).** The
+   full feed is ~241 KB of 16 heterogeneous modules for one we want; `tidlers`'s `HomeItem` is a
+   tagged enum with no fallback, so one unrecognized module type fails the whole feed, and its
+   `HomeAlbumData` has `cover: String` (required) -- the real null-cover album would silently
+   vanish into `HomeListItem::Unknown`. `view-all`'s own items are `{data: <v1 album>}`, which
+   `RawAlbum`/`parse_favorited_items`'s existing "unwrap one field, skip what can't be read"
+   pattern already handles, null cover included, with no new dependency.
+2. **Cache: none.** The TUI fetches once per session (same as `recently_played`), not on every
+   Home open (unlike `favorite_albums`) -- confirmed live that the list doesn't change minutes
+   apart, so there is nothing to invalidate.
+3. **No "See all" in this issue.** A real pageable list exists, but Home's `SeeAll` only jumps to
+   a `LibraryTab`, and there is no album-grid view to open one into. The wire already carries
+   `offset`/`limit`, so a future "See all" would be TUI-only work, a separate issue.
+4. **2 PRs**, core/wire/daemon then the TUI block, same split #207 used.
+
+**This PR (1 of 2):** `Catalog::recommended_albums` (`catalog/mod.rs`), its `TidalCatalog` impl
+calling `/home/pages/ALBUM_RECOMMENDATIONS/view-all` through a new `home_query` helper
+(`catalog/remote.rs`), and `parse_home_page` -- the `{data: ...}` unwrap, with
+`total = offset + items.len()` since TIDAL sends none (a noted shortcut, fine for a fixed-size
+block, wrong for a real "See all"). `FakeCatalog` grew `with_recommended_albums`/
+`Call::RecommendedAlbums`. On the wire, `AlbumListRef::RecommendedAlbums` (protocol 1.20 → 1.21,
+additive, pinned by a new golden compatibility test); no new `Request`/`Payload` needed, it rides
+the existing `Request::Albums`/`Payload::Albums`, one new match arm in `phoniad::daemon::albums`.
+Verified live end to end through a scratch `phoniad`: the real 6-album page (Illya Kuryaki,
+Caifanes, Soda Stereo, Black Sabbath, Korn's "Issues", among them) came back over the wire exactly
+as `parse_home_page`'s unit test (built from the trimmed live JSON above) predicted.
+
+Part 2 (the Home block in the TUI, closing #214) is next.
+
+## 2026-10-31 — #214 part 2 (last): "Albums you'll enjoy" shows up on Home
+
+Mirrors #144's recently-played block almost exactly: `State.recommended_albums:
+Option<Vec<AlbumSummary>>`, fetched once per session the moment a connection with the catalog
+exists (`maybe_load_recommended_albums`, gated on `CAP_CATALOG` rather than a dedicated
+capability -- this rides the existing `Request::Albums`, nothing new on the wire beyond PR 1's
+own `AlbumListRef::RecommendedAlbums`), never refetched afterward. `Block::RecommendedAlbums`
+sits in `home::rows` right after recently played, capped at `BLOCK_SIZE`, with no "See all" row
+(decided in part 1: TIDAL's own list is pageable, but Home has no album-grid view to open a "See
+all" into yet -- a future, TUI-only issue if ever built). `Row::Album`/`Selected::Album` needed no
+changes at all: they already work the same regardless of which block an album came from, so
+opening one nested in Home's stack, adding it, or acting on it with `ga`/`gr`/favorite keys all
+work unchanged.
+
+Verified: full workspace green (473 `phonia-tui` tests, up from 468), fmt+clippy clean. Not
+re-verified against a live interactive TUI this time -- the wire layer was already verified live
+end to end in part 1, and the rendering path here is the same generic `Row::Album`/`fmt::album`
+code every other album block already exercises live; re-driving a real `phonia tui` process with
+a scripted pty is the exact thing that left a stray `phoniad` holding the real DAC earlier this
+project (#207's own part-2 entry), so it was skipped this time in favor of the unit coverage
+above.
+
+**#214 is now fully done, both parts, both PRs merged.** Issue still open on GitHub as usual --
+close by hand.
+
+## 2026-10-31 — #217: "Similar artists" on the artist page, from TIDAL's "Fans also like"
+
+Planned with Opus after a live call against the real account, since the "obvious" endpoint turned
+out to be the wrong one.
+
+**Live findings:** `tidlers::get_similar_artists` (`GET /artists/{id}/similar`) is NOT what
+TIDAL's own app shows as "Fans also like" -- it's a different, TiVo-sourced editorial list, with
+broken paging and missing the most obvious match for a test artist (Soda Stereo's own list from
+this endpoint never included Gustavo Cerati's solo project). Traced TIDAL's real artist page
+(`GET /v1/pages/artist?artistId=X`) to find the actual module backing "Fans also like": it's
+served from an opaque, undocumented per-module endpoint, `GET /pages/data/{module-uuid}
+?artistId={id}`, where the module uuid (`5c8d0b08-b48d-4a97-bcbd-989c81f0c96e`) is the same for
+every artist (verified live on 4 different ones). A third option, TIDAL's openapi v2
+`relationships` endpoint, was considered and rejected: different host, JSON:API shape, cursor
+paging incompatible with the existing offset-based `Page`/`Found` model -- too much new plumbing
+for a list capped at 50 items. This list's own `totalNumberOfItems` just echoes back the `limit`
+asked for, not a real count (confirmed live) -- parsing overrides it with the real `items.len()`.
+Unlike every other listing in `catalog/remote.rs` (capped at `MAX_ITEMS_LIMIT`, 100), TIDAL caps
+this one specific list at 50 (400 "Too big page" above that) -- clamped before delegating to
+`home_query`. TIDAL does not page this list at all: its own `offset` only slices inside whatever
+`limit` was asked for, never reaching past it, so there is no "load more" for this tab, ever.
+
+**4 decisions, all = Opus's recommendation, approved via `AskUserQuestion`:**
+1. **The real undocumented `/pages/data/{uuid}` module**, not `/artists/{id}/similar` -- it's what
+   TIDAL's own app actually shows, confirmed live; the wrong endpoint's own editorial list was
+   demonstrably incomplete.
+2. **Eager, bundled with the artist's other three lists** in the same `tokio::join!` the daemon
+   already does for `Payload::Artist` -- the simplest option, no new TUI loading-state machinery,
+   and this list is capped at 50 so the extra round trip is cheap.
+3. **Always show the tab**, with `ArtistView::similar_failed: bool` telling "TIDAL genuinely has
+   none for this artist" apart from "could not be fetched" (an empty `Found<T>` alone can't draw
+   that distinction) -- the same split `bio`'s own doc already draws for the same reason.
+4. **1 PR**, not split like #214/#207 -- small enough (one new catalog method, one wire field, one
+   new TUI tab) not to need it.
+
+**Implementation:** `Catalog::similar_artists` (`catalog/mod.rs`); `TidalCatalog`'s impl calling
+`/pages/data/{FANS_ALSO_LIKE}` through a new `similar_artists_query` helper built on top of the
+existing `home_query`, and `parse_similar_artists` overriding TIDAL's bogus total. `FakeCatalog`
+grew `with_similar_artists`/`failing_similar_artists` (a separate failure switch from `error`, so
+a test can exercise "this one list fails, the rest of the artist page still answers"). On the
+wire, `Payload::Artist.similar: Option<Page<ArtistSummary>>` (protocol 1.21 -> 1.22, additive,
+`None` both for "could not be fetched" and for an old daemon that predates the field -- the TUI
+can't and doesn't need to tell those apart, only `similar_failed` on the TUI's own side does, set
+locally from whether the daemon's answer carried the field). `phoniad::daemon::artist()` added
+`catalog.similar_artists(...)` as a 6th parallel call, tolerating its own failure (not part of the
+tuple the other 4 calls must all succeed for). TUI: a 4th `ArtistTab::Similar` ("Fans also like"),
+`ArtistView::current_list()` (renamed from `tracks_or_albums()`, since it now returns a 3rd kind
+of list) gained a `ListRef::Artists` arm; `Row::Artist(ArtistSummary)` added alongside the
+existing `Row::Track`/`Row::Album`, Enter opens the artist (reusing `open_artist_view`), `faa`/
+`fda` favorite it when `kind == Artists`. "Load more" on this tab always answers `None` -- TIDAL
+doesn't support it, and `total == items.len()` already made `Found::next_offset()` return `None`
+anyway, but the dedicated arm says so directly rather than relying on that incidentally.
+
+Verified live end to end through a scratch `phoniad` on an isolated socket (never the real
+interactive TUI, per the standing caution from #207's part 2): asked for artist `3633734` (Soda
+Stereo), got back 50 similar artists including Caifanes, Gustavo Cerati and Los Enanitos Verdes --
+matching what TIDAL's own app shows for the same artist. Full workspace green (`cargo test
+--workspace`, fmt, clippy -D warnings).
+
+**#217 is now fully done, one PR.** Issue still open on GitHub as usual -- close by hand.
