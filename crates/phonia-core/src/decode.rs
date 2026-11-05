@@ -1,5 +1,9 @@
-//! Symphonia decode loop: turns a FLAC or fragmented-MP4 (DASH) byte stream into interleaved
-//! `i32` PCM, streamed to a callback so the whole track never has to sit in memory at once.
+//! Symphonia decode loop: turns a FLAC, or AAC in MP4, byte stream into interleaved `i32` PCM,
+//! streamed to a callback so the whole track never has to sit in memory at once.
+//!
+//! The bit-perfect guarantee described below is for FLAC only. AAC decodes to float internally;
+//! symphonia's own `FromSample` scales that to full-scale `i32` (see
+//! [`source_bits_per_sample`]), which is lossy by nature for a lossy codec and is expected.
 //!
 //! ## FLAC integer scaling (bit-perfect path)
 //!
@@ -30,7 +34,8 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use std::time::Duration;
-use symphonia::core::codecs::audio::AudioDecoder;
+use symphonia::core::codecs::audio::well_known::CODEC_ID_AAC;
+use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoder};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatReader, SeekMode, SeekTo, TrackType};
@@ -43,8 +48,9 @@ use symphonia::core::units::{Time, TimeBase, Timestamp};
 pub struct SourceSpec {
     pub sample_rate: u32,
     pub channels: u32,
-    /// Bit depth as reported by the source codec (16 or 24 for FLAC). Samples handed to
-    /// `on_chunk` are always left-justified 32-bit integers regardless of this value.
+    /// Bit depth as reported by the source codec (16 or 24 for FLAC; 16 for AAC, which has no
+    /// depth of its own). Samples handed to `on_chunk` are always left-justified 32-bit integers
+    /// regardless of this value.
     pub bits_per_sample: u32,
 }
 
@@ -123,11 +129,7 @@ impl Decoder {
             .as_ref()
             .map(|c| c.count() as u32)
             .ok_or_else(|| anyhow!("could not determine the source's channel count"))?;
-        let bits_per_sample = audio_params.bits_per_sample.ok_or_else(|| {
-            anyhow!(
-                "could not determine the source's bits_per_sample (a FLAC should report 16 or 24)"
-            )
-        })?;
+        let bits_per_sample = source_bits_per_sample(audio_params)?;
 
         let dec_opts = Default::default();
         let decoder = symphonia::default::get_codecs()
@@ -264,8 +266,9 @@ impl Decoder {
                 Err(e) => return Err(e).context("unrecoverable decoder error"),
             };
 
-            // Integer path only: never route through f32/f64 here, that would break
-            // bit-exactness (see the module doc for why this call is already bit-perfect).
+            // Integer path only: never route through f32/f64 here ourselves, that would break
+            // bit-exactness (see the module doc for why this call is already bit-perfect for
+            // FLAC). AAC arrives as float and symphonia itself does that scaling for us.
             out.clear();
             decoded.copy_to_vec_interleaved::<i32>(out);
 
@@ -293,6 +296,17 @@ impl Decoder {
             }
         }
         Ok(())
+    }
+}
+
+/// The source's bit depth. AAC has none of its own (it decodes to float, which symphonia scales
+/// to full-scale `i32`), so it is reported as 16, its customary resolution: that only tells the
+/// sink how many of the top bits to keep.
+fn source_bits_per_sample(params: &AudioCodecParameters) -> Result<u32> {
+    match params.bits_per_sample {
+        Some(bits) => Ok(bits),
+        None if params.codec == CODEC_ID_AAC => Ok(16),
+        None => bail!("could not determine the source's bits_per_sample"),
     }
 }
 
@@ -349,6 +363,35 @@ mod tests {
         };
         let b = a;
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn aac_decoding_is_compiled_in() {
+        // Guards the `aac` symphonia feature: without it every lossy TIDAL tier fails to open.
+        assert!(
+            symphonia::default::get_codecs()
+                .get_audio_decoder(CODEC_ID_AAC)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_source_without_a_declared_depth_is_16_bit_only_if_it_is_aac() {
+        let mut aac = AudioCodecParameters::new();
+        aac.for_codec(CODEC_ID_AAC);
+        assert_eq!(source_bits_per_sample(&aac).unwrap(), 16);
+
+        let mut aac_with_explicit_depth = AudioCodecParameters::new();
+        aac_with_explicit_depth
+            .for_codec(CODEC_ID_AAC)
+            .with_bits_per_sample(24);
+        assert_eq!(
+            source_bits_per_sample(&aac_with_explicit_depth).unwrap(),
+            24,
+            "a declared depth wins"
+        );
+
+        assert!(source_bits_per_sample(&AudioCodecParameters::new()).is_err());
     }
 
     #[test]
