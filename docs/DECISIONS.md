@@ -4100,3 +4100,56 @@ matching what TIDAL's own app shows for the same artist. Full workspace green (`
 --workspace`, fmt, clippy -D warnings).
 
 **#217 is now fully done, one PR.** Issue still open on GitHub as usual -- close by hand.
+
+## 2026-11-05 — #228: fall back to shared per track, not just when the DAC disappears
+
+Found live: a TIDAL Low-quality track is 22050 Hz, which the user's DAC doesn't support
+natively; exclusive mode correctly refused to play it (`caps::Unsupported`'s own error text), but
+the user then had to run `phonia ctl output set shared:default` by hand, and switch back by hand
+afterward. Planned with Opus, who traced the actual mechanism before proposing anything: a format
+mismatch is discovered at `AlsaSink::open` (`output/caps.rs`'s `choose`, called from
+`output/alsa.rs`), as one unified `Missing` enum (`Depth`, `Channels`, `Rate`, `DepthAtRate`) --
+and, critically, it is known the moment the engine opens a sink for the next track, before any
+device is touched, unlike #157's DAC-disappearing case (only detectable after the fact, from a
+write failure). A failed exclusive open also never releases its own reservation on its own
+(`reserve.rs`'s `open_reserved_with`) -- a fallback has to release it explicitly, or the sound
+server can't drive the same card for the resampled stream.
+
+**4 decisions, all = Opus's recommendation, approved via `AskUserQuestion`:**
+1. **Only in `mode = "auto"`** -- a pinned `exclusive` asked for bit-perfect or nothing, the same
+   line #157's own fallback already draws (`main.rs`'s `fallback = (mode == Auto).then(...)`).
+2. **Climbs back to the DAC the moment the next track that fits opens**, never held on shared
+   "just in case" -- every sink open tries exclusive first, unconditionally.
+3. **No extra TUI announcement** -- the signal line already shows the change honestly (the route
+   moves, the verdict flips from BIT-PERFECT to SHARED); this isn't an error like #157's loss, so a
+   `playback_error`-style banner would be misleading.
+4. **Every `caps::Unsupported` except `Missing::Depth`** (so: Rate, Channels, DepthAtRate) -- they
+   share the same reasoning (resampled/narrowed beats silence in auto mode); `Depth` can't be
+   played by *any* device, so it stays a real error.
+
+**Implementation:** a new `output::fallback::FallbackSinkFactory` wraps the exclusive and shared
+factories. `open()` always tries exclusive first; on a fallback-worthy `Unsupported`, it releases
+the exclusive reservation and opens shared instead; either direction calls `on_switch(from, to)`
+only when the side actually changed. `phoniad::main` builds it only when `mode = auto` and the
+startup output is exclusive, feeding `on_switch` into a new `DaemonParts.switches` channel;
+`Daemon::note_fallback_switch` catches the daemon's own bookkeeping up (route, signal line, volume
+control) with what the engine already did on its own -- guarded against a stale message that
+arrives after a manual `ctl output set` already moved elsewhere. No protocol change (reuses the
+existing `OutputChanged`/`VolumeChanged` events), no engine change, no TUI change.
+
+Verified live end to end on real hardware and a real TIDAL stream (never the real interactive TUI,
+per the standing caution): a scratch `phoniad` in auto mode on `hw:sofhdadsp,0` (a real device that
+only accepts 48000 Hz) played a real lossless 44.1 kHz track -- the exclusive open correctly failed
+with `caps::Unsupported`, the factory released it and opened `shared:default` instead, and the
+track played start to finish (`State::Playing`, never `Failed`), with `OutputChanged` correctly
+announcing the move. Full workspace green (`cargo test --workspace`, fmt, clippy -D warnings),
+plus a new `output::fallback` unit test module and a `phoniad` protocol test wiring the real
+`FallbackSinkFactory` the way `main.rs` does, not just a mock of the switch logic.
+
+**Also found, out of scope for this issue:** in *pinned* exclusive mode (no fallback), if the very
+first track played after daemon startup fails to open the device, the daemon silently ends up
+`State::Stopped`/`QueueExhausted` with no `TrackEnded{Failed}` or error event at all -- reproduced
+both before and independent of this change (plain pinned exclusive on `hw:sofhdadsp,0`, no
+wrapper). Worth its own issue; not filed yet.
+
+**#228 is now fully done, one PR.** Issue still open on GitHub as usual -- close by hand.

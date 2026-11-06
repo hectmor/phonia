@@ -122,6 +122,7 @@ their turn comes.
 | #40 | MCP server for AI agents | Open, not scoped |
 | #41 | Parametric equalizer in shared mode | Open, not scoped |
 | #157 | Automatic output detection: the DAC if present, speakers or Bluetooth if not | Done |
+| #228 | Fall back to shared per track when the exclusive device can't play its format, and climb back for the next one that fits | Done |
 
 ### Phase 6 — Layout and appearance
 
@@ -165,7 +166,10 @@ deliberately separate, not-yet-investigated future issue, the same territory
 `v1.3.0` is out, bringing #214 (recommended albums on Home), #217 (similar
 artists) and #219 (visual block selection) into `main`. Phases 0–3, 6 and 7
 stay closed; phase 4 is in progress, with #196 part 2 and #35–#37 still
-unscoped. #157's own follow-up bug, #206, is still open.
+unscoped. #157's own follow-up bug, #206, is still open. #228, done on top of
+#157 in phase 5, now falls back to shared per track when the exclusive
+device can't play a track's format at all (not just when the device
+disappears), and climbs back to it for the next one that fits.
 
 What is actually left, in no committed order:
 

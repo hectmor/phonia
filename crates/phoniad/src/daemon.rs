@@ -12,6 +12,7 @@ use futures_util::stream;
 use phonia_core::catalog::{
     self as tidal_catalog, AlbumFilter, Catalog, MAX_ITEMS_LIMIT, MAX_SEARCH_LIMIT,
 };
+use phonia_core::config::OutputSpec;
 use phonia_core::control::Controller;
 use phonia_core::engine::{self, Command, Engine, TrackOpener};
 use phonia_core::openers::{DescribeError, DispatchOpener, QualityLimits, Source};
@@ -109,6 +110,10 @@ pub struct DaemonParts {
     pub opener: Arc<DispatchOpener>,
     /// Bit-perfect reports from the sinks, to be announced to clients.
     pub reports: mpsc::UnboundedReceiver<OutputReport>,
+    /// A `FallbackSinkFactory` (#228) moving itself between the exclusive device and shared,
+    /// `(from, to)`. `None` when the daemon was not started with one -- a pinned exclusive or
+    /// shared output never needs this.
+    pub switches: Option<mpsc::UnboundedReceiver<(OutputSpec, OutputSpec)>>,
     pub engine: engine::Options,
     /// How ReplayGain is chosen; see `phonia_core::replaygain::Mode`. Set once at startup: there
     /// is no runtime way to change it.
@@ -227,13 +232,17 @@ impl Daemon {
         }));
         daemon.outputs.attach(first_sinks, false);
 
-        tokio::spawn(daemon.clone().fan_in(parts.reports));
+        tokio::spawn(daemon.clone().fan_in(parts.reports, parts.switches));
         Ok(daemon)
     }
 
     /// Everything that happens (engine events, queue changes, sink reports) in one place, where
     /// each gets its sequence number.
-    async fn fan_in(self: Arc<Self>, mut reports: mpsc::UnboundedReceiver<OutputReport>) {
+    async fn fan_in(
+        self: Arc<Self>,
+        mut reports: mpsc::UnboundedReceiver<OutputReport>,
+        mut switches: Option<mpsc::UnboundedReceiver<(OutputSpec, OutputSpec)>>,
+    ) {
         let mut engine_events = self.controller.subscribe_events();
         let mut queue_changes = self.controller.queue().subscribe();
         let mut shutdown = self.shutdown.subscribe();
@@ -301,6 +310,14 @@ impl Daemon {
                     let dto = convert::sink_report(&report, &output);
                     *self.last_report.lock().unwrap() = Some(dto.clone());
                     self.publish(|_| ipc::Event::SinkReport(dto));
+                }
+                Some((from, to)) = async {
+                    match switches.as_mut() {
+                        Some(switches) => switches.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.note_fallback_switch(from, to).await;
                 }
                 _ = shutdown.changed() => break,
             }
@@ -951,6 +968,19 @@ impl Daemon {
         // Taking a card or opening a Bluetooth speaker can take a while, and the audio thread
         // may be in the middle of a write.
         let switched = tokio::task::block_in_place(|| self.controller.set_output(factory.clone()));
+        self.announce_output(spec, factory).await;
+        match switched {
+            Ok(()) => Reply::Ok(Payload::Ack),
+            Err(error) => self::error(ErrorCode::Internal, &format!("{error:#}")),
+        }
+    }
+
+    /// Updates `self.outputs` to `spec` and tells clients: the route, and the volume if the new
+    /// output has one. Shared by an explicit `set_output` and an automatic one
+    /// ([`Daemon::note_fallback_switch`]) -- either way the engine has already moved (or, for the
+    /// fallback case, never needed telling: it moved itself), this only catches the daemon's own
+    /// bookkeeping up with it.
+    async fn announce_output(&self, spec: OutputSpec, factory: Arc<dyn SinkFactory>) {
         let entries = self.outputs.list().await;
         self.outputs.switched_to(spec, &entries, factory);
         let route = self.outputs.route();
@@ -962,10 +992,6 @@ impl Daemon {
                 muted: volume.muted,
             });
         }
-        match switched {
-            Ok(()) => Reply::Ok(Payload::Ack),
-            Err(error) => self::error(ErrorCode::Internal, &format!("{error:#}")),
-        }
     }
 
     /// The DAC went away mid-track (#157): moves to the fallback output so it is ready to play
@@ -974,6 +1000,32 @@ impl Daemon {
     async fn fall_back(self: Arc<Self>, id: String) {
         eprintln!("phoniad: the output was lost, switched to {id} (paused)");
         let _ = self.set_output(&id).await;
+    }
+
+    /// A `FallbackSinkFactory` (#228) moved itself between the exclusive device and shared on its
+    /// own, from inside a sink open the engine already made: a track's format didn't fit the DAC,
+    /// or one that does just started again. Only the daemon's own bookkeeping needs to catch up
+    /// -- the route, the signal line and the volume control all have to agree with what is
+    /// actually playing.
+    async fn note_fallback_switch(&self, from: OutputSpec, to: OutputSpec) {
+        if self.outputs.route().id != from.id() {
+            // A manual `ctl output set` already moved on; this message is stale.
+            return;
+        }
+        let Some(factory) = self.outputs.factory() else {
+            return;
+        };
+        match to {
+            OutputSpec::Shared { .. } => {
+                eprintln!(
+                    "phoniad: this track doesn't fit {}, switched to {}",
+                    from.id(),
+                    to.id()
+                )
+            }
+            OutputSpec::Exclusive { .. } => eprintln!("phoniad: back on {}", to.id()),
+        }
+        self.announce_output(to, factory).await;
     }
 
     /// Names the output the daemon started on the way the list of outputs does.
