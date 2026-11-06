@@ -26,6 +26,13 @@ use std::time::Duration;
 const OUTPUT_WAIT: Duration = Duration::from_secs(3);
 const OUTPUT_POLL: Duration = Duration::from_millis(200);
 
+/// How long `Target::Default` waits for the server's answer to stop changing before trusting it
+/// (#228's fallback: the exclusive side just gave its card back over D-Bus, and for a moment the
+/// desktop's default can still be whatever took over while it was busy, the same asynchronous
+/// teardown `output::reserve`'s own retry already accounts for in the other direction).
+const DEFAULT_SETTLE_WAIT: Duration = Duration::from_millis(500);
+const DEFAULT_SETTLE_POLL: Duration = Duration::from_millis(50);
+
 /// Fraction of a second of silence in front of a new stream. The server drops the first ~1024
 /// frames it is given, so this is what it drops.
 const PREFIX_DIVISOR: u32 = 10;
@@ -738,11 +745,25 @@ impl SharedSinkFactory {
     fn resolve(&self, client: &Client) -> Result<protocol::SinkInfo> {
         match &self.target {
             Target::Default => {
-                let info = block_on(client.server_info())
-                    .context("asking the sound server about itself")?;
-                let name = info
-                    .default_sink_name
-                    .ok_or_else(|| anyhow!("the sound server has no default output"))?;
+                let query = || -> Result<CString> {
+                    let info = block_on(client.server_info())
+                        .context("asking the sound server about itself")?;
+                    info.default_sink_name
+                        .ok_or_else(|| anyhow!("the sound server has no default output"))
+                };
+                let deadline = std::time::Instant::now() + DEFAULT_SETTLE_WAIT;
+                let mut previous = query()?;
+                let name = loop {
+                    if std::time::Instant::now() >= deadline {
+                        break previous;
+                    }
+                    std::thread::sleep(DEFAULT_SETTLE_POLL);
+                    let current = query()?;
+                    if current == previous {
+                        break current;
+                    }
+                    previous = current;
+                };
                 block_on(client.sink_info_by_name(name)).context("looking up the default output")
             }
             Target::Named(name) => {
