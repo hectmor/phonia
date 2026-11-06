@@ -136,12 +136,30 @@ async fn run(args: Args) -> Result<()> {
             }),
         )
     });
-    let sinks = build(&output);
     // Only an auto-detected output falls back by itself when lost: a pinned exclusive mode asked
     // for bit-perfect on purpose, so losing the DAC pauses instead (#157).
     let fallback = (settings.mode.value == config::OutputMode::Auto).then(|| settings.shared());
+    // In auto mode, also fall back per track rather than only when the whole device disappears
+    // (#228): a track whose format the exclusive device can't play natively goes through the
+    // shared one instead of failing, and the next one that fits climbs back to the DAC.
+    let (sinks, switches): (Arc<dyn phonia_core::output::SinkFactory>, _) =
+        match (&output, &fallback) {
+            (config::OutputSpec::Exclusive { .. }, Some(shared_spec)) => {
+                let (switch_tx, switches) = mpsc::unbounded_channel();
+                let sinks = phonia_core::output::fallback::FallbackSinkFactory::new(
+                    (output.clone(), build(&output)),
+                    (shared_spec.clone(), build(shared_spec)),
+                    Arc::new(move |from, to| {
+                        let _ = switch_tx.send((from, to));
+                    }),
+                );
+                (sinks, Some(switches))
+            }
+            _ => (build(&output), None),
+        };
     let daemon = Daemon::start(DaemonParts {
         sinks,
+        switches,
         outputs: Outputs::new(output.clone(), build).with_fallback(fallback),
         opener,
         quality: Some(quality),

@@ -143,6 +143,7 @@ async fn fixture_full(
         ))),
         play_log: None,
         reports: report_rx,
+        switches: None,
         engine: options,
         replaygain: phonia_core::replaygain::Mode::default(),
         autoplay: false,
@@ -164,27 +165,32 @@ async fn fixture_full(
     }
 }
 
+/// A stereo 16-bit 44.1 kHz WAV of silence, as a `file:` source, written under `dir`.
+fn wav_file(dir: &std::path::Path, name: &str, frames: usize) -> String {
+    let data = (frames * 4) as u32;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&44_100u32.to_le_bytes());
+    bytes.extend_from_slice(&(44_100u32 * 4).to_le_bytes());
+    bytes.extend_from_slice(&4u16.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data.to_le_bytes());
+    bytes.resize(bytes.len() + frames * 4, 0);
+    let path = dir.join(name);
+    std::fs::write(&path, bytes).unwrap();
+    phonia_ipc::source::file(&path).unwrap()
+}
+
 impl Fixture {
     /// A stereo 16-bit 44.1 kHz WAV of silence, as a `file:` source.
     fn wav(&self, name: &str, frames: usize) -> String {
-        let data = (frames * 4) as u32;
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"RIFF");
-        bytes.extend_from_slice(&(36 + data).to_le_bytes());
-        bytes.extend_from_slice(b"WAVEfmt ");
-        bytes.extend_from_slice(&16u32.to_le_bytes());
-        bytes.extend_from_slice(&1u16.to_le_bytes());
-        bytes.extend_from_slice(&2u16.to_le_bytes());
-        bytes.extend_from_slice(&44_100u32.to_le_bytes());
-        bytes.extend_from_slice(&(44_100u32 * 4).to_le_bytes());
-        bytes.extend_from_slice(&4u16.to_le_bytes());
-        bytes.extend_from_slice(&16u16.to_le_bytes());
-        bytes.extend_from_slice(b"data");
-        bytes.extend_from_slice(&data.to_le_bytes());
-        bytes.resize(bytes.len() + frames * 4, 0);
-        let path = self.dir.join(name);
-        std::fs::write(&path, bytes).unwrap();
-        phonia_ipc::source::file(&path).unwrap()
+        wav_file(&self.dir, name, frames)
     }
 
     fn serve(&self) -> DuplexStream {
@@ -3478,5 +3484,161 @@ async fn recently_played_survives_a_restart_when_saved_to_disk() {
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].source, source);
     f2.finish().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A daemon wired the way `phoniad`'s own `main.rs` wires an auto-mode one (#228): `sinks` is a
+/// `FallbackSinkFactory` over the exclusive and shared factories, and its `on_switch` feeds
+/// `DaemonParts.switches`. Exercises that plumbing end to end, not just the factory alone (see
+/// `output::fallback`'s own unit tests for that).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_track_the_dac_cannot_play_natively_falls_back_to_shared_without_failing() {
+    let dac = FakeSinkFactory::blocking();
+    let shared = FakeSinkFactory::blocking().with_volume();
+    let (switch_tx, switches) = mpsc::unbounded_channel();
+    let exclusive_spec = OutputSpec::Exclusive {
+        device: "hw:fake,0".into(),
+    };
+    let shared_spec = OutputSpec::Shared { sink: None };
+    let sinks = phonia_core::output::fallback::FallbackSinkFactory::new(
+        (exclusive_spec.clone(), dac.clone()),
+        (shared_spec.clone(), shared.clone()),
+        Arc::new(move |from, to| {
+            let _ = switch_tx.send((from, to));
+        }),
+    );
+    let (_reports, report_rx) = mpsc::unbounded_channel();
+    let build: Build = Arc::new(|spec| match spec {
+        OutputSpec::Shared { .. } => FakeSinkFactory::blocking().with_volume(),
+        OutputSpec::Exclusive { .. } => FakeSinkFactory::blocking(),
+    });
+    let outputs = Outputs::new(exclusive_spec, build).with_lister(Arc::new(|| {
+        Box::pin(async {
+            let entry = |id: &str, mode, name: &str, bit_perfect| Entry {
+                id: id.into(),
+                mode,
+                name: name.into(),
+                detail: None,
+                bit_perfect,
+                lossy: false,
+                codec: None,
+                is_default: false,
+            };
+            vec![
+                entry("exclusive:hw:fake,0", Mode::Exclusive, "Fake DAC", true),
+                entry("shared:default", Mode::Shared, "Fake speaker", false),
+            ]
+        })
+    }));
+    let daemon = Daemon::start(DaemonParts {
+        sinks,
+        outputs,
+        opener: Arc::new(DispatchOpener::new(None)),
+        catalog: None,
+        quality: Some(Arc::new(QualityLimits::new(
+            phonia_core::config::Quality::Hires,
+            phonia_core::config::Quality::Lossless,
+        ))),
+        play_log: None,
+        reports: report_rx,
+        switches: Some(switches),
+        engine: Default::default(),
+        replaygain: phonia_core::replaygain::Mode::default(),
+        autoplay: false,
+        recent_path: None,
+    })
+    .unwrap();
+
+    let dir = std::env::temp_dir().join(format!(
+        "phoniad-protocol-test-{}-fallback-228",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let a = wav_file(&dir, "a.wav", 300_000);
+
+    let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+    tokio::spawn(serve_connection(server_side, daemon.clone()));
+    let client = Client::from_stream(
+        client_side,
+        ClientInfo {
+            name: "test".into(),
+            version: "0".into(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let (ids, _, _) = added(client.request(add(&[&a], AddAt::End)).await.unwrap());
+    let (_, mut events) = client.subscribe().await.unwrap();
+
+    // The DAC refuses the very first open, as a real one would for a Low-quality track's rate.
+    dac.fail_next_open_with(anyhow::Error::new(phonia_core::output::caps::Unsupported {
+        device: "hw:fake,0".into(),
+        source: phonia_core::decode::SourceSpec {
+            sample_rate: 22_050,
+            channels: 2,
+            bits_per_sample: 16,
+        },
+        missing: phonia_core::output::caps::Missing::Rate,
+        caps: phonia_core::output::caps::Capabilities {
+            channels: (2, 2),
+            rates: Default::default(),
+        },
+    }));
+    client
+        .request(Request::Play { item: Some(ids[0]) })
+        .await
+        .unwrap();
+
+    // The switch is reported on the open that triggers it, so it can land just before or just
+    // after `TrackStarted` -- wait for whichever comes last.
+    let mut seen = events_until(&mut events, |event| {
+        matches!(event, Event::OutputChanged { .. })
+    })
+    .await;
+    if !seen
+        .iter()
+        .any(|(_, event)| matches!(event, Event::TrackStarted { .. }))
+    {
+        seen.extend(
+            events_until(&mut events, |event| {
+                matches!(event, Event::TrackStarted { .. })
+            })
+            .await,
+        );
+    }
+    assert!(
+        seen.iter()
+            .any(|(_, event)| matches!(event, Event::TrackStarted { .. })),
+        "the track played -- a format mismatch falls back instead of failing it: {seen:?}"
+    );
+    let Some((_, Event::OutputChanged { route })) = seen
+        .iter()
+        .rev()
+        .find(|(_, e)| matches!(e, Event::OutputChanged { .. }))
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        (route.id.as_str(), route.mode),
+        ("shared:default", OutputMode::Shared)
+    );
+
+    let status = client.status().await.unwrap();
+    assert_eq!(
+        status.state,
+        State::Playing,
+        "never paused, let alone failed"
+    );
+    assert_eq!(
+        dac.release_count(),
+        1,
+        "the refused reservation was given back"
+    );
+
+    shared.handles()[0].set_blocking(false);
+    daemon.request_shutdown();
+    daemon.stop_engine().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
