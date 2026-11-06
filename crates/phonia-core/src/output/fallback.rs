@@ -9,10 +9,20 @@ use crate::config::OutputSpec;
 use crate::decode::SourceSpec;
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// Told `(from, to)` when the side actually open changes. Called on the audio thread: must not
 /// block, the same contract `phoniad`'s own sink-report channel already has.
 pub type SwitchHandler = Arc<dyn Fn(OutputSpec, OutputSpec) + Send + Sync>;
+
+/// How long to give the desktop's sound server to reclaim the exclusive device before asking it
+/// for its default output. Releasing (below) hands the device back over D-Bus, and the server
+/// does the actual reclaiming asynchronously -- without this, "default" can still briefly answer
+/// with whatever took over while the device was busy, and the new stream gets stuck there even
+/// after the device is reclaimed (no "default changed" ever fires, since the desktop's own
+/// notion of its default never actually changed). Not a guarantee -- just short enough to be
+/// unnoticeable and long enough to cover this in practice.
+const SETTLE_WAIT: Duration = Duration::from_millis(500);
 
 pub struct FallbackSinkFactory {
     exclusive: (OutputSpec, Arc<dyn SinkFactory>),
@@ -80,6 +90,7 @@ impl SinkFactory for FallbackSinkFactory {
                 // never releases it on its own -- it has to be given back explicitly here, or
                 // the sound server can't drive the same card for the resampled stream.
                 self.exclusive.1.release();
+                std::thread::sleep(SETTLE_WAIT);
                 let sink = self.shared.1.open(spec)?;
                 self.moved_to(true);
                 Ok(sink)
