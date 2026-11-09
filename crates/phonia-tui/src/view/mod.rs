@@ -348,10 +348,7 @@ fn now_playing_header<'a>(state: &State, theme: &Theme) -> Vec<Line<'a>> {
         lines.push(Line::styled(format!("◉ {artist}"), theme.dim));
     }
     if let Some(quality) = track.quality {
-        lines.push(Line::styled(
-            phonia_ipc::fmt::stream_quality(&quality),
-            theme.dim,
-        ));
+        lines.push(Line::styled(quality.delivered.to_string(), theme.dim));
     }
     lines.push(Line::raw(""));
     lines
