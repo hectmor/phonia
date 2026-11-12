@@ -212,6 +212,9 @@ phonia ctl shutdown
   `queue list` is meaningful straight away. A track that is wrong (a missing file, a TIDAL id that
   doesn't exist) is refused and named; one whose details couldn't be fetched right now (TIDAL
   unreachable) is added without them.
+- The queue, shuffle/repeat and the position in the track survive a restart of `phoniad`
+  (`restore_queue`, #37): it comes back **stopped** and never opens the DAC by itself; the first
+  `play` (or `resume`) carries on that track from where it was.
 - `stop` releases the audio device but keeps the queue, so other applications (PipeWire) can use
   the DAC while the daemon is idle.
 - **Sharing the DAC.** In exclusive mode phonia holds the card, so nothing else can play on it. To
