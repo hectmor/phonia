@@ -253,6 +253,24 @@ impl Inner {
         true
     }
 
+    /// Replaces everything with a saved queue (fresh ids), returning the entry that was current.
+    pub(super) fn restore(&mut self, saved: &super::saved::SavedQueue) -> Option<ItemId> {
+        self.clear();
+        self.items = self.new_items(saved.tracks.iter().map(QueueTrack::from));
+        self.order = saved
+            .valid_order()
+            .iter()
+            .map(|&i| self.items[i].id)
+            .collect();
+        self.current = saved
+            .current
+            .and_then(|i| self.items.get(i))
+            .map(|item| item.id);
+        self.shuffle = saved.shuffle;
+        self.repeat = saved.repeat();
+        self.current
+    }
+
     pub(super) fn clear(&mut self) {
         self.items.clear();
         self.order.clear();

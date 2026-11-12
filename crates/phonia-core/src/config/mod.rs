@@ -185,6 +185,8 @@ pub struct Settings {
     pub autoplay: Sourced<bool>,
     /// Whether the daemon registers an MPRIS2 D-Bus service. See #34.
     pub mpris: Sourced<bool>,
+    /// Whether the daemon restores the queue after a restart, and saves it for that. See #37.
+    pub restore_queue: Sourced<bool>,
 }
 
 /// Decides every setting: command line over file over default.
@@ -241,6 +243,7 @@ pub fn resolve(overrides: Overrides, file: &ConfigFile) -> Settings {
         report_plays: Sourced::pick(None, file.tidal.report_plays, true),
         autoplay: Sourced::pick(None, file.playback.autoplay, false),
         mpris: Sourced::pick(None, file.daemon.mpris, true),
+        restore_queue: Sourced::pick(None, file.daemon.restore_queue, true),
     }
 }
 
@@ -613,6 +616,37 @@ mod tests {
         let settings = resolve(Overrides::default(), &ConfigFile::default());
         assert_eq!(
             settings.mpris,
+            Sourced {
+                value: true,
+                origin: Origin::Default
+            }
+        );
+    }
+
+    #[test]
+    fn the_file_can_turn_off_restore_queue() {
+        let file = ConfigFile {
+            daemon: Daemon {
+                restore_queue: Some(false),
+                ..Daemon::default()
+            },
+            ..ConfigFile::default()
+        };
+        let settings = resolve(Overrides::default(), &file);
+        assert_eq!(
+            settings.restore_queue,
+            Sourced {
+                value: false,
+                origin: Origin::File
+            }
+        );
+    }
+
+    #[test]
+    fn restore_queue_defaults_on() {
+        let settings = resolve(Overrides::default(), &ConfigFile::default());
+        assert_eq!(
+            settings.restore_queue,
             Sourced {
                 value: true,
                 origin: Origin::Default

@@ -3,6 +3,7 @@
 //! leaves the machine: this is purely local, and covers local files too, not just TIDAL tracks.
 
 use crate::engine::EndReason;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
@@ -78,34 +79,36 @@ impl RecentlyPlayed {
 /// run, or a platform with no [`state_dir`]); a corrupt one is also treated as empty, after a
 /// warning on stderr -- this is a convenience log, never worth failing a daemon's startup over.
 pub fn load(path: &Path) -> RecentlyPlayed {
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return RecentlyPlayed::default();
-        }
-        Err(error) => {
-            eprintln!(
-                "phonia: reading {path:?}: {error} -- starting with an empty recently played log"
-            );
-            return RecentlyPlayed::default();
-        }
-    };
-    match serde_json::from_str::<RecentlyPlayed>(&text) {
-        Ok(recent) => recent,
-        Err(error) => {
-            eprintln!(
-                "phonia: {path:?} is not a valid recently played log ({error}) -- starting empty"
-            );
-            RecentlyPlayed::default()
-        }
-    }
+    load_json(path, "recently played log")
 }
 
-/// Saves the log to `path`, replacing it in one step (a temporary file, then a rename), so a
+/// Saves the log to `path`; see [`save_json`].
+pub fn save(path: &Path, recent: &RecentlyPlayed) -> std::io::Result<()> {
+    save_json(path, recent)
+}
+
+/// Loads a state file: missing or unreadable or corrupt is `T::default()` (the last two after a
+/// warning on stderr naming `what`), since state is a convenience, never worth failing startup.
+pub fn load_json<T: DeserializeOwned + Default>(path: &Path, what: &str) -> T {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return T::default(),
+        Err(error) => {
+            eprintln!("phonia: reading {path:?}: {error} -- starting with an empty {what}");
+            return T::default();
+        }
+    };
+    serde_json::from_str(&text).unwrap_or_else(|error| {
+        eprintln!("phonia: {path:?} is not a valid {what} ({error}) -- starting empty");
+        T::default()
+    })
+}
+
+/// Saves `value` to `path`, replacing it in one step (a temporary file, then a rename), so a
 /// crash never leaves it half written -- the same precaution `auth::store`'s own session file
 /// takes. Creates `path`'s parent directory if it does not exist yet.
-pub fn save(path: &Path, recent: &RecentlyPlayed) -> std::io::Result<()> {
-    let json = serde_json::to_string(recent).expect("a recently played log always serializes");
+pub fn save_json<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
+    let json = serde_json::to_string(value).expect("state always serializes");
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }

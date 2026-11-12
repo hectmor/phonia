@@ -1413,6 +1413,18 @@ fn seeking_raw_pcm_in_place_also_lands_on_the_exact_frame() {
 }
 
 #[test]
+fn play_from_starts_at_the_requested_frame_and_position() {
+    let frames = 100_000;
+    let mut h = Harness::new(
+        vec![TestTrack::pcm("a", frames)],
+        FakeSinkFactory::autoplay(),
+    );
+    h.send(Command::PlayFrom(TrackRef("a".to_string()), secs(1)));
+    h.labels_until(is_stopped);
+    assert_eq!(h.sink(0).played(), ramp(frames)[48_000 * 2..]);
+}
+
+#[test]
 fn relative_seeks_are_measured_from_what_has_been_heard() {
     let mut h = Harness::new(
         vec![TestTrack::wav("a", 500_000).seekable(SeekMode::InPlace)],

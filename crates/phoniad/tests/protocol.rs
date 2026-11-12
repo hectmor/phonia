@@ -45,12 +45,12 @@ async fn fixture_with(
     blocking: bool,
     options: phonia_core::engine::Options,
 ) -> Fixture {
-    fixture_full(name, blocking, options, None, None, None).await
+    fixture_full(name, blocking, options, None, None, None, None).await
 }
 
 /// A fixture with a catalog of the test's choosing (none, like a daemon with no TIDAL login).
 async fn fixture_with_catalog(name: &str, catalog: Option<Arc<dyn Catalog>>) -> Fixture {
-    fixture_full(name, false, Default::default(), catalog, None, None).await
+    fixture_full(name, false, Default::default(), catalog, None, None, None).await
 }
 
 /// A fixture that persists its recently played log to `recent_path`, so a second fixture pointed
@@ -63,6 +63,7 @@ async fn fixture_with_recent_path(name: &str, recent_path: PathBuf) -> Fixture {
         Default::default(),
         None,
         Some(recent_path),
+        None,
         None,
     )
     .await
@@ -78,6 +79,7 @@ async fn fixture_falling_back(name: &str) -> Fixture {
         None,
         None,
         Some(OutputSpec::Shared { sink: None }),
+        None,
     )
     .await
 }
@@ -89,6 +91,7 @@ async fn fixture_full(
     catalog: Option<Arc<dyn Catalog>>,
     recent_path: Option<PathBuf>,
     fall_back_to: Option<OutputSpec>,
+    queue_path: Option<PathBuf>,
 ) -> Fixture {
     let sinks = if blocking {
         FakeSinkFactory::blocking()
@@ -148,6 +151,7 @@ async fn fixture_full(
         replaygain: phonia_core::replaygain::Mode::default(),
         autoplay: false,
         recent_path,
+        queue_path,
     })
     .unwrap();
     let dir = std::env::temp_dir().join(format!(
@@ -3546,6 +3550,7 @@ async fn a_track_the_dac_cannot_play_natively_falls_back_to_shared_without_faili
         replaygain: phonia_core::replaygain::Mode::default(),
         autoplay: false,
         recent_path: None,
+        queue_path: None,
     })
     .unwrap();
 
@@ -3640,5 +3645,106 @@ async fn a_track_the_dac_cannot_play_natively_falls_back_to_shared_without_faili
     shared.handles()[0].set_blocking(false);
     daemon.request_shutdown();
     daemon.stop_engine().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A fixture that restores and saves its queue at `queue_path` (a temp file, never the real
+/// state directory).
+async fn fixture_with_queue_path(name: &str, queue_path: PathBuf) -> Fixture {
+    fixture_full(
+        name,
+        true,
+        Default::default(),
+        None,
+        None,
+        None,
+        Some(queue_path),
+    )
+    .await
+}
+
+/// #37: a daemon started on a saved queue is stopped with the queue intact; Play resumes the
+/// saved entry at the saved position, and Next before Play goes to the entry after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restored_queue_waits_stopped_and_play_resumes_where_it_was() {
+    let dir = std::env::temp_dir().join(format!("phoniad-queue-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (path, copy) = (dir.join("queue.json"), dir.join("copy.json"));
+
+    // A first daemon builds the saved file: three entries, the middle one current.
+    let f1 = fixture_with_queue_path("queue-restore-1", path.clone()).await;
+    let client = f1.client().await;
+    let sources: Vec<String> = ["a", "b", "c"]
+        .iter()
+        .map(|n| f1.wav(&format!("{n}.wav"), 1_000_000))
+        .collect();
+    let refs: Vec<&str> = sources.iter().map(String::as_str).collect();
+    let (ids, _, _) = added(client.request(add(&refs, AddAt::End)).await.unwrap());
+    let (_, mut events) = client.subscribe().await.unwrap();
+    client
+        .request(Request::Play { item: Some(ids[1]) })
+        .await
+        .unwrap();
+    events_until(&mut events, |e| matches!(e, Event::TrackStarted { .. })).await;
+    f1.daemon.save_queue_now();
+    f1.daemon.request_shutdown();
+    f1.daemon.stop_engine().await;
+    let mut saved: phonia_core::queue::saved::SavedQueue =
+        phonia_core::recent::load_json(&path, "saved queue");
+    assert_eq!(saved.tracks.len(), 3);
+    saved.position_ms = 1_500;
+    phonia_core::recent::save_json(&path, &saved).unwrap();
+    std::fs::copy(&path, &copy).unwrap();
+
+    // Restored: stopped, nothing opened, the queue and its current intact.
+    let f2 = fixture_with_queue_path("queue-restore-2", path.clone()).await;
+    let client = f2.client().await;
+    assert_eq!(client.status().await.unwrap().state, State::Stopped);
+    assert_eq!(f2.sinks.handles().len(), 0, "the device is never opened");
+    let Payload::Queue(queue) = client.request(Request::Queue).await.unwrap() else {
+        panic!("not a queue");
+    };
+    let current = queue.current.expect("the saved current is restored");
+    let source_of = |id| {
+        queue
+            .items
+            .iter()
+            .find(|i| i.id == id)
+            .unwrap()
+            .source
+            .clone()
+    };
+    assert_eq!(queue.items.len(), 3);
+    assert_eq!(source_of(current), sources[1]);
+
+    let (_, mut events) = client.subscribe().await.unwrap();
+    client.request(Request::Play { item: None }).await.unwrap();
+    let seen = events_until(&mut events, |e| matches!(e, Event::Position { .. })).await;
+    assert!(seen.iter().any(
+        |(_, e)| matches!(e, Event::TrackStarted { item_id, .. } if *item_id == Some(current))
+    ));
+    let Some((_, Event::Position { position_ms, .. })) = seen.last() else {
+        unreachable!()
+    };
+    assert!((1_500..2_500).contains(position_ms), "{position_ms}");
+    f2.sinks.handles()[0].set_blocking(false);
+    f2.daemon.request_shutdown();
+    f2.daemon.stop_engine().await;
+
+    // Next before Play goes to the entry after the saved one.
+    let f3 = fixture_with_queue_path("queue-restore-3", copy).await;
+    let client = f3.client().await;
+    let (_, mut events) = client.subscribe().await.unwrap();
+    client.request(Request::Next).await.unwrap();
+    let seen = events_until(&mut events, |e| matches!(e, Event::TrackStarted { .. })).await;
+    let Some((_, Event::TrackStarted { source, .. })) = seen.last() else {
+        unreachable!()
+    };
+    assert_eq!(source.as_deref(), Some(sources[2].as_str()));
+    f3.sinks.handles()[0].set_blocking(false);
+    f3.finish().await;
+    f1.finish().await;
+    f2.finish().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
