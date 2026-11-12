@@ -69,6 +69,7 @@ async fn fixture_with(name: &str, output: OutputSpec, sinks: Arc<FakeSinkFactory
         replaygain: phonia_core::replaygain::Mode::default(),
         autoplay: false,
         recent_path: None,
+        queue_path: None,
     })
     .unwrap();
     let dir =

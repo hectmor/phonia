@@ -66,6 +66,8 @@ pub enum Command {
     /// Plays the given track, replacing whatever is playing. `None` starts from whatever the
     /// supplier considers next, and does nothing if the engine is already loading or playing.
     Play(Option<TrackRef>),
+    /// Plays the given track from the given position, replacing whatever is playing.
+    PlayFrom(TrackRef, Duration),
     /// Stops playback and releases the audio device.
     Stop,
     /// Skips to the supplier's next track.

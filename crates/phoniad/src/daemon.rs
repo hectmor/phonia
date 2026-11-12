@@ -19,6 +19,7 @@ use phonia_core::openers::{DescribeError, DispatchOpener, QualityLimits, Source}
 use phonia_core::output::SinkFactory;
 use phonia_core::output::alsa::SinkReport;
 use phonia_core::play_log::{PlayLog, PlaybackSession, SessionTracker};
+use phonia_core::queue::saved::SavedQueue;
 use phonia_core::queue::{ItemId, Queue, QueueSnapshot, QueueTrack};
 use phonia_core::recent::{PlayedTrack, Tracker as RecentTracker};
 use phonia_ipc as ipc;
@@ -132,6 +133,30 @@ pub struct DaemonParts {
     /// Where the recently played log is saved and loaded from at startup; `None` skips
     /// persistence entirely (no state directory on this platform, or a test that wants none).
     pub recent_path: Option<PathBuf>,
+    /// Where the queue is restored from at startup and saved to (#37); `None` skips both
+    /// (`[daemon] restore_queue = false`, no state directory, or a test that wants none).
+    pub queue_path: Option<PathBuf>,
+}
+
+/// Where and how the queue is saved. Writes go through `lock` and always write the latest value,
+/// so the synchronous save at shutdown can never be overwritten by an older one still in flight.
+struct QueueSave {
+    tx: watch::Sender<SavedQueue>,
+    path: PathBuf,
+    lock: Mutex<()>,
+}
+
+impl QueueSave {
+    fn write(&self) {
+        let _writing = self.lock.lock().unwrap();
+        let saved = self.tx.borrow().clone();
+        if let Err(error) = phonia_core::recent::save_json(&self.path, &saved) {
+            eprintln!(
+                "phonia: saving {:?}: {error} -- the queue may not survive a restart",
+                self.path
+            );
+        }
+    }
 }
 
 pub struct Daemon {
@@ -172,6 +197,9 @@ pub struct Daemon {
     /// (see `phonia_core::recent::state_dir`). `None` just means persistence is skipped --
     /// never a reason to fail starting the daemon.
     recent_path: Option<PathBuf>,
+    queue_save: Option<Arc<QueueSave>>,
+    /// The entry restored at startup and where it was, until the first Play takes it (#37).
+    resume: Mutex<Option<(ItemId, Duration)>>,
 }
 
 impl Daemon {
@@ -181,6 +209,26 @@ impl Daemon {
         let queue = Queue::new(parts.opener.clone() as Arc<dyn TrackOpener>);
         queue.set_replay_gain(parts.replaygain);
         queue.set_autoplay(parts.autoplay);
+        let mut resume = None;
+        let queue_save = parts.queue_path.map(|path| {
+            let saved: SavedQueue = phonia_core::recent::load_json(&path, "saved queue");
+            resume = queue.restore(&saved).map(|id| (id, saved.position()));
+            let (tx, mut changes) = watch::channel(saved);
+            let save = Arc::new(QueueSave {
+                tx,
+                path,
+                lock: Mutex::new(()),
+            });
+            // One writer: saves are ordered, and several changes meanwhile become one write.
+            let writer = save.clone();
+            tokio::spawn(async move {
+                while changes.changed().await.is_ok() {
+                    let writer = writer.clone();
+                    let _ = tokio::task::spawn_blocking(move || writer.write()).await;
+                }
+            });
+            save
+        });
         let first_sinks = parts.sinks.clone();
         let engine = Engine::spawn_with_options(
             tokio::runtime::Handle::current(),
@@ -221,6 +269,8 @@ impl Daemon {
             autoplay: Mutex::new(autoplay::Autoplay::default()),
             recent: Mutex::new(RecentTracker::seeded(recent)),
             recent_path: parts.recent_path,
+            queue_save,
+            resume: Mutex::new(resume),
         });
 
         // The volume can be changed from the desktop's mixer too; the daemon follows and announces it.
@@ -270,7 +320,12 @@ impl Daemon {
                                 let (tidal_id, _) = resolve_tidal_track(meta, &queue);
                                 self.autoplay.lock().unwrap().note_started(tidal_id);
                                 self.consider_autoplay();
+                                self.persist(Some(Duration::ZERO));
                             }
+                            engine::Event::StateChanged(
+                                engine::State::Paused | engine::State::Stopped,
+                            ) => self.persist(None),
+                            engine::Event::Seeked { position } => self.persist(Some(*position)),
                             engine::Event::QueueExhausted => {
                                 self.autoplay.lock().unwrap().queue_exhausted(queue.current);
                             }
@@ -305,6 +360,7 @@ impl Daemon {
                     // turned on mid-track, repeat switched to off, or the entries after the
                     // current one removed.
                     self.consider_autoplay();
+                    self.persist(None);
                 }
                 Some(OutputReport { output, report }) = reports.recv() => {
                     let dto = convert::sink_report(&report, &output);
@@ -410,6 +466,61 @@ impl Daemon {
                     }
                 });
             }
+        }
+    }
+
+    /// Hands the queue as it is now to the writer; `at` overrides the position to save.
+    // shortcut: a hard kill loses the in-track position, add a periodic save if that matters
+    fn persist(&self, at: Option<Duration>) {
+        // After shutdown is asked, only `save_queue_now` writes: stopping the engine must not
+        // overwrite the position with zero.
+        if *self.shutdown.borrow() {
+            return;
+        }
+        self.send_saved(at);
+    }
+
+    fn send_saved(&self, at: Option<Duration>) {
+        let Some(save) = &self.queue_save else {
+            return;
+        };
+        let snapshot = self.controller.snapshot();
+        let position = at.unwrap_or_else(|| match *self.resume.lock().unwrap() {
+            // Not played yet since the restart: keep the position it was restored with.
+            Some((id, at)) if snapshot.current == Some(id) => at,
+            _ => self.controller.status().position,
+        });
+        save.tx
+            .send_replace(SavedQueue::from_snapshot(&snapshot, position));
+    }
+
+    /// Saves the queue right now, on this thread, for a clean shutdown.
+    pub fn save_queue_now(&self) {
+        if let Some(save) = &self.queue_save {
+            self.send_saved(None);
+            save.write();
+        }
+    }
+
+    /// The command to send for a play, resume or toggle: while stopped with a restored track
+    /// waiting, that track from where it was, instead of whatever the queue would offer next.
+    fn resuming(&self, command: Command) -> Command {
+        if self.controller.status().state != engine::State::Stopped {
+            return command;
+        }
+        let resume = self.resume.lock().unwrap().take();
+        match resume {
+            Some((id, at)) if self.controller.snapshot().current == Some(id) => {
+                Command::PlayFrom(id.track_ref(), at)
+            }
+            _ => command,
+        }
+    }
+
+    /// Something other than the restored track was asked for: it is no longer waiting.
+    fn forget_resume(&self) {
+        if self.resume.lock().unwrap().take().is_some() {
+            self.persist(None);
         }
     }
 
@@ -1073,22 +1184,32 @@ impl Daemon {
             Err(error) => self::error(ErrorCode::EngineGone, &format!("{error:#}")),
         };
         match request {
-            Request::Play { item: None } => send(Command::Play(None)),
-            Request::Play { item: Some(id) } => match self.controller.play_item(ItemId(id.0)) {
-                Ok(()) => Reply::Ok(Payload::Ack),
-                Err(error) => self::error(ErrorCode::NotFound, &format!("{error:#}")),
-            },
+            Request::Play { item: None } => send(self.resuming(Command::Play(None))),
+            Request::Play { item: Some(id) } => {
+                self.forget_resume();
+                match self.controller.play_item(ItemId(id.0)) {
+                    Ok(()) => Reply::Ok(Payload::Ack),
+                    Err(error) => self::error(ErrorCode::NotFound, &format!("{error:#}")),
+                }
+            }
             Request::Stop => {
+                self.forget_resume();
                 // An explicit Stop: a fetch already in flight for the entry that was playing
                 // must not resume playback once it lands.
                 self.autoplay.lock().unwrap().cancel();
                 send(Command::Stop)
             }
             Request::Pause => send(Command::Pause),
-            Request::Resume => send(Command::Resume),
-            Request::TogglePause => send(Command::TogglePause),
-            Request::Next => send(Command::Next),
-            Request::Previous => send(Command::Previous),
+            Request::Resume => send(self.resuming(Command::Resume)),
+            Request::TogglePause => send(self.resuming(Command::TogglePause)),
+            Request::Next => {
+                self.forget_resume();
+                send(Command::Next)
+            }
+            Request::Previous => {
+                self.forget_resume();
+                send(Command::Previous)
+            }
             Request::Release => send(Command::Release),
             Request::SetVolume { percent } => self.change_volume(|volume| volume.percent = percent),
             Request::SetMute { mute } => self.change_volume(|volume| volume.muted = mute),
@@ -1111,6 +1232,7 @@ impl Daemon {
                 }
             }
             Request::QueueClear => {
+                self.forget_resume();
                 self.autoplay.lock().unwrap().cancel();
                 self.controller.clear();
                 Reply::Ok(Payload::Ack)

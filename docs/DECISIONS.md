@@ -4153,3 +4153,47 @@ both before and independent of this change (plain pinned exclusive on `hw:sofhda
 wrapper). Worth its own issue; not filed yet.
 
 **#228 is now fully done, one PR.** Issue still open on GitHub as usual -- close by hand.
+
+## 2026-11-12 — #37: the queue survives a restart
+
+Planned with Opus; implemented by a Sonnet subagent and reviewed by Opus.
+
+**4 decisions, all = Opus's recommendation except #4 (the user chose the opt-out setting), approved
+via `AskUserQuestion`:**
+1. **Restore stopped, Play resumes**: the queue comes back with the saved track as current; the
+   daemon stays `Stopped` and never opens the DAC on its own. The first Play (also Resume /
+   TogglePause while stopped) resumes that track at the exact saved position.
+2. **Only the queue is persisted**: tracks, play order, current entry, shuffle, repeat, position.
+   Not autoplay, output or volume (`config.toml` and the mixer stay the source of truth).
+3. **Saved on change + pause/stop/seek/track start + clean shutdown.** No periodic save while
+   playing: a hard kill loses only the in-track position (`shortcut:` comment in `Daemon::persist`).
+4. **Opt-out `[daemon] restore_queue`** (default `true`); `false` neither loads nor saves.
+
+**Implementation:** `recent::load/save` became thin wrappers over generic `load_json`/`save_json`.
+New `queue::saved` (`SavedQueue`, `STATE_FILE = "queue.json"`, `serde(default)` throughout) and
+`Queue::restore`, which gives fresh `ItemId`s, falls back to queue order when the saved order is not
+a permutation, and turns an out-of-range current into `None`. The engine got
+`Command::PlayFrom(TrackRef, Duration)`: `start_track` skips `at - start` frames like `finish_seek`
+does and starts with position `at`; the requested position is a field cleared by `cancel_load`, so a
+later or gapless start never inherits it. `Daemon` keeps `resume: Option<(ItemId, Duration)>`; Play,
+Resume and TogglePause while stopped send `PlayFrom` through `Daemon::resuming` (MPRIS goes through
+the same `handle`), and Play of an entry, Next, Previous, Stop and QueueClear clear it. Saves go
+through one `watch` channel and one writer task (ordered, coalesced); the shutdown save in `main.rs`
+is synchronous and shares a lock with the writer so an older value cannot land after it. No protocol
+change.
+
+**Verification:** new unit tests (`queue::saved`, config,
+`engine::tests::play_from_starts_at_the_requested_frame_and_position`) and a `phoniad` protocol test
+on a temp queue file (stopped with the queue intact, Play resumes at the saved position, Next before
+Play goes to the following entry); no test touches the real state directory. Opus's review caught
+one race: `stop_engine` runs after the shutdown save and its `StateChanged(Stopped)` could still
+reach `fan_in` and save position zero over it, so `persist` now does nothing once shutdown is asked
+and only `save_queue_now` writes. Verified live through a scratch `phoniad` on an isolated socket
+and a scratch `XDG_STATE_HOME` (never the real TUI or state file), on `shared:default` with three
+silent WAVs: queued them, repeat all, played the second, seeked to 1:30, paused, SIGTERM --
+`queue.json` held `current: 1`, `position_ms: 90701`, `repeat: all`; restarted, `status` was stopped
+with the queue, the current entry and repeat intact; `play` resumed the second track at 1:31. With
+`restore_queue = false` nothing was written and `config show` reports it. fmt, clippy `-D warnings`
+and `cargo test --workspace` green.
+
+**#37 is now fully done, one PR.** Issue still open on GitHub as usual -- close by hand.

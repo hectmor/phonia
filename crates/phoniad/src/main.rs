@@ -175,6 +175,12 @@ async fn run(args: Args) -> Result<()> {
         autoplay: settings.autoplay.value,
         recent_path: phonia_core::recent::state_dir()
             .map(|dir| dir.join(phonia_core::recent::STATE_FILE)),
+        queue_path: settings
+            .restore_queue
+            .value
+            .then(phonia_core::recent::state_dir)
+            .flatten()
+            .map(|dir| dir.join(phonia_core::queue::saved::STATE_FILE)),
     })?;
 
     daemon.refresh_route().await;
@@ -223,6 +229,7 @@ async fn run(args: Args) -> Result<()> {
     daemon.request_shutdown();
     let _ = serving.await;
     // Releases the DAC. `_guard` then removes the socket file.
+    daemon.save_queue_now();
     daemon.stop_engine().await;
     Ok(())
 }
