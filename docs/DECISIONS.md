@@ -4197,3 +4197,26 @@ with the queue, the current entry and repeat intact; `play` resumed the second t
 and `cargo test --workspace` green.
 
 **#37 is now fully done, one PR.** Issue still open on GitHub as usual -- close by hand.
+
+## 2026-11-13 — #237: prefer `S32_LE` when the device offers it
+
+**Problem:** on an iFi USB Audio SE (XMOS, `2fc6:f082`), exclusive playback intermittently hissed
+and turned voices metallic while the verdict still read BIT-PERFECT, in `S24_3LE` at 192 kHz and
+in `S16_LE` at 44.1 kHz. With `[daemon] verbose = true` the log showed no underruns and the ALSA
+buffer stayed full, and `AlsaSink` applies no gain, so the bits left phonia intact. With phonia
+closed, `aplay -D hw:SE,0` on 1 kHz tones reproduced it: `S24_3LE` at 192 kHz came out distorted,
+while `S32_LE` at 44.1 and 192 kHz was always clean, as is PipeWire, which drives the DAC in
+`S32_LE`. The device mishandles its packed alternate settings, not the audio.
+
+**Decision:** `caps::choose` returns `S32_LE` whenever the device offers it at the track's rate,
+and the tightest container that fits otherwise. This replaces "the tightest lossless container"
+from #25 part 2. It stays bit-perfect: a narrower sample is zero-padded into the 32-bit
+container, never rounded. It applies to every device, not just the iFi, which is the smallest
+change and matches PipeWire's own default. The Fosi DS2 also offers `S32_LE`, so it moves from
+`S24_3LE` to `S32_LE`, which changes the format on the verdict line but not the audio. A device
+without `S32_LE` keeps the choice it had.
+
+**Verification:** a new `caps` test (`S32_LE` is chosen for 16- and 24-bit sources when offered);
+the existing tests that check the tightest-fit choice on a device without `S32_LE` still pass.
+`cargo test --workspace`, clippy `-D warnings` and fmt are green. A listening test on the iFi with
+the new build is still to be done.
