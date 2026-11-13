@@ -227,6 +227,7 @@ from the same table the keys are read from.
 | `+` `-` / `m` | volume / mute |
 | `s` / `r` / `O` | shuffle / repeat / autoplay |
 | `d`, `J` `K`, `cc` | in the queue: remove, move, clear (two presses) |
+| `gc` | in the queue: go to the track playing |
 | `?` / `q` | help / quit |
 
 ![The help overlay, listing every key by group, scrolling with Ctrl-d](docs/media/help.gif)

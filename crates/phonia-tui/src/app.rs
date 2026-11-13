@@ -1547,6 +1547,19 @@ fn apply(state: &mut State, action: Action) -> Effects {
         Action::RemoveEntry | Action::MoveEntryDown | Action::MoveEntryUp | Action::ClearQueue => {
             return edit_queue(state, action);
         }
+        Action::GoCurrent => {
+            let playing = state.queue.as_ref().and_then(|queue| {
+                let current = queue.current?;
+                queue.items.iter().position(|item| item.id == current)
+            });
+            match playing {
+                Some(index) if in_queue(state) => {
+                    let len = queue_len(state);
+                    state.queue_cursor.select(index, len);
+                }
+                _ => return Effects::default(),
+            }
+        }
         Action::OpenArtist | Action::OpenAlbum | Action::Favorite(..) => {
             return match state.section() {
                 Section::Search if state.search_views.is_empty() => act_on_result(state, action),
@@ -4227,6 +4240,32 @@ mod tests {
         ch(&mut state, 'c');
         ch(&mut state, 'x');
         assert_eq!(ch(&mut state, 'c'), Effects::default());
+    }
+
+    #[test]
+    fn gc_moves_the_queue_cursor_to_the_entry_playing() {
+        let mut state = in_the_queue(5);
+        ch(&mut state, 'g');
+        assert_eq!(
+            ch(&mut state, 'c'),
+            Effects::default(),
+            "nothing is playing"
+        );
+
+        state.queue.as_mut().unwrap().current = Some(phonia_ipc::ItemId(4));
+        ch(&mut state, 'g');
+        assert!(ch(&mut state, 'c').redraw);
+        assert_eq!(state.queue_cursor.selected(), 3);
+
+        ch(&mut state, 'h');
+        state.queue_cursor.first();
+        ch(&mut state, 'g');
+        ch(&mut state, 'c');
+        assert_eq!(
+            state.queue_cursor.selected(),
+            0,
+            "only with the queue focused"
+        );
     }
 
     #[test]

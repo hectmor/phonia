@@ -50,8 +50,8 @@ track is in [AUDIO.md](AUDIO.md). Start at the [README](../README.md).
   live, in queue order (the order `phonia ctl queue list` shows and that edits act on, not the
   shuffled play order), with the one playing marked and the row under the cursor highlighted. With
   the focus on the list (`l`), `j`/`k` select an entry, `Enter` plays it, `d` removes it, `J`/`K`
-  move it down or up (the cursor goes with it) and `cc` clears the queue: two presses, so a stray
-  `c` never does. The bar shows the state, the track and how it
+  move it down or up (the cursor goes with it), `gc` goes to the one playing, and `cc` clears the
+  queue: two presses, so a stray `c` never does. The bar shows the state, the track and how it
   is delivered (bit depth, rate, quality, and what was asked for if TIDAL gave less), a progress
   bar with the times, and the volume and the shuffle and repeat modes when they are on. Playback
   keys: `Space` pauses or resumes, `n`/`p` skip, `<`/`>` seek 10 s back or forward, `+`/`-`
