@@ -172,6 +172,7 @@ pub(super) fn run(ctx: Context) {
         waiting_until: None,
         adopting: false,
         polling: false,
+        play_at: Duration::ZERO,
     }
     .run();
 }
@@ -357,6 +358,8 @@ struct AudioThread {
     /// The wait was given up, the sink drained and the engine is `Loading`: the track still
     /// opening will be started as it arrives, instead of asking for it a second time.
     adopting: bool,
+    /// Where the load asked for by `PlayFrom` should begin; consumed by `start_track`.
+    play_at: Duration,
     /// Something is being waited for: look again soon instead of writing.
     polling: bool,
 }
@@ -449,6 +452,11 @@ impl AudioThread {
             Msg::Command(Command::Play(Some(track))) => {
                 self.interrupt_current();
                 self.request_load(LoadTarget::Track(track));
+            }
+            Msg::Command(Command::PlayFrom(track, at)) => {
+                self.interrupt_current();
+                self.begin_load(LoadTarget::Track(track), at, State::Loading, false);
+                self.play_at = at;
             }
             Msg::Command(Command::Play(None)) => {
                 if self.state == State::Stopped {
@@ -991,11 +999,14 @@ impl AudioThread {
     fn start_track(&mut self, track: Prepared) -> Result<()> {
         let Prepared {
             meta,
-            source,
+            mut source,
             seek,
             start,
             first_chunk,
         } = track;
+        // The supplier starts at or before the requested position; the rest is skipped here.
+        let at = std::mem::take(&mut self.play_at).max(start);
+        source.skip_frames(duration_to_frames(at - start, source.spec().sample_rate));
         self.waiting_until = None;
         self.polling = false;
 
@@ -1024,9 +1035,9 @@ impl AudioThread {
             recent: Vec::new(),
             sink_paused: false,
             frames_written: 0,
-            base: start,
+            base: at,
             duration,
-            position: start,
+            position: at,
             last_position_at: Instant::now(),
             lead_in: 0,
             source_done: false,
@@ -1606,6 +1617,7 @@ impl AudioThread {
     }
 
     fn cancel_load(&mut self) {
+        self.play_at = Duration::ZERO;
         self.generation += 1;
         if let Some(task) = self.load_task.take() {
             task.abort();

@@ -4100,3 +4100,123 @@ matching what TIDAL's own app shows for the same artist. Full workspace green (`
 --workspace`, fmt, clippy -D warnings).
 
 **#217 is now fully done, one PR.** Issue still open on GitHub as usual -- close by hand.
+
+## 2026-11-05 — #228: fall back to shared per track, not just when the DAC disappears
+
+Found live: a TIDAL Low-quality track is 22050 Hz, which the user's DAC doesn't support
+natively; exclusive mode correctly refused to play it (`caps::Unsupported`'s own error text), but
+the user then had to run `phonia ctl output set shared:default` by hand, and switch back by hand
+afterward. Planned with Opus, who traced the actual mechanism before proposing anything: a format
+mismatch is discovered at `AlsaSink::open` (`output/caps.rs`'s `choose`, called from
+`output/alsa.rs`), as one unified `Missing` enum (`Depth`, `Channels`, `Rate`, `DepthAtRate`) --
+and, critically, it is known the moment the engine opens a sink for the next track, before any
+device is touched, unlike #157's DAC-disappearing case (only detectable after the fact, from a
+write failure). A failed exclusive open also never releases its own reservation on its own
+(`reserve.rs`'s `open_reserved_with`) -- a fallback has to release it explicitly, or the sound
+server can't drive the same card for the resampled stream.
+
+**4 decisions, all = Opus's recommendation, approved via `AskUserQuestion`:**
+1. **Only in `mode = "auto"`** -- a pinned `exclusive` asked for bit-perfect or nothing, the same
+   line #157's own fallback already draws (`main.rs`'s `fallback = (mode == Auto).then(...)`).
+2. **Climbs back to the DAC the moment the next track that fits opens**, never held on shared
+   "just in case" -- every sink open tries exclusive first, unconditionally.
+3. **No extra TUI announcement** -- the signal line already shows the change honestly (the route
+   moves, the verdict flips from BIT-PERFECT to SHARED); this isn't an error like #157's loss, so a
+   `playback_error`-style banner would be misleading.
+4. **Every `caps::Unsupported` except `Missing::Depth`** (so: Rate, Channels, DepthAtRate) -- they
+   share the same reasoning (resampled/narrowed beats silence in auto mode); `Depth` can't be
+   played by *any* device, so it stays a real error.
+
+**Implementation:** a new `output::fallback::FallbackSinkFactory` wraps the exclusive and shared
+factories. `open()` always tries exclusive first; on a fallback-worthy `Unsupported`, it releases
+the exclusive reservation and opens shared instead; either direction calls `on_switch(from, to)`
+only when the side actually changed. `phoniad::main` builds it only when `mode = auto` and the
+startup output is exclusive, feeding `on_switch` into a new `DaemonParts.switches` channel;
+`Daemon::note_fallback_switch` catches the daemon's own bookkeeping up (route, signal line, volume
+control) with what the engine already did on its own -- guarded against a stale message that
+arrives after a manual `ctl output set` already moved elsewhere. No protocol change (reuses the
+existing `OutputChanged`/`VolumeChanged` events), no engine change, no TUI change.
+
+Verified live end to end on real hardware and a real TIDAL stream (never the real interactive TUI,
+per the standing caution): a scratch `phoniad` in auto mode on `hw:sofhdadsp,0` (a real device that
+only accepts 48000 Hz) played a real lossless 44.1 kHz track -- the exclusive open correctly failed
+with `caps::Unsupported`, the factory released it and opened `shared:default` instead, and the
+track played start to finish (`State::Playing`, never `Failed`), with `OutputChanged` correctly
+announcing the move. Full workspace green (`cargo test --workspace`, fmt, clippy -D warnings),
+plus a new `output::fallback` unit test module and a `phoniad` protocol test wiring the real
+`FallbackSinkFactory` the way `main.rs` does, not just a mock of the switch logic.
+
+**Also found, out of scope for this issue:** in *pinned* exclusive mode (no fallback), if the very
+first track played after daemon startup fails to open the device, the daemon silently ends up
+`State::Stopped`/`QueueExhausted` with no `TrackEnded{Failed}` or error event at all -- reproduced
+both before and independent of this change (plain pinned exclusive on `hw:sofhdadsp,0`, no
+wrapper). Worth its own issue; not filed yet.
+
+**#228 is now fully done, one PR.** Issue still open on GitHub as usual -- close by hand.
+
+## 2026-11-12 — #37: the queue survives a restart
+
+Planned with Opus; implemented by a Sonnet subagent and reviewed by Opus.
+
+**4 decisions, all = Opus's recommendation except #4 (the user chose the opt-out setting), approved
+via `AskUserQuestion`:**
+1. **Restore stopped, Play resumes**: the queue comes back with the saved track as current; the
+   daemon stays `Stopped` and never opens the DAC on its own. The first Play (also Resume /
+   TogglePause while stopped) resumes that track at the exact saved position.
+2. **Only the queue is persisted**: tracks, play order, current entry, shuffle, repeat, position.
+   Not autoplay, output or volume (`config.toml` and the mixer stay the source of truth).
+3. **Saved on change + pause/stop/seek/track start + clean shutdown.** No periodic save while
+   playing: a hard kill loses only the in-track position (`shortcut:` comment in `Daemon::persist`).
+4. **Opt-out `[daemon] restore_queue`** (default `true`); `false` neither loads nor saves.
+
+**Implementation:** `recent::load/save` became thin wrappers over generic `load_json`/`save_json`.
+New `queue::saved` (`SavedQueue`, `STATE_FILE = "queue.json"`, `serde(default)` throughout) and
+`Queue::restore`, which gives fresh `ItemId`s, falls back to queue order when the saved order is not
+a permutation, and turns an out-of-range current into `None`. The engine got
+`Command::PlayFrom(TrackRef, Duration)`: `start_track` skips `at - start` frames like `finish_seek`
+does and starts with position `at`; the requested position is a field cleared by `cancel_load`, so a
+later or gapless start never inherits it. `Daemon` keeps `resume: Option<(ItemId, Duration)>`; Play,
+Resume and TogglePause while stopped send `PlayFrom` through `Daemon::resuming` (MPRIS goes through
+the same `handle`), and Play of an entry, Next, Previous, Stop and QueueClear clear it. Saves go
+through one `watch` channel and one writer task (ordered, coalesced); the shutdown save in `main.rs`
+is synchronous and shares a lock with the writer so an older value cannot land after it. No protocol
+change.
+
+**Verification:** new unit tests (`queue::saved`, config,
+`engine::tests::play_from_starts_at_the_requested_frame_and_position`) and a `phoniad` protocol test
+on a temp queue file (stopped with the queue intact, Play resumes at the saved position, Next before
+Play goes to the following entry); no test touches the real state directory. Opus's review caught
+one race: `stop_engine` runs after the shutdown save and its `StateChanged(Stopped)` could still
+reach `fan_in` and save position zero over it, so `persist` now does nothing once shutdown is asked
+and only `save_queue_now` writes. Verified live through a scratch `phoniad` on an isolated socket
+and a scratch `XDG_STATE_HOME` (never the real TUI or state file), on `shared:default` with three
+silent WAVs: queued them, repeat all, played the second, seeked to 1:30, paused, SIGTERM --
+`queue.json` held `current: 1`, `position_ms: 90701`, `repeat: all`; restarted, `status` was stopped
+with the queue, the current entry and repeat intact; `play` resumed the second track at 1:31. With
+`restore_queue = false` nothing was written and `config show` reports it. fmt, clippy `-D warnings`
+and `cargo test --workspace` green.
+
+**#37 is now fully done, one PR.** Issue still open on GitHub as usual -- close by hand.
+
+## 2026-11-13 — #237: prefer `S32_LE` when the device offers it
+
+**Problem:** on an iFi USB Audio SE (XMOS, `2fc6:f082`), exclusive playback intermittently hissed
+and turned voices metallic while the verdict still read BIT-PERFECT, in `S24_3LE` at 192 kHz and
+in `S16_LE` at 44.1 kHz. With `[daemon] verbose = true` the log showed no underruns and the ALSA
+buffer stayed full, and `AlsaSink` applies no gain, so the bits left phonia intact. With phonia
+closed, `aplay -D hw:SE,0` on 1 kHz tones reproduced it: `S24_3LE` at 192 kHz came out distorted,
+while `S32_LE` at 44.1 and 192 kHz was always clean, as is PipeWire, which drives the DAC in
+`S32_LE`. The device mishandles its packed alternate settings, not the audio.
+
+**Decision:** `caps::choose` returns `S32_LE` whenever the device offers it at the track's rate,
+and the tightest container that fits otherwise. This replaces "the tightest lossless container"
+from #25 part 2. It stays bit-perfect: a narrower sample is zero-padded into the 32-bit
+container, never rounded. It applies to every device, not just the iFi, which is the smallest
+change and matches PipeWire's own default. The Fosi DS2 also offers `S32_LE`, so it moves from
+`S24_3LE` to `S32_LE`, which changes the format on the verdict line but not the audio. A device
+without `S32_LE` keeps the choice it had.
+
+**Verification:** a new `caps` test (`S32_LE` is chosen for 16- and 24-bit sources when offered);
+the existing tests that check the tightest-fit choice on a device without `S32_LE` still pass.
+`cargo test --workspace`, clippy `-D warnings` and fmt are green. A listening test on the iFi with
+the new build is still to be done.

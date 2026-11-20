@@ -28,6 +28,7 @@ report_plays = true     # report finished plays to TIDAL, for Recently Played (d
 socket = "/run/user/1000/phonia/phoniad.sock"   # default: $XDG_RUNTIME_DIR/phonia/phoniad.sock
 verbose = false
 mpris = true            # register an MPRIS2 D-Bus service for media keys and widgets (default on, #34)
+restore_queue = true    # restore the queue and position after a restart (default on, #37)
 
 [playback]
 gapless = true          # join a track to the next one of the same format with no gap
@@ -152,6 +153,13 @@ autoplay = false        # fetch more tracks from TIDAL when the queue runs dry? 
   `ctl` command (favorite albums and tracks have none either, beyond `library`); shown as a
   fourth tab in the TUI's Library section and a block on Home (#144), Enter opening the artist's
   page, `a`/`A` adding its top tracks whole.
+- **Saved queue** (#37, `[daemon] restore_queue`, default on): the tracks, play order (so a
+  shuffle comes back as it was), the current entry, shuffle, repeat and the position in the
+  track are saved to `$XDG_STATE_HOME/phonia/queue.json` (atomically, a temp file then a rename)
+  on every queue change, track start, pause, stop and seek, and once more on a clean shutdown.
+  Nothing is saved while a track plays, so a hard kill loses the position in the track but not
+  the queue. Autoplay, the output and the volume are not part of it. `restore_queue = false`
+  neither loads nor saves.
 - **Recently played** (#144; the request `recently_played` of protocol 1.15, its own
   `recently_played` capability -- not gated on `catalog`, since it needs no TIDAL call and covers
   local files too): a log the daemon keeps itself, most recent first, deduplicated by source (

@@ -348,10 +348,7 @@ fn now_playing_header<'a>(state: &State, theme: &Theme) -> Vec<Line<'a>> {
         lines.push(Line::styled(format!("◉ {artist}"), theme.dim));
     }
     if let Some(quality) = track.quality {
-        lines.push(Line::styled(
-            phonia_ipc::fmt::stream_quality(&quality),
-            theme.dim,
-        ));
+        lines.push(Line::styled(quality.delivered.to_string(), theme.dim));
     }
     lines.push(Line::raw(""));
     lines
@@ -479,7 +476,7 @@ fn signal_line<'a>(state: &State, theme: &Theme, width: u16) -> Line<'a> {
     };
 
     let mut path = match &track.quality {
-        Some(quality) => format!("TIDAL {}", phonia_ipc::fmt::stream_quality(quality)),
+        Some(quality) => format!("TIDAL {}", quality.delivered),
         None if track
             .source
             .as_deref()
@@ -519,21 +516,17 @@ fn signal_line<'a>(state: &State, theme: &Theme, width: u16) -> Line<'a> {
         route_text.push(' ');
         route_text.push_str(&phonia_ipc::fmt::sample_rate(rate));
     }
+    // The verdict already says SHARED, so a route that just wraps the device (#222) shows the
+    // device alone.
     let device = match &status.route {
-        Some(route) if route.description.contains(&report.device) => route.description.clone(),
-        Some(route) if route.description != report.device => {
+        Some(route) if !route.description.contains(&report.device) => {
             format!("{} ({})", route.description, report.device)
         }
         _ => report.device.clone(),
     };
     let full_path = format!("{path} \u{2192} {route_text} \u{2192} {device}");
 
-    let symbol = if report.bit_perfect {
-        "\u{2714}"
-    } else {
-        "\u{2716}"
-    };
-    let verdict = format!("{symbol} {}", phonia_ipc::fmt::verdict(report));
+    let verdict = phonia_ipc::fmt::verdict(report);
     let verdict_style = if report.bit_perfect {
         theme.accent
     } else if report.mode == Some(phonia_ipc::OutputMode::Shared) {
@@ -1242,7 +1235,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fallback_shows_what_was_asked_for_next_to_the_format() {
+    fn a_fallback_shows_only_the_delivered_tier_on_the_signal_line() {
         let mut state = connected();
         update(
             &mut state,
@@ -1267,10 +1260,8 @@ mod tests {
             }),
         );
         let text = screen(&state, 120, 12);
-        assert!(
-            text.contains("TIDAL lossless (asked for hires) 24-bit / 96 kHz"),
-            "{text}"
-        );
+        assert!(text.contains("TIDAL lossless 24-bit / 96 kHz"), "{text}");
+        assert!(!text.contains("TIDAL lossless (asked for"), "{text}");
     }
 
     /// A connected state with `track` already started at `spec`, so a `SinkReport` sent next has
@@ -1336,6 +1327,7 @@ mod tests {
         assert!(text.contains("S24_3LE"), "{text}");
         assert!(text.contains("hw:1,0"), "{text}");
         assert!(text.contains("BIT-PERFECT"), "{text}");
+        assert!(!text.contains("\u{2714}"), "{text}");
     }
 
     #[test]
@@ -1370,7 +1362,7 @@ mod tests {
     }
 
     #[test]
-    fn the_default_output_does_not_repeat_the_device_name() {
+    fn the_default_output_shows_just_the_device_name() {
         use phonia_ipc::{OutputMode, Route};
         let mut state = playing(SPEC_96K);
         state.status.as_mut().unwrap().route = Some(Route {
@@ -1386,11 +1378,27 @@ mod tests {
             })),
         );
         let text = screen(&state, 120, 12);
+        assert!(text.contains("\u{2192} MOMENTUM TW 4  SHARED"), "{text}");
+        assert!(!text.contains("The desktop's default output"), "{text}");
+        assert!(!text.contains("(MOMENTUM TW 4) (MOMENTUM TW 4)"), "{text}");
+    }
+
+    #[test]
+    fn the_idle_line_still_says_it_follows_the_default() {
+        use phonia_ipc::{OutputMode, Route};
+        let mut state = connected();
+        state.status.as_mut().unwrap().route = Some(Route {
+            id: "shared:default".into(),
+            mode: OutputMode::Shared,
+            description: "The desktop's default output (MOMENTUM TW 4)".into(),
+        });
+        let text = screen(&state, 120, 12);
         assert!(
-            text.contains("The desktop's default output (MOMENTUM TW 4)  \u{2716}"),
+            text.contains(
+                "Output: The desktop's default output (MOMENTUM TW 4) (shared, not bit-perfect)"
+            ),
             "{text}"
         );
-        assert!(!text.contains("(MOMENTUM TW 4) (MOMENTUM TW 4)"), "{text}");
     }
 
     #[test]
@@ -1688,9 +1696,9 @@ mod tests {
     #[test]
     fn on_a_tall_terminal_the_whole_help_shows_without_scrolling() {
         let mut state = State::default();
-        update(&mut state, Msg::Resize(100, 76));
+        update(&mut state, Msg::Resize(100, 77));
         press(&mut state, '?');
-        let text = screen(&state, 100, 76);
+        let text = screen(&state, 100, 77);
         assert!(!text.contains("j/k scroll"), "{text}");
         for wanted in [
             "General",

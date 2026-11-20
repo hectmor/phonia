@@ -8,6 +8,7 @@
 //! entry" is unambiguous.
 
 mod inner;
+pub mod saved;
 
 use crate::engine::{Advance, LoadedTrack, Peek, TrackMeta, TrackOpener, TrackRef, TrackSupplier};
 use crate::replaygain;
@@ -158,6 +159,11 @@ impl Queue {
     /// Moves an entry to position `to` in queue order (clamped). `false` if there is no such entry.
     pub fn move_to(&self, id: ItemId, to: usize) -> bool {
         self.mutate(|inner| inner.move_to(id, to))
+    }
+
+    /// Replaces the queue with a saved one, returning the entry that was current in it.
+    pub fn restore(&self, saved: &saved::SavedQueue) -> Option<ItemId> {
+        self.mutate(|inner| inner.restore(saved))
     }
 
     pub fn clear(&self) {

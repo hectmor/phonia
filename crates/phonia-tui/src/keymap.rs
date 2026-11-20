@@ -22,6 +22,8 @@ pub enum Action {
     Up,
     First,
     Last,
+    /// In the queue, moves the cursor to the entry that is playing.
+    GoCurrent,
     HalfPageDown,
     HalfPageUp,
     FocusNext,
@@ -485,6 +487,13 @@ pub const BINDINGS: &[Binding] = &[
         "K",
         Action::MoveEntryUp,
         "move the selected track up",
+        Group::Queue,
+    ),
+    bind(
+        &[c('g'), c('c')],
+        "gc",
+        Action::GoCurrent,
+        "go to the track playing",
         Group::Queue,
     ),
     bind(

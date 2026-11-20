@@ -64,10 +64,12 @@ async fn fixture_with(name: &str, output: OutputSpec, sinks: Arc<FakeSinkFactory
         catalog: None,
         play_log: None,
         reports: report_rx,
+        switches: None,
         engine: phonia_core::engine::Options::default(),
         replaygain: phonia_core::replaygain::Mode::default(),
         autoplay: false,
         recent_path: None,
+        queue_path: None,
     })
     .unwrap();
     let dir =

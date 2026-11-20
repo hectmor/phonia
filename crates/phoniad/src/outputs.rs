@@ -83,6 +83,11 @@ impl Outputs {
         *self.factory.lock().unwrap() = Some(factory);
     }
 
+    /// The factory of the output the daemon plays on now, if one has been attached yet.
+    pub fn factory(&self) -> Option<Arc<dyn SinkFactory>> {
+        self.factory.lock().unwrap().clone()
+    }
+
     /// The volume, when the output has one phonia can set: always the control's own current
     /// value, never a cached one. A hardware volume can change at any moment (another program, or
     /// someone turning the DAC's own knob), and the control itself is the only truth; this also

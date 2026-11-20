@@ -50,8 +50,8 @@ track is in [AUDIO.md](AUDIO.md). Start at the [README](../README.md).
   live, in queue order (the order `phonia ctl queue list` shows and that edits act on, not the
   shuffled play order), with the one playing marked and the row under the cursor highlighted. With
   the focus on the list (`l`), `j`/`k` select an entry, `Enter` plays it, `d` removes it, `J`/`K`
-  move it down or up (the cursor goes with it) and `cc` clears the queue: two presses, so a stray
-  `c` never does. The bar shows the state, the track and how it
+  move it down or up (the cursor goes with it), `gc` goes to the one playing, and `cc` clears the
+  queue: two presses, so a stray `c` never does. The bar shows the state, the track and how it
   is delivered (bit depth, rate, quality, and what was asked for if TIDAL gave less), a progress
   bar with the times, and the volume and the shuffle and repeat modes when they are on. Playback
   keys: `Space` pauses or resumes, `n`/`p` skip, `<`/`>` seek 10 s back or forward, `+`/`-`
@@ -212,6 +212,9 @@ phonia ctl shutdown
   `queue list` is meaningful straight away. A track that is wrong (a missing file, a TIDAL id that
   doesn't exist) is refused and named; one whose details couldn't be fetched right now (TIDAL
   unreachable) is added without them.
+- The queue, shuffle/repeat and the position in the track survive a restart of `phoniad`
+  (`restore_queue`, #37): it comes back **stopped** and never opens the DAC by itself; the first
+  `play` (or `resume`) carries on that track from where it was.
 - `stop` releases the audio device but keeps the queue, so other applications (PipeWire) can use
   the DAC while the daemon is idle.
 - **Sharing the DAC.** In exclusive mode phonia holds the card, so nothing else can play on it. To
@@ -244,7 +247,7 @@ One connection carries requests, their responses and, once subscribed, events, a
 JSON, so `socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/phonia/phoniad.sock` is a working client:
 
 ```
-< {"type":"hello","protocol":{"major":1,"minor":20},"server":{"name":"phoniad","version":"1.2.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","recently_played","catalog","lyrics","autoplay"]}
+< {"type":"hello","protocol":{"major":1,"minor":22},"server":{"name":"phoniad","version":"1.4.0","pid":1234},"capabilities":["output_release","output_select","volume","gapless","quality","recently_played","catalog","lyrics","autoplay"]}
 > {"id":1,"request":{"type":"hello","protocol":{"major":1,"minor":0},"client":{"name":"me","version":"0"}}}
 < {"type":"response","id":1,"ok":{"type":"ack"}}
 > {"id":2,"request":{"type":"subscribe"}}

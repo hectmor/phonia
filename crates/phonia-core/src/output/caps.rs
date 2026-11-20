@@ -255,7 +255,8 @@ fn rates_text_formats(formats: &[SampleFormat]) -> String {
         .join(", ")
 }
 
-/// The tightest lossless container `caps` offers for `source`, or precisely what is missing.
+/// The lossless container `caps` offers for `source` -- `S32_LE` when there is one, otherwise the
+/// tightest that fits -- or precisely what is missing.
 /// Checked in the order a cause is most useful to know about: an invalid depth is wrong
 /// regardless of any device, a channel mismatch and a missing rate are each one fact about the
 /// device, and a depth that does not fit at an otherwise-accepted rate is the most specific.
@@ -269,6 +270,12 @@ pub fn choose(source: SourceSpec, caps: &Capabilities) -> Result<SampleFormat, M
     let Some(formats) = caps.formats_at(source.sample_rate) else {
         return Err(Missing::Rate);
     };
+    // S32_LE first when offered: some USB DACs (iFi USB Audio SE) intermittently hiss and distort
+    // on their packed 3-byte and 16-bit alternate settings but never on 32-bit, which is also what
+    // PipeWire uses. Still lossless: narrower samples are zero-padded, never rounded.
+    if formats.contains(&SampleFormat::S32Le) {
+        return Ok(SampleFormat::S32Le);
+    }
     formats
         .iter()
         .copied()
@@ -436,6 +443,22 @@ mod tests {
             choose(source(96_000, 20, 2), &ds2_like()),
             Ok(SampleFormat::S24_3Le)
         );
+    }
+
+    #[test]
+    fn s32le_is_preferred_over_narrower_containers_when_offered() {
+        let caps = probe_with(
+            (2, 2),
+            &[],
+            |_rate| true,
+            |_rate, format| format != SampleFormat::S24Le,
+        );
+        for bits in [16, 24] {
+            assert_eq!(
+                choose(source(192_000, bits, 2), &caps),
+                Ok(SampleFormat::S32Le)
+            );
+        }
     }
 
     #[test]

@@ -5750,6 +5750,7 @@ THE SOFTWARE.
 Used by:
 
 - [symphonia-bundle-flac 0.6.1](https://github.com/pdeljanov/Symphonia)
+- [symphonia-codec-aac 0.6.1](https://github.com/pdeljanov/Symphonia)
 - [symphonia-codec-adpcm 0.6.1](https://github.com/pdeljanov/Symphonia)
 - [symphonia-codec-pcm 0.6.1](https://github.com/pdeljanov/Symphonia)
 - [symphonia-codec-vorbis 0.6.1](https://github.com/pdeljanov/Symphonia)

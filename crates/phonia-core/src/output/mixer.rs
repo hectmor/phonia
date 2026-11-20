@@ -252,7 +252,11 @@ fn watch(target: Weak<HardwareVolume>) {
             if mixer.wait(Some(WATCH_POLL_MS)).is_err() {
                 break;
             }
-            let _ = mixer.handle_events();
+            // A removed card (a replugged DAC) makes `wait` return at once and this fail, while
+            // `read_control` still answers from cached values: reopen, or this loop spins forever.
+            if mixer.handle_events().is_err() {
+                break;
+            }
             let Some(this) = target.upgrade() else { return };
             match read_control(&mixer, &info) {
                 Ok(current) => {

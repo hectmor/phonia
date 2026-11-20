@@ -222,6 +222,9 @@ pub struct Daemon {
     /// `replaygain`'s opt-in, since those alter behavior or samples). No command-line flag. See
     /// #34.
     pub mpris: Option<bool>,
+    /// Restore the queue, shuffle/repeat and the position in the track after a restart (and save
+    /// them for that). Default on; off neither loads nor saves. No command-line flag. See #37.
+    pub restore_queue: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -276,6 +279,7 @@ report_plays = false
 socket = "/run/user/1000/phonia/phoniad.sock"
 verbose = true
 mpris = false
+restore_queue = false
 
 [playback]
 gapless = false
@@ -305,6 +309,7 @@ autoplay = true
                     socket: Some("/run/user/1000/phonia/phoniad.sock".into()),
                     verbose: Some(true),
                     mpris: Some(false),
+                    restore_queue: Some(false),
                 },
                 playback: Playback {
                     gapless: Some(false),

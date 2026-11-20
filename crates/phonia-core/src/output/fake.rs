@@ -16,7 +16,7 @@ use super::{
     VolumeHandler,
 };
 use crate::decode::SourceSpec;
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -279,7 +279,7 @@ pub struct FakeSinkFactory {
     handles: Mutex<Vec<FakeSinkHandle>>,
     releases: Mutex<u32>,
     /// Errors the next opens fail with, oldest first.
-    open_failures: Mutex<VecDeque<String>>,
+    open_failures: Mutex<VecDeque<anyhow::Error>>,
     handler: Mutex<Option<ReleaseHandler>>,
     volume: Option<Arc<FakeVolume>>,
 }
@@ -330,10 +330,13 @@ impl FakeSinkFactory {
 
     /// Makes the next open fail with `message`, as a refused reservation would.
     pub fn fail_next_open(&self, message: &str) {
-        self.open_failures
-            .lock()
-            .unwrap()
-            .push_back(message.to_string());
+        self.fail_next_open_with(anyhow!("{message}"));
+    }
+
+    /// Makes the next open fail with a specific error, so a caller that matches on the error's
+    /// type (a `caps::Unsupported`, say) can be tested without a real device.
+    pub fn fail_next_open_with(&self, error: anyhow::Error) {
+        self.open_failures.lock().unwrap().push_back(error);
     }
 
     /// Another program asking for the card, as the D-Bus side would relay it. Blocks until the
@@ -352,8 +355,8 @@ impl FakeSinkFactory {
 
 impl SinkFactory for FakeSinkFactory {
     fn open(&self, spec: SourceSpec) -> Result<Box<dyn AudioSink>> {
-        if let Some(message) = self.open_failures.lock().unwrap().pop_front() {
-            bail!("{message}");
+        if let Some(error) = self.open_failures.lock().unwrap().pop_front() {
+            return Err(error);
         }
         let (sink, handle) = FakeSink::new(spec);
         match self.mode {

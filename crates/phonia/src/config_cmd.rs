@@ -136,6 +136,11 @@ fn format_settings(
             settings.mpris.origin,
         ),
         (
+            "daemon.restore_queue",
+            settings.restore_queue.value.to_string(),
+            settings.restore_queue.origin,
+        ),
+        (
             "playback.gapless",
             settings.gapless.value.to_string(),
             settings.gapless.origin,
@@ -197,6 +202,7 @@ mod tests {
              \x20 daemon.socket               /run/user/1000/phonia/phoniad.sock  (default)\n\
              \x20 daemon.verbose              false                               (default)\n\
              \x20 daemon.mpris                true                                (default)\n\
+             \x20 daemon.restore_queue        true                                (default)\n\
              \x20 playback.gapless            true                                (default)\n\
              \x20 playback.replaygain         off                                 (default)\n\
              \x20 playback.autoplay           false                               (default)"
@@ -230,9 +236,9 @@ mod tests {
         assert!(text.contains("lossless"), "{text}");
         assert_eq!(
             text.matches("(default)").count(),
-            13,
+            14,
             "mode, sink, reserve, release_after_pause, min_quality, session_store, \
-             report_plays, socket, verbose, mpris, gapless, replaygain and autoplay were not written"
+             report_plays, socket, verbose, mpris, restore_queue, gapless, replaygain and autoplay were not written"
         );
     }
 
