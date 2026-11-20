@@ -59,12 +59,18 @@ exists for headphones and speakers, and it says plainly that it is not bit-perfe
   own `org.freedesktop.ReserveDevice1` convention, the same one PipeWire uses, and gives
   it back on pause — then takes it again on resume and continues from the very sample
   you were on.
+- **Wider samples, never rounder ones.** When the DAC offers a 32-bit container phonia
+  uses it, with a 16- or 24-bit track zero-padded into it: still bit-perfect, and it spares
+  the USB DACs that misbehave on their packed 3-byte and 16-bit modes.
+- **A track the DAC can't take falls back, not out.** In `auto` mode a track whose format
+  the exclusive device refuses plays through shared output instead, labelled as such, and
+  the next one that fits goes back to the DAC.
 - **Hardware volume** driven on the card's own mixer control when it has one, so the
   stream itself stays untouched.
 - **Shared mode** through PipeWire or PulseAudio for any output at all, labelled as not
   bit-perfect everywhere it appears.
 
-![The playback bar: 24-bit/192 kHz reaching the DAC untouched, with the transport keys](docs/media/playback-bar.gif)
+![The playback bar: 24-bit/192 kHz reaching the DAC untouched, gc jumping the queue to the track playing, and the transport keys](docs/media/playback-bar.gif)
 
 **Interface**
 
@@ -73,7 +79,7 @@ exists for headphones and speakers, and it says plainly that it is not bit-perfe
   with a half-block fallback, and nothing at all rather than something that looks wrong.
 - **The signal path, always visible**: what is playing, through what format, to which
   device, with the same verdict `phonia ctl status` prints —
-  `TIDAL hires 24-bit / 192 kHz → S24_3LE → Fosi Audio DS2 (hw:1,0)  ✔ BIT-PERFECT`.
+  `TIDAL hires 24-bit / 192 kHz → S32_LE → Fosi Audio DS2 (hw:1,0)  ✔ BIT-PERFECT`.
 - **The terminal's own sixteen colours** by default, so it follows your palette; `NO_COLOR` is
   honoured. Or a built-in palette (`gruvbox`, `dracula`, `nord`) chosen in `theme.toml`
   ([CONFIGURATION.md](docs/CONFIGURATION.md)).
@@ -95,8 +101,8 @@ exists for headphones and speakers, and it says plainly that it is not bit-perfe
 
 - Search across tracks, albums, artists and playlists, each list paged as you reach its
   end.
-- Album, artist and playlist pages; an artist's bio, top tracks, albums, and EPs and
-  singles.
+- Album, artist and playlist pages; an artist's bio, top tracks, albums, EPs and
+  singles, and **similar artists** — TIDAL's own "Fans also like".
 - Your favorites — tracks, albums, artists — and the playlists you made.
 - **Favorite from the keyboard**: `fas`, `far`, `faa` add the track, album or artist under
   the cursor to your TIDAL favorites, and `fds`, `fdr`, `fda` remove it. The direction is
@@ -110,7 +116,7 @@ exists for headphones and speakers, and it says plainly that it is not bit-perfe
 - **"Albums you'll enjoy"** on Home: TIDAL's own editorial recommendation list, built from
   your listening history.
 
-![Pressing ga on a track opens its artist: picture, bio, top tracks, albums, EPs and singles](docs/media/artist.gif)
+![Pressing ga on a track opens its artist: picture, bio, top tracks, albums, EPs and singles, and similar artists](docs/media/artist.gif)
 
 ![Synced lyrics following the line being sung](docs/media/lyrics.gif)
 
@@ -228,6 +234,7 @@ from the same table the keys are read from.
 | `s` / `r` / `O` | shuffle / repeat / autoplay |
 | `d`, `J` `K`, `cc` | in the queue: remove, move, clear (two presses) |
 | `gc` | in the queue: go to the track playing |
+| `V` | mark a block of rows, then `d` `J` `K` in the queue or `a` `A` anywhere else; `Esc` leaves |
 | `?` / `q` | help / quit |
 
 ![The help overlay, listing every key by group, scrolling with Ctrl-d](docs/media/help.gif)
