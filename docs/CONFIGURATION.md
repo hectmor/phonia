@@ -54,8 +54,9 @@ autoplay = false        # fetch more tracks from TIDAL when the queue runs dry? 
   and `status` show it, with what was asked for when it was more. When TIDAL answers a tier with an HTTP 4xx (other than 401,
   408 and 429) or with a manifest that can't be read, phonia asks again one tier lower, down to
   `min_quality`; network errors, timeouts and 5xx are not retried, so an outage never shows up as
-  a lower quality. A track that is seeked keeps the tier it started in. phonia
-  can't decode AAC yet, so `high` and `low` only make sense once that is added.
+  a lower quality. A track that is seeked keeps the tier it started in. `high` and
+  `low` are AAC, which phonia decodes, but lossy: set `min_quality` below `lossless` only if you
+  want them.
 - **Precedence** is command line, then the file, then the built-in default. The default mode,
   `auto`, picks the device for you: a USB sound card with playback (the DAC) if one is plugged
   in, else the desktop's default output. Pinning `mode = "exclusive"` with no device configured
