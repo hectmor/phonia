@@ -22,6 +22,7 @@ on, and the [README](README.md) for what phonia is.
 | [`v1.2.0`](https://github.com/hectmor/phonia/releases/tag/v1.2.0) | 2026-10-31 | Additive, no breaking changes: TOML themes (#38), the TUI owning its own `phoniad` (#192), `ga`/`gr` reach (#194), favorite add/remove (#196), the scroll-window fix (#198), docs/screenshot catch-up (#200), auto output selection and DAC-lost handling (#157), artist and album everywhere over protocol 1.20 (#207), and the device-name fix (#211) |
 | [`v1.3.0`](https://github.com/hectmor/phonia/releases/tag/v1.3.0) | 2026-11-03 | Additive, no breaking changes: "Albums you'll enjoy" on Home over protocol 1.21 (#214), similar artists on the artist page over protocol 1.22 (#217), and vim-style `shift+V` visual block selection in the Queue, Search and any open view (#219) |
 | [`v1.4.0`](https://github.com/hectmor/phonia/releases/tag/v1.4.0) | 2026-11-20 | Additive, no breaking changes: a persistent queue and position across daemon restarts (#37), per-track fallback to shared output when the exclusive device can't play a format (#228, #231), AAC decoding (#226), `S32_LE` preferred on USB DACs that offer it (#237), `gc` in the queue (#239), the hardware-volume CPU spin after a replug (#241), and signal-path trims (#222, #224, #234) |
+| [`v1.5.0`](https://github.com/hectmor/phonia/releases/tag/v1.5.0) | 2026-11-22 | Additive, no breaking changes: `ga`/`gr` now also open the artist/album of a row in Home's "Albums you'll enjoy" and "Favorite albums" (#246) |
 
 Earlier tags (`v0.2.0`–`v0.4.0`) were cut on `develop` before `main` was kept
 current, and the workspace version was not raised with them; `v1.0.0` is the
@@ -164,11 +165,12 @@ deliberately separate, not-yet-investigated future issue, the same territory
 
 ## Right now
 
-`v1.4.0` is out, bringing #37 (persistent queue), #228 (per-track fallback
-to shared output), the AAC fix (#226), `S32_LE` on USB DACs (#237), `gc`
-(#239) and the hardware-volume CPU fix (#241) into `main`. Phases 0–3, 6 and
-7 stay closed; phase 4 is in progress, with #196 part 2 and #35–#36 still
-unscoped. #157's own follow-up bug, #206, is still open.
+`v1.5.0` is out, fixing #246 (`ga`/`gr` on Home's album rows) on top of
+`v1.4.0`'s #37 (persistent queue), #228 (per-track fallback to shared
+output), the AAC fix (#226), `S32_LE` on USB DACs (#237), `gc` (#239) and the
+hardware-volume CPU fix (#241). Phases 0–3, 6 and 7 stay closed; phase 4 is
+in progress, with #196 part 2 and #35–#36 still unscoped. #157's own
+follow-up bug, #206, is still open.
 
 What is actually left, in no committed order:
 

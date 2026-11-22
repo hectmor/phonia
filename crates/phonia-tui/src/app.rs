@@ -2902,6 +2902,12 @@ fn act_on_home_result(state: &mut State, action: Action) -> Effects {
                     cover: played.cover.clone(),
                 }),
             ),
+            // Covers both "Albums you'll enjoy" and "Favorite albums" (#246): both blocks
+            // render as this same variant. `gr` here is always a no-op, same as in Library
+            // (`act_on_library_result`) -- it's already the album.
+            home::Selected::Album(album) => {
+                open_artist_or_album(state, action, album.artists.first().cloned(), None)
+            }
             _ => Effects::default(),
         };
     }
@@ -6815,6 +6821,73 @@ mod tests {
             state.library_views.is_empty() && state.search_views.is_empty(),
             "opened onto Home, not Library or Search"
         );
+    }
+
+    /// A favorite album with a credited artist, on Home (not Library): "Albums you'll enjoy"
+    /// and "Favorite albums" both render these rows the same way (#246), so this covers either.
+    fn home_with_favorite_album_artist() -> State {
+        let mut state = State::default();
+        let effects = update(&mut state, connected_msg(&["catalog"]));
+        let [
+            Cmd::Request {
+                tag: library_tag, ..
+            },
+            ..,
+        ] = effects.commands.as_slice()
+        else {
+            panic!(
+                "expected the library request first, got {:?}",
+                effects.commands
+            );
+        };
+        let mut album = library_album("9", "Issues");
+        album.artists = vec![phonia_ipc::ArtistRef {
+            id: "780".into(),
+            name: "Korn".into(),
+        }];
+        update(
+            &mut state,
+            Msg::Response {
+                tag: *library_tag,
+                result: Ok(Payload::Library {
+                    favorite_tracks: phonia_ipc::Page {
+                        items: vec![],
+                        total: 0,
+                        offset: 0,
+                    },
+                    favorite_albums: phonia_ipc::Page {
+                        items: vec![album],
+                        total: 1,
+                        offset: 0,
+                    },
+                    my_playlists: phonia_ipc::Page {
+                        items: vec![],
+                        total: 0,
+                        offset: 0,
+                    },
+                }),
+            },
+        );
+        ch(&mut state, 'l'); // the list, not the sidebar
+        ch(&mut state, 'j'); // the album
+        state
+    }
+
+    #[test]
+    fn ga_on_a_home_favorite_album_opens_its_artist() {
+        let mut state = home_with_favorite_album_artist();
+        ch(&mut state, 'g');
+        let (tag, request) = tagged(ch(&mut state, 'a'));
+        assert!(matches!(tag, Tag::View { .. }));
+        assert!(matches!(request, Request::Artist { ref id, .. } if id == "780"));
+    }
+
+    #[test]
+    fn gr_on_a_home_favorite_album_does_nothing() {
+        // Already on that album; nothing sensible to open.
+        let mut state = home_with_favorite_album_artist();
+        ch(&mut state, 'g');
+        assert!(ch(&mut state, 'r').commands.is_empty());
     }
 
     /// Same regression #140 fixed for the library, now covered for Home too: a track inside a
